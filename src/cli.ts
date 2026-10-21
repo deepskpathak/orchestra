@@ -12,6 +12,7 @@ import { excludeOrchestra } from './git.ts';
 import { guardMain } from './guard.ts';
 import { PACKAGE_ROOT, currentVersion, listVersions, promote, readArchive, seedHarness } from './harness.ts';
 import { DEFAULT_PROJECT_CONFIG, Store, findRepoRoot } from './store.ts';
+import { serve } from './web/server.ts';
 import { compactLine, renderDashboard, renderStats, renderStatusLine } from './tui/render.ts';
 import type { Run } from './types.ts';
 
@@ -22,6 +23,8 @@ Usage:
   orchestra run "<goal>"         Plan, build, verify, merge, learn (live dashboard on a TTY)
       --detach                   Run in the background; follow with \`orchestra watch\`
       --no-evolve                Skip the automatic evolution check after the run
+      --serve                    Also serve the web dashboard while the run is live
+  orchestra serve [--port N]     Web dashboard on localhost (default 4317), read-only
   orchestra watch [runId]        Full-screen live dashboard (q to quit)
   orchestra status [runId]       One-shot board of the current or given run
   orchestra stats                Factory health per harness version (self-evaluation)
@@ -97,6 +100,7 @@ export function detectTestCommand(root: string): string | null {
 async function cmdRun(args: string[]): Promise<void> {
   const detach = args.includes('--detach');
   const noEvolve = args.includes('--no-evolve');
+  const withWeb = args.includes('--serve');
   const goal = args.filter((a) => !a.startsWith('--')).join(' ').trim();
   if (!goal) die('Usage: orchestra run "<goal>"');
   const store = storeOrDie();
@@ -112,10 +116,12 @@ async function cmdRun(args: string[]): Promise<void> {
     });
     child.unref();
     console.log(`♫ orchestra run started in background (pid ${child.pid}).`);
-    console.log(`  live dashboard: orchestra watch    snapshot: orchestra status    log: ${log}`);
+    console.log(`  live dashboard: orchestra watch | orchestra serve    snapshot: orchestra status    log: ${log}`);
     return;
   }
 
+  const web = withWeb ? await serve({ store }) : null;
+  if (web) console.log(`♫ web dashboard: ${web.url}`);
   const r = runner();
   const live = isTTY() ? liveScreen() : null;
   let printed = 0;
@@ -135,6 +141,7 @@ async function cmdRun(args: string[]): Promise<void> {
   const c = harvest(store, run);
   if (c) console.log(`♫ harvested run into Factory Eval (${listEvals(store).length} cases)`);
   console.log(summary(run));
+  await web?.close();
 
   if (!noEvolve && evolutionDue(store)) {
     console.log('♫ evolution due: improving the harness…');
@@ -213,6 +220,16 @@ async function cmdWatch(args: string[]): Promise<void> {
   };
   draw();
   setInterval(draw, 150);
+}
+
+async function cmdServe(args: string[]): Promise<void> {
+  const store = storeOrDie();
+  const i = args.indexOf('--port');
+  const port = i >= 0 ? Number(args[i + 1]) : undefined;
+  if (port !== undefined && !(Number.isInteger(port) && port > 0 && port < 65536)) die('Usage: orchestra serve [--port N]');
+  const web = await serve({ store, port });
+  console.log(`♫ orchestra dashboard: ${web.url}  (read-only, 127.0.0.1 only, ctrl-c to stop)`);
+  process.on('SIGINT', () => void web.close().then(() => process.exit(0)));
 }
 
 function cmdStatus(args: string[]): void {
@@ -321,6 +338,9 @@ export async function main(argv: string[]): Promise<void> {
       break;
     case 'watch':
       await cmdWatch(args);
+      break;
+    case 'serve':
+      await cmdServe(args);
       break;
     case 'status':
       cmdStatus(args);

@@ -12,9 +12,9 @@ Steps:
 
 1. If `.orchestra/config.json` does not exist in the repo root, run `orchestra init` and show the user the detected test command. If none was detected, ask the user for one and set `testCommand` in `.orchestra/config.json` before continuing; the factory self-verifies far better with a real test command.
 2. Start the run with the Bash tool using `run_in_background: true`:
-   `orchestra run "<the goal, quoted>"`
-   Output is one progress line per event when not attached to a terminal.
-3. Tell the user, in one line, that the full live dashboard is available in any terminal with `orchestra watch`, and the statusline shows progress if they ran `/orchestra:setup`.
+   `orchestra run "<the goal, quoted>" --serve`
+   Output is one progress line per event when not attached to a terminal. The first line is the web dashboard URL.
+3. Tell the user, in one line, the web dashboard URL from the first output line (it lives until the run ends; `/orchestra:serve` reopens it later), that `orchestra watch` gives the terminal view, and the statusline shows progress if they ran `/orchestra:setup`.
 4. When the background command finishes, run `orchestra status --plain` and show the board inside a code block. Then summarise in plain language: tasks merged, repairs, failures, satisfaction, cost, and whether the harness evolved.
 5. Give the review and land commands printed by the run (`git log ...`, `git merge orchestra/<run>/integration`). Do not merge for the user unless they ask.
 

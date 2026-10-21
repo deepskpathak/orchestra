@@ -59,6 +59,7 @@ npm link
 |---|---|---|
 | `/orchestra:setup` | `orchestra init` | Creates `.orchestra/`, detects the test command, offers the statusline |
 | `/orchestra:run <goal>` | `orchestra run "<goal>"` | Full factory run. Shows the live dashboard on a TTY and progress lines otherwise |
+| `/orchestra:serve` | `orchestra serve` | Read-only web dashboard on localhost (default 4317): live runs, task diffs, verdicts, logs |
 | `/orchestra:status` | `orchestra status` | One-shot board |
 | | `orchestra watch` | Full-screen live dashboard (run it in a second terminal tab) |
 | `/orchestra:stats` | `orchestra stats` | Self-evaluation: health per harness version and trends |
