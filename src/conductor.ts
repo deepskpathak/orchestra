@@ -20,6 +20,74 @@ export interface ConductorOptions {
   onUpdate?: (run: Run) => void;
 }
 
+// ---------- prompt builders ----------
+// Sections run from most stable to most volatile so the shared `prefix` is byte-identical across
+// tasks and attempts (prompt-cache friendly). Never put timestamps, attempt numbers or task
+// statuses in a prefix.
+
+export interface BuiltPrompt {
+  prefix: string;
+  body: string;
+}
+
+export const joinPrompt = (p: BuiltPrompt): string => [p.prefix, p.body].filter(Boolean).join('\n\n');
+
+const bullets = (items: string[]): string => items.map((a) => `- ${a}`).join('\n');
+
+export function plannerPrompt(i: { goal: string; files: string[]; testCommand?: string; learnings: string }): BuiltPrompt {
+  return {
+    prefix: [
+      `LEARNINGS:\n${i.learnings}`,
+      `REPOSITORY FILES (first ${i.files.length}):\n${i.files.join('\n')}`,
+      `TEST COMMAND: ${i.testCommand ?? '(none configured)'}`,
+      `GOAL:\n${i.goal}`,
+    ].join('\n\n'),
+    body: 'Produce the task graph and hidden scenarios.',
+  };
+}
+
+export function workerPrompt(i: { goal: string; learnings: string; testCommand?: string; task: Task; others: string[] }): BuiltPrompt {
+  const { task } = i;
+  return {
+    prefix: [
+      `LEARNINGS:\n${i.learnings}`,
+      `TEST COMMAND: ${i.testCommand ?? '(none configured; run relevant tests you find)'}`,
+      `OVERALL GOAL (context only):\n${i.goal}`,
+    ].join('\n\n'),
+    body: [
+      `YOUR TASK ${task.id}: ${task.title}\n${task.description}`,
+      `ACCEPTANCE CRITERIA:\n${bullets(task.acceptance)}`,
+      `OTHER TASKS (owned by other workers, do not do them):\n${i.others.join('\n') || '(none)'}`,
+      task.notes.length ? `REPAIR NOTES (previous attempt was rejected, fix all of these):\n${bullets(task.notes)}` : '',
+    ]
+      .filter(Boolean)
+      .join('\n\n'),
+  };
+}
+
+export function judgePrompt(i: {
+  task: Task;
+  scenarios: Scenario[];
+  workerText: string;
+  testCommand?: string;
+  tests: { ok: boolean; tail: string } | null;
+  diff: string;
+}): BuiltPrompt {
+  const { task, tests } = i;
+  return {
+    prefix: `HIDDEN SCENARIOS for the whole goal (judge only the parts this task is responsible for):\n${i.scenarios
+      .map((s) => `- ${s.id}: GIVEN ${s.given} WHEN ${s.when} THEN ${s.then}`)
+      .join('\n') || '(none)'}`,
+    body: [
+      `TASK ${task.id}: ${task.title}\n${task.description}`,
+      `ACCEPTANCE CRITERIA:\n${bullets(task.acceptance)}`,
+      `WORKER SUMMARY (unverified):\n${i.workerText.slice(0, 3000)}`,
+      tests ? `TEST RESULT (${i.testCommand}): ${tests.ok ? 'PASSED' : 'FAILED'}\n${tests.tail}` : 'TEST RESULT: no test command configured',
+      `DIFF vs base:\n${i.diff}`,
+    ].join('\n\n'),
+  };
+}
+
 const PLAN_SCHEMA = {
   type: 'object',
   properties: {
@@ -170,13 +238,13 @@ export class Conductor {
     const learnings = readLearnings(store);
     const cfg = store.config();
     const files = g.trackedFiles(this.integration.path);
-    const prompt = [
-      `GOAL:\n${run.goal}`,
-      `REPOSITORY FILES (first ${files.length}):\n${files.join('\n')}`,
-      `TEST COMMAND: ${cfg.testCommand ?? '(none configured)'}`,
-      `LEARNINGS:\n${formatLearnings(learnings, 'planner')}`,
-      'Produce the task graph and hidden scenarios.',
-    ].join('\n\n');
+    const built = plannerPrompt({
+      goal: run.goal,
+      files,
+      testCommand: cfg.testCommand,
+      learnings: formatLearnings(learnings, 'planner'),
+    });
+    const prompt = joinPrompt(built);
 
     const res = await this.call('planner', undefined, 1, {
       prompt,
@@ -240,20 +308,18 @@ export class Conductor {
 
     const learnings = readLearnings(store);
     const others = this.run.tasks.filter((t) => t.id !== task.id).map((t) => `- ${t.id} ${t.title} [${t.status}]`);
-    const workerPrompt = [
-      `OVERALL GOAL (context only):\n${this.run.goal}`,
-      `YOUR TASK ${task.id}: ${task.title}\n${task.description}`,
-      `ACCEPTANCE CRITERIA:\n${task.acceptance.map((a) => `- ${a}`).join('\n')}`,
-      `OTHER TASKS (owned by other workers, do not do them):\n${others.join('\n') || '(none)'}`,
-      `TEST COMMAND: ${cfg.testCommand ?? '(none configured; run relevant tests you find)'}`,
-      `LEARNINGS:\n${formatLearnings(learnings, 'worker')}`,
-      task.notes.length ? `REPAIR NOTES (previous attempt was rejected, fix all of these):\n${task.notes.map((n) => `- ${n}`).join('\n')}` : '',
-    ]
-      .filter(Boolean)
-      .join('\n\n');
+    const prompt = joinPrompt(
+      workerPrompt({
+        goal: this.run.goal,
+        learnings: formatLearnings(learnings, 'worker'),
+        testCommand: cfg.testCommand,
+        task,
+        others,
+      }),
+    );
 
     const work = await this.call('worker', task, task.attempts, {
-      prompt: workerPrompt,
+      prompt,
       cwd: wt.path,
       allowedTools: cfg.allowedTools,
       disallowedTools: cfg.disallowedTools,
@@ -295,16 +361,16 @@ export class Conductor {
     const tests = cfg.testCommand ? g.runTests(cwd, cfg.testCommand) : null;
     if (tests) this.emit('log', `${task.id} tests ${tests.ok ? 'passed' : 'FAILED'}`, undefined, task.id);
     const headBefore = g.head(cwd);
-    const prompt = [
-      `TASK ${task.id}: ${task.title}\n${task.description}`,
-      `ACCEPTANCE CRITERIA:\n${task.acceptance.map((a) => `- ${a}`).join('\n')}`,
-      `HIDDEN SCENARIOS for the whole goal (judge only the parts this task is responsible for):\n${this.scenarios
-        .map((s) => `- ${s.id}: GIVEN ${s.given} WHEN ${s.when} THEN ${s.then}`)
-        .join('\n') || '(none)'}`,
-      `WORKER SUMMARY (unverified):\n${work.text.slice(0, 3000)}`,
-      tests ? `TEST RESULT (${cfg.testCommand}): ${tests.ok ? 'PASSED' : 'FAILED'}\n${tests.tail}` : 'TEST RESULT: no test command configured',
-      `DIFF vs base:\n${g.diffSince(cwd, base)}`,
-    ].join('\n\n');
+    const prompt = joinPrompt(
+      judgePrompt({
+        task,
+        scenarios: this.scenarios,
+        workerText: work.text,
+        testCommand: cfg.testCommand,
+        tests,
+        diff: g.diffSince(cwd, base),
+      }),
+    );
 
     // A judge crash or budget exhaustion says nothing about the worker: retry the judge alone, once.
     let v: Partial<Verdict> | undefined;
