@@ -1,169 +1,115 @@
 # ♫ Orchestra
 
-A self-improving, self-evaluating, self-correcting multi-agent software factory built on Claude Code.
+**A self-improving multi-agent software factory built on Claude Code.**
 
-You give it a goal. It plans a task graph, builds tasks in parallel git worktrees, verifies each one with tests plus an independent judge working from hidden scenarios, repairs what fails, merges through a serialized queue, writes down what it learned, and periodically evolves its own prompts and config. Promotion happens only when a measured eval shows a gain.
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+## What it is
+
+You give Orchestra a goal. It plans a task graph, builds tasks in parallel git worktrees, verifies each one with tests plus an independent judge working from hidden scenarios, repairs what fails, merges through a serialized queue, records what it learned, and periodically evolves its own prompts and config. A new harness version is promoted only when a measured eval shows a gain.
 
 ```
 ╭─ ♫ ORCHESTRA  r20261021-2022-77o1  harness v1 ──────────────────────────────── 00:01 ─╮
 │ Goal Build a tiny CLI with config loading and docs                                     │
 │ ✓ PLAN  ─  · BUILD  ─  ▶ VERIFY  ─  · MERGE  ─  · LEARN                                │
 │ ███████░░░░░░░░░░░░░░░░░░░ 1/4  ✓1 ●2 ⟳0 ✗0  $1.04  RUNNING                            │
-├─ Agents (2) ───────────────────────────────────────────────────────────────────────────┤
-│ ⠸ judge     T3   opus · 1 tools · 00:00  Bash git diff                                 │
-│ ⠼ worker    T2   sonnet · 3 tools · 00:00  Edit src/config.ts                          │
 ├─ Tasks ────────────────────────────────────────────────────────────────────────────────┤
 │ ✓ T1   merged   ███████░ 0.89  try 1  $0.26  Core module                               │
 │ ⠸ T2   running  ███░░░░░ 0.40  try 2  $0.46  Config loader                             │
 │ ⠸ T3   judging  ░░░░░░░░ ----  try 1  $0.20  CLI wiring ⇠ T1                           │
-│ ◌ T4   pending  ░░░░░░░░ ----  try -  $0.00  Docs ⇠ T2,T3                              │
-├─ Events ───────────────────────────────────────────────────────────────────────────────┤
-│ 00:01 T2 FAIL 0.40: Missing edge case                                                  │
-│ 00:01 T2 -> repair: Handle empty config file                                           │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
-## Try it in 10 seconds (no tokens spent)
+## Features
+
+- **Planner, worker, judge, librarian, evolver.** Separate roles with fresh context per attempt. Planners never code and judges never edit.
+- **Parallel git worktrees.** Each task builds in its own worktree. Your checkout is never touched.
+- **Hidden holdout scenarios.** The judge checks work against scenarios the workers cannot read.
+- **Self-correcting.** Judge rejections, merge conflicts, and red post-merge tests all trigger a retry.
+- **Merge queue.** Tasks merge one at a time onto `orchestra/<run>/integration`, with tests after each merge.
+- **Self-evaluating.** Every agent session is recorded in a ledger, and `orchestra stats` reports health per harness version.
+- **Self-improving.** The evolver proposes a harness change, a Factory Eval compares it to the incumbent, and promotion needs a measured gain. Rollback is `orchestra promote <vN>`.
+- **Live dashboards.** A terminal dashboard, a read-only localhost web dashboard, and a Claude Code statusline.
+- **Guard rails in code.** A PreToolUse hook blocks holdout reads, network commands, `git push`, and edits to the harness and evals. Each run has a budget.
+
+## Quick start
+
+Requirements: Node 23.6 or newer (runs TypeScript directly, no build step), git, and Claude Code with headless auth working (`orchestra doctor` checks it).
+
+**1. Try the demo (no tokens spent).** It runs the full pipeline with a simulated runner in a temporary repo:
 
 ```bash
-node bin/orchestra.ts demo
+node <path-to-orchestra>/bin/orchestra.ts demo
 ```
 
-This runs the whole pipeline with a simulated runner in a temporary repo, with the live dashboard, a repair loop, learning, and an evolution cycle that promotes `v2`.
-
-## Install
-
-Requirements: Node 23.6 or newer (runs TypeScript directly, so there's no build step), git, and Claude Code with headless auth working (`orchestra doctor` checks it).
-
-**As a Claude Code plugin** (adds the `/orchestra:*` commands and puts `orchestra` on the Bash tool's PATH):
+**2. Install.** As a Claude Code plugin:
 
 ```bash
-claude plugin marketplace add /Users/deepak/Workspace/projects/software-factory
-```
-
-```bash
+claude plugin marketplace add <path-to-orchestra>
 claude plugin install orchestra@orchestra-local
 ```
 
-For development, `claude --plugin-dir /Users/deepak/Workspace/projects/software-factory` loads it for one session.
-
-**As a CLI in any terminal:**
+Or as a CLI in any terminal:
 
 ```bash
-npm link
+cd <path-to-orchestra> && npm link
 ```
 
-## Use
+**3. Initialise a repo.** From inside a git repo:
 
-| In Claude Code | In a terminal | What it does |
-|---|---|---|
-| `/orchestra:setup` | `orchestra init` | Creates `.orchestra/`, detects the test command, offers the statusline |
-| `/orchestra:run <goal>` | `orchestra run "<goal>"` | Full factory run. Shows the live dashboard on a TTY and progress lines otherwise |
-| `/orchestra:serve` | `orchestra serve` | Read-only web dashboard on localhost (default 4317): live runs, task diffs, verdicts, logs |
-| `/orchestra:status` | `orchestra status` | One-shot board |
-| | `orchestra watch` | Full-screen live dashboard (run it in a second terminal tab) |
-| `/orchestra:stats` | `orchestra stats` | Self-evaluation: health per harness version and trends |
-| `/orchestra:evolve` | `orchestra evolve` | Force a self-improvement cycle |
-| | `orchestra learnings`, `evals`, `promote vN`, `doctor` | Inspect and control |
-
-Results land on `orchestra/<run>/integration`. Your checkout is never touched. To review: `git log main..orchestra/<run>/integration`. To land: `git merge` that branch.
-
-**Statusline.** Plugins can't ship one, so add it to `~/.claude/settings.json` (`/orchestra:setup` offers to do this):
-
-```json
-{ "statusLine": { "type": "command", "command": "/abs/path/to/bin/orchestra statusline", "refreshInterval": 2 } }
+```bash
+orchestra init
 ```
 
-## How it works
+**4. First run:**
 
-```
-goal ─▶ PLANNER (opus, read-only) ─▶ task graph + hidden scenarios (.orchestra/holdout)
-          │
-          ▼  ready tasks (deps merged), N in parallel, each in its own worktree
-        WORKER (sonnet, fresh session per attempt) ─▶ commit
-          │
-          ▼
-        tests ─▶ JUDGE (opus, never edits, sees holdout) ─▶ verdict {pass, score, issues}
-          │ fail: repair notes ─▶ new WORKER attempt (max 3)        [self-correcting]
-          ▼ pass
-        REFINERY merge queue ─▶ post-merge tests ─▶ conflict or red? revert + repair
-          ▼
-        LIBRARIAN ─▶ learnings.json, fed to the next planner/worker  [compounding]
-          ▼
-        harvest ─▶ Factory Eval case (if satisfaction ≥ 0.8)
-          ▼ every N runs
-        EVOLVER ─▶ harness vN+1 ─▶ eval vs incumbent ─▶ promote only on gain, no regressions
-                                                                     [self-improving]
+```bash
+orchestra run "Add a --json flag to the export command"
 ```
 
-**Self-evaluating.** Every agent session is a row in `.orchestra/ledger.jsonl`. `orchestra stats` aggregates per harness version: first-pass yield, satisfaction, cost per merged task, and eval score.
+Results land on `orchestra/<run>/integration`. Review with `git log main..orchestra/<run>/integration`, then `git merge` that branch to land it.
 
-**Self-correcting.** There are three automatic loops:
+Set `ORCHESTRA_RUNNER=fake` to use the simulator instead of real Claude sessions in any command.
 
-- Judge rejections send repair notes to a fresh worker.
-- Merge conflicts reset the task onto the latest code.
-- Red post-merge tests revert the merge.
+## Commands
 
-In all three cases the task is retried. After `maxAttempts` failures it's marked failed, and the tasks that depend on it are marked blocked.
-
-**Self-improving.** The harness (role prompts plus `config.json`) is versioned under `.orchestra/harness/vN`. The evolver proposes one focused change. Both the candidate and the incumbent run the same Factory Eval cases from pinned base commits. The candidate is promoted only if it beats the incumbent by `minGain` with no case regressing. Every variant stays in `archive.json`. To roll back, run `orchestra promote v1`.
-
-Each idea comes from a published factory:
-
-| Idea | Source |
+| Command | What it does |
 |---|---|
-| Fresh context per unit of work | Anthropic long-running harness, Ralph loop |
-| Planners never code, judges decide done | Cursor |
-| Holdout scenarios and a satisfaction score | StrongDM |
-| Refinery merge queue | Gas Town |
-| Compound learnings | Every |
-| Archive-based self-modification | Darwin Gödel Machine |
+| `orchestra init` | Set up .orchestra/ in the current git repo |
+| `orchestra run "<goal>"` | Plan, build, verify, merge, learn (live dashboard on a TTY) |
+| `    --detach` | Run in the background; follow with `orchestra watch` |
+| `    --no-evolve` | Skip the automatic evolution check after the run |
+| `    --serve` | Also serve the web dashboard while the run is live |
+| `orchestra serve [--port N]` | Web dashboard on localhost (default 4317), read-only |
+| `orchestra watch [runId]` | Full-screen live dashboard (q to quit) |
+| `orchestra status [runId]` | One-shot board of the current or given run |
+| `orchestra stats` | Factory health per harness version (self-evaluation) |
+| `orchestra evolve` | Propose, evaluate, and maybe promote a better harness |
+| `orchestra learnings` | Show what the factory has learned in this repo |
+| `orchestra evals` | List Factory Eval cases |
+| `orchestra promote <vN>` | Promote a harness version (also used for rollback) |
+| `orchestra doctor` | Check Claude CLI and headless auth |
+| `orchestra demo` | Simulated run in a temp repo (no tokens spent) |
+| `orchestra statusline` | Statusline command for Claude Code (reads JSON on stdin) |
 
-## Safety rails (enforced by code, not prompts)
+Inside Claude Code, the plugin adds `/orchestra:setup`, `/orchestra:run`, `/orchestra:serve`, `/orchestra:status`, `/orchestra:stats`, and `/orchestra:evolve`.
 
-- Agent sessions run with `--setting-sources project,local` (your personal plugins and hooks don't leak in) and `--permission-prompts none` (nothing hangs waiting for a human). Each session has a per-role `--max-budget-usd` cap.
-- A PreToolUse guard hook in every session blocks:
-  - reading the holdout scenarios
-  - network commands, `git push`, and publishing
-  - edits to the harness, evals, or archive
-  - secret files
-- Judges get read-only tools. Any change a judge makes is discarded.
-- The evolver can't edit `evolver.md`, can't lower `passThreshold`, and can't touch the evals.
-- Each run has a budget (`runBudgetUsd`, default $20). Unstarted tasks fail once it's spent.
-- Everything is reversible: work goes to `orchestra/<run>/*` branches and harness versions are append-only.
+## Documentation
 
-## Configuration (`.orchestra/config.json`)
+- [Getting started](docs/getting-started.md): install, init, first run, and the demo
+- [Architecture](docs/architecture.md): roles, worktrees, holdout scenarios, merge queue, event log
+- [Self-improvement](docs/self-improvement.md): ledger, Factory Eval, evolve, promote and rollback
+- [Dashboards](docs/dashboards.md): watch, status, serve, and the statusline
+- [Configuration](docs/configuration.md): `.orchestra/config.json` and harness config
 
-```json
-{
-  "concurrency": 3,
-  "testCommand": "npm test --silent",
-  "permissionMode": "acceptEdits",
-  "runBudgetUsd": 20,
-  "evolve": { "every": 3, "autoPromote": true, "minGain": 0.02, "sample": 3 }
-}
-```
+## Project
 
-Per-role models, attempts, pass threshold, and budgets live in the harness `config.json`, so the evolver can tune them.
+- [Contributing](CONTRIBUTING.md)
+- [Security policy](SECURITY.md)
+- [Code of conduct](CODE_OF_CONDUCT.md)
+- [Changelog](CHANGELOG.md)
+- [License](LICENSE) (MIT)
 
-## Layout
+## Status
 
-```
-bin/orchestra(.ts)     CLI entry; bin/ is on the plugin's Bash PATH
-src/conductor.ts       plan, schedule, attempt, judge, merge queue, learn
-src/evolve.ts          metrics, Factory Eval, evolver, promotion
-src/agent.ts           claude -p stream-json runner, guard injection
-src/tui/render.ts      dashboard, statusline, stats (pure functions)
-src/guard.ts           PreToolUse policy
-src/fake.ts            simulated runner for tests and demo
-harness/v1/            seed prompts and config (copied into .orchestra on init)
-skills/                /orchestra:run, status, stats, evolve, setup
-test/                  node --test suites (npm test)
-```
-
-## Status and limits (v0.1)
-
-- Verified with the simulator: 17 tests cover the happy path, repair, failure blocking, merge conflicts, red tests, planner crash, the evolution promote and reject paths, guard rails, and rendering. Strict `tsc` passes.
-- **Not yet verified against real Claude sessions** on this machine, because headless auth had expired (`Failed to authenticate: OAuth session expired`). Run `claude`, then `/login`, then `orchestra doctor`.
-- Workers share one machine. There are no containers or digital twins yet. Those come in Phase 2 of `PLAN.md`.
-- Evaluation reruns past goals, so evolution costs about `sample × 2` runs. Tune `evolve.sample` and `evolve.every`.
+Version 0.1. The test suite runs against the simulator (`npm test`). Workers share one machine, with no containers yet. Evolution reruns past goals, so it costs roughly `sample × 2` runs; tune `evolve.sample` and `evolve.every` in the config.
