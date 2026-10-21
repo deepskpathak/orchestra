@@ -153,6 +153,11 @@ export interface ProjectConfig {
     cheapModel: string;
     margin: number; // escalate when |score - passThreshold| <= margin
   };
+  preJudge: {
+    enabled: boolean; // cheap deterministic checks before any judge call; failures go straight to repair
+    lintCommand: string | null;
+    requireTests: boolean; // new exports under src/ need a changed test file
+  };
   evolve: {
     every: number; // auto-evolve after every N completed runs, 0 disables
     autoPromote: boolean;

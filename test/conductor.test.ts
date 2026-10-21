@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import type { Runner } from '../src/agent.ts';
 import * as g from '../src/git.ts';
-import { runGoal, normalizeTasks, shouldEscalate } from '../src/conductor.ts';
+import { runGoal, normalizeTasks, shouldEscalate, missingTestIssues, preJudgeIssues } from '../src/conductor.ts';
 import { DEFAULT_PROJECT_CONFIG } from '../src/store.ts';
 import { fakeRunner } from '../src/fake.ts';
 import { readLearnings } from '../src/learnings.ts';
@@ -235,6 +235,57 @@ test('tiers enabled: a borderline cheap verdict escalates and the strong verdict
   assert.equal(run.tasks[0].status, 'merged');
   assert.equal(run.tasks[0].verdict!.summary, 'Meets criteria');
   assert.deepEqual(store.ledgerRows().filter((r) => r.role === 'judge').map((r) => r.model), ['haiku', 'opus']);
+});
+
+test('preJudge defaults off and an older config.json gets the full default', () => {
+  assert.deepEqual(DEFAULT_PROJECT_CONFIG.preJudge, { enabled: false, lintCommand: null, requireTests: true });
+  const store = tempRepo();
+  const cfg = store.readJson<Record<string, unknown>>('config.json', {});
+  delete cfg.preJudge;
+  store.writeJson('config.json', cfg);
+  assert.deepEqual(store.config().preJudge, { enabled: false, lintCommand: null, requireTests: true });
+});
+
+test('missingTestIssues flags new src exports without a changed test', () => {
+  const add = '+++ b/src/x.ts\n@@ -1 +1,2 @@\n+export function f() {}\n';
+  assert.equal(missingTestIssues(add, ['src/x.ts']).length, 1);
+  assert.match(missingTestIssues(add, ['src/x.ts'])[0], /src\/x\.ts/);
+  assert.deepEqual(missingTestIssues(add, ['src/x.ts', 'test/x.test.ts']), []);
+  assert.deepEqual(missingTestIssues(add, ['src/x.ts', 'src/y.test.ts']), []);
+  assert.deepEqual(missingTestIssues('+++ b/src/x.ts\n+const a = 1;\n', ['src/x.ts']), []);
+  assert.deepEqual(missingTestIssues('+++ b/src/x.ts\n@@\n context\n', ['src/x.ts']), []);
+  assert.deepEqual(missingTestIssues('+++ b/README.md\n+export nothing\n', ['README.md']), []);
+});
+
+test('preJudgeIssues combines lint failure and test issues', () => {
+  assert.deepEqual(preJudgeIssues({ lint: { ok: true, tail: '' }, testIssues: [] }), []);
+  assert.deepEqual(preJudgeIssues({ lint: null, testIssues: ['t'] }), ['t']);
+  const out = preJudgeIssues({ lint: { ok: false, tail: 'boom', cmd: 'npm run lint' }, testIssues: ['t'] });
+  assert.equal(out.length, 2);
+  assert.match(out[0], /Lint command `npm run lint` fails\. Output tail: boom/);
+});
+
+test('preJudge enabled with a failing lint goes to repair without a judge call', async () => {
+  const store = tempRepo({ preJudge: { enabled: true, lintCommand: 'exit 1', requireTests: true } });
+  const { runner, calls } = oneTaskRunner(0);
+  const run = await runGoal({ store, runner, goal: 'g' });
+  const t = run.tasks[0];
+  assert.equal(t.status, 'failed');
+  assert.equal(t.attempts, 3);
+  assert.equal(calls.judge ?? 0, 0);
+  const rows = store.ledgerRows();
+  assert.ok(!rows.some((r) => r.role === 'judge' && r.attempt === 1));
+  assert.ok(rows.some((r) => (r as { outcome?: string }).outcome === 'prejudge_fail'));
+  assert.ok(store.events(run.id).some((e) => e.kind === 'task.repair'));
+  assert.match(t.verdict!.issues[0], /Lint command `exit 1` fails/);
+});
+
+test('preJudge disabled (default) still calls the judge', async () => {
+  const store = tempRepo({ preJudge: { enabled: false, lintCommand: 'exit 1', requireTests: true } });
+  const { runner, calls } = oneTaskRunner(0);
+  const run = await runGoal({ store, runner, goal: 'g' });
+  assert.equal(calls.judge, 1);
+  assert.equal(run.tasks[0].status, 'merged');
 });
 
 test('diffStat throws on a bogus base (repairOrFail guards it) and is empty for no changes', async () => {
