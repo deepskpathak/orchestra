@@ -4,6 +4,7 @@
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { DEFAULT_PROVIDER, resolveModels } from './models.ts';
 import type { Store } from './store.ts';
 import type { HarnessConfig, Role } from './types.ts';
 
@@ -52,6 +53,8 @@ export function loadHarness(store: Store, version = currentVersion(store)): Harn
   const prompts = {} as Record<Role, string>;
   for (const role of ROLES) prompts[role] = readFileSync(join(dir, `${role}.md`), 'utf8');
   const config = JSON.parse(readFileSync(join(dir, 'config.json'), 'utf8')) as HarnessConfig;
+  // Resolve tiers here so the conductor, ledger and dashboard only see concrete model ids.
+  if (config.models) config.models = resolveModels(config.models, config.provider ?? DEFAULT_PROVIDER);
   return { version, prompts, config };
 }
 
