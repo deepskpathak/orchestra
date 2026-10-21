@@ -12,12 +12,20 @@ export type TaskStatus =
   | 'failed' // out of attempts
   | 'blocked'; // a dependency failed
 
+export interface CriterionResult {
+  criterion: string;
+  pass: boolean;
+  score: number; // 0..1
+  note?: string;
+}
+
 export interface Verdict {
   pass: boolean;
   score: number; // 0..1 satisfaction estimate from the judge
   summary: string;
   issues: string[];
   testsPassed: boolean | null; // null when no test command is configured
+  criteria?: CriterionResult[]; // per-acceptance-criterion results, when the judge supplied them
   judgeError?: string; // set when the judge itself failed; score is meaningless then
 }
 
@@ -125,7 +133,9 @@ export interface LedgerRow {
 }
 
 export interface HarnessConfig {
+  // Role to literal model name or tier (strong, balanced, fast). loadHarness resolves tiers.
   models: Record<Role, string>;
+  provider?: string;
   maxAttempts: number;
   passThreshold: number;
   budgetUsd: Record<Role, number>;
@@ -142,6 +152,15 @@ export interface ProjectConfig {
     enabled: boolean; // cheap judge first, escalate to the harness judge model when not decisive
     cheapModel: string;
     margin: number; // escalate when |score - passThreshold| <= margin
+  };
+  preJudge: {
+    enabled: boolean; // cheap deterministic checks before any judge call; failures go straight to repair
+    lintCommand: string | null;
+    requireTests: boolean; // new exports under src/ need a changed test file
+  };
+  fastPath: {
+    enabled: boolean; // small single-concern goals get one task and no hidden-scenario requirement
+    maxGoalChars: number;
   };
   evolve: {
     every: number; // auto-evolve after every N completed runs, 0 disables

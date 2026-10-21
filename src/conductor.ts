@@ -8,7 +8,7 @@ import * as g from './git.ts';
 import { loadHarness, type Harness } from './harness.ts';
 import { formatLearnings, readLearnings, writeLearnings, type Lesson } from './learnings.ts';
 import { newRunId, type Store } from './store.ts';
-import type { ActiveAgent, OrchestraEvent, Role, Run, Scenario, Task, Verdict } from './types.ts';
+import type { ActiveAgent, CriterionResult, OrchestraEvent, Role, Run, Scenario, Task, Verdict } from './types.ts';
 
 export interface ConductorOptions {
   store: Store;
@@ -34,7 +34,19 @@ export const joinPrompt = (p: BuiltPrompt): string => [p.prefix, p.body].filter(
 
 const bullets = (items: string[]): string => items.map((a) => `- ${a}`).join('\n');
 
-export function plannerPrompt(i: { goal: string; files: string[]; testCommand?: string; learnings: string }): BuiltPrompt {
+const LIST_LINE = /^\s*(?:[-*]\s|\d+[.)]\s)/m;
+const INLINE_ITEM = /\(\d+\)/;
+
+export function fastPathDecision(goal: string, cfg: { enabled: boolean; maxGoalChars: number }): { fast: boolean; reason: string } {
+  const g = (goal ?? '').trim();
+  if (!cfg.enabled) return { fast: false, reason: 'fast path disabled' };
+  if (!g) return { fast: false, reason: 'empty goal' };
+  if (g.length > cfg.maxGoalChars) return { fast: false, reason: `goal longer than ${cfg.maxGoalChars} chars` };
+  if (LIST_LINE.test(g) || INLINE_ITEM.test(g)) return { fast: false, reason: 'goal has list structure' };
+  return { fast: true, reason: 'small single-concern goal' };
+}
+
+export function plannerPrompt(i: { goal: string; files: string[]; testCommand?: string; learnings: string; fastPath?: boolean }): BuiltPrompt {
   return {
     prefix: [
       `LEARNINGS:\n${i.learnings}`,
@@ -42,11 +54,37 @@ export function plannerPrompt(i: { goal: string; files: string[]; testCommand?: 
       `TEST COMMAND: ${i.testCommand ?? '(none configured)'}`,
       `GOAL:\n${i.goal}`,
     ].join('\n\n'),
-    body: 'Produce the task graph and hidden scenarios.',
+    body: i.fastPath
+      ? 'Produce the task graph and hidden scenarios.\nThis goal is small and single-concern: return exactly one task and an empty or minimal scenarios list.'
+      : 'Produce the task graph and hidden scenarios.',
   };
 }
 
-export function workerPrompt(i: { goal: string; learnings: string; testCommand?: string; task: Task; others: string[] }): BuiltPrompt {
+const firstLine = (s: string, max = 200): string => (s.split('\n')[0] ?? '').slice(0, max);
+
+function repairSection(notes: string[], progressFile?: string): string {
+  if (!progressFile) return `REPAIR NOTES (previous attempt was rejected, fix all of these):\n${bullets(notes)}`;
+  return `REPAIR NOTES (previous attempt was rejected, fix all of these). Read ${progressFile} for the full diff summary and judge issues. Summary:\n${bullets(notes.map((n) => firstLine(n)))}`;
+}
+
+export const progressRel = (runId: string, taskId: string): string => `runs/${runId}/progress/${taskId}.json`;
+
+export function buildProgress(i: { task: Task; verdict?: Verdict; issues: string[]; diffSummary: string }): object {
+  const { task, verdict } = i;
+  return {
+    taskId: task.id,
+    title: task.title,
+    attempt: task.attempts,
+    score: verdict?.score ?? null,
+    testsPassed: verdict?.testsPassed ?? null,
+    issues: i.issues,
+    failingCriteria: (verdict?.criteria ?? []).filter((c) => c.pass === false),
+    diffSummary: i.diffSummary,
+    writtenAt: new Date().toISOString(),
+  };
+}
+
+export function workerPrompt(i: { goal: string; learnings: string; testCommand?: string; task: Task; others: string[]; progressFile?: string }): BuiltPrompt {
   const { task } = i;
   return {
     prefix: [
@@ -58,11 +96,31 @@ export function workerPrompt(i: { goal: string; learnings: string; testCommand?:
       `YOUR TASK ${task.id}: ${task.title}\n${task.description}`,
       `ACCEPTANCE CRITERIA:\n${bullets(task.acceptance)}`,
       `OTHER TASKS (owned by other workers, do not do them):\n${i.others.join('\n') || '(none)'}`,
-      task.notes.length ? `REPAIR NOTES (previous attempt was rejected, fix all of these):\n${bullets(task.notes)}` : '',
+      task.notes.length ? repairSection(task.notes, i.progressFile) : '',
     ]
       .filter(Boolean)
       .join('\n\n'),
   };
+}
+
+const isTestFile = (f: string) => f.startsWith('test/') || f.includes('.test.');
+
+// Source files under src/ that gained an `export` in the unified diff, when no test file changed.
+export function missingTestIssues(diff: string, changed: string[]): string[] {
+  if (changed.some(isTestFile)) return [];
+  const gained = new Set<string>();
+  let file = '';
+  for (const line of diff.split('\n')) {
+    if (line.startsWith('+++ ')) file = line.startsWith('+++ b/') ? line.slice(6) : '';
+    else if (line.startsWith('+export ') && /^src\/.+\.(ts|js)$/.test(file) && !isTestFile(file)) gained.add(file);
+  }
+  return gained.size ? [`New exports were added in ${[...gained].join(', ')} but no test file changed. Add or update tests under test/.`] : [];
+}
+
+export function preJudgeIssues(i: { lint: { ok: boolean; tail: string; cmd?: string } | null; testIssues: string[] }): string[] {
+  const out: string[] = [];
+  if (i.lint && !i.lint.ok) out.push(`Lint command \`${i.lint.cmd ?? ''}\` fails. Output tail: ${i.lint.tail.slice(-1200)}`);
+  return [...out, ...i.testIssues];
 }
 
 // Cheap-judge verdicts stand only when tests pass, the score clears the threshold by more than
@@ -84,7 +142,7 @@ export function judgePrompt(i: {
   return {
     prefix: `HIDDEN SCENARIOS for the whole goal (judge only the parts this task is responsible for):\n${i.scenarios
       .map((s) => `- ${s.id}: GIVEN ${s.given} WHEN ${s.when} THEN ${s.then}`)
-      .join('\n') || '(none)'}`,
+      .join('\n') || '(none)'}\n\nAlso return criteria: one entry per acceptance criterion, in order, each with pass, score and a short note.`,
     body: [
       `TASK ${task.id}: ${task.title}\n${task.description}`,
       `ACCEPTANCE CRITERIA:\n${bullets(task.acceptance)}`,
@@ -125,6 +183,36 @@ const PLAN_SCHEMA = {
   required: ['tasks', 'scenarios'],
 };
 
+export const FAST_PLAN_SCHEMA = {
+  ...PLAN_SCHEMA,
+  properties: { ...PLAN_SCHEMA.properties, tasks: { ...PLAN_SCHEMA.properties.tasks, maxItems: 1 } },
+  required: ['tasks'],
+};
+
+// Per-criterion judging: mean score, and pass only when every criterion passes. Malformed entries are skipped.
+export function aggregateCriteria(criteria: unknown): { score: number; pass: boolean; failing: CriterionResult[]; list: CriterionResult[] } | undefined {
+  if (!Array.isArray(criteria)) return undefined;
+  const list: CriterionResult[] = [];
+  for (const c of criteria) {
+    if (!c || typeof c !== 'object' || typeof c.criterion !== 'string' || typeof c.pass !== 'boolean') continue;
+    const n = Number.isFinite(c.score) ? Math.min(1, Math.max(0, c.score)) : 0;
+    list.push({ criterion: c.criterion, pass: c.pass, score: n, ...(typeof c.note === 'string' ? { note: c.note } : {}) });
+  }
+  if (!list.length) return undefined;
+  return { score: list.reduce((a, c) => a + c.score, 0) / list.length, pass: list.every((c) => c.pass), failing: list.filter((c) => !c.pass), list };
+}
+
+// Combines the judge's raw verdict with test results and per-criterion results (when given).
+export function buildVerdict(v: Partial<Verdict>, testsOk: boolean | null, passThreshold: number, testIssue?: string): Verdict {
+  const agg = aggregateCriteria(v.criteria);
+  const score = agg ? agg.score : (v.score as number);
+  const pass = Boolean(v.pass) && score >= passThreshold && testsOk !== false && (agg?.pass ?? true);
+  const issues = [...(v.issues ?? [])];
+  if (agg) issues.unshift(...agg.failing.map((c) => `Criterion failed: ${c.criterion}${c.note ? `: ${c.note}` : ''}`));
+  if (testsOk === false && testIssue) issues.unshift(testIssue);
+  return { pass, score: round(score), summary: v.summary ?? '', issues, testsPassed: testsOk, ...(agg ? { criteria: agg.list } : {}) };
+}
+
 const VERDICT_SCHEMA = {
   type: 'object',
   properties: {
@@ -132,6 +220,14 @@ const VERDICT_SCHEMA = {
     score: { type: 'number', minimum: 0, maximum: 1 },
     summary: { type: 'string' },
     issues: { type: 'array', items: { type: 'string' } },
+    criteria: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: { criterion: { type: 'string' }, pass: { type: 'boolean' }, score: { type: 'number', minimum: 0, maximum: 1 }, note: { type: 'string' } },
+        required: ['criterion', 'pass', 'score'],
+      },
+    },
   },
   required: ['pass', 'score', 'summary', 'issues'],
 };
@@ -245,18 +341,20 @@ export class Conductor {
     const learnings = readLearnings(store);
     const cfg = store.config();
     const files = g.trackedFiles(this.integration.path);
+    const fp = fastPathDecision(run.goal, cfg.fastPath);
     const built = plannerPrompt({
       goal: run.goal,
       files,
       testCommand: cfg.testCommand,
       learnings: formatLearnings(learnings, 'planner'),
+      fastPath: fp.fast,
     });
     const prompt = joinPrompt(built);
 
     const res = await this.call('planner', undefined, 1, {
       prompt,
       cwd: this.integration.path,
-      schema: PLAN_SCHEMA,
+      schema: fp.fast ? FAST_PLAN_SCHEMA : PLAN_SCHEMA,
       tools: ['Read', 'Grep', 'Glob'],
     });
     const out = extractJson(res) as { tasks?: any[]; scenarios?: Scenario[] } | undefined;
@@ -266,8 +364,10 @@ export class Conductor {
     this.scenarios = out.scenarios ?? [];
     // Holdout: only the judge ever receives these. .orchestra is outside every worktree.
     store.writeJson(`holdout/${run.id}.json`, this.scenarios);
+    if (fp.fast) this.emit('log', `Fast path: ${fp.reason}`);
     this.emit('plan', `Planned ${run.tasks.length} tasks, ${this.scenarios.length} hidden scenarios`, {
       tasks: run.tasks.map((t) => ({ id: t.id, title: t.title, deps: t.deps })),
+      ...(fp.fast ? { fastPath: true } : {}),
     });
     this.save();
   }
@@ -322,6 +422,7 @@ export class Conductor {
         testCommand: cfg.testCommand,
         task,
         others,
+        progressFile: task.notes.length ? store.path(progressRel(this.run.id, task.id)) : undefined,
       }),
     );
 
@@ -343,7 +444,11 @@ export class Conductor {
     } else if (!g.hasChangesSince(wt.path, base)) {
       verdict = { pass: false, score: 0, summary: 'No changes were committed', issues: ['No code changes were produced. Implement the task.'], testsPassed: null };
     } else {
-      verdict = await this.judge(task, wt.path, base, work);
+      const issues = cfg.preJudge.enabled ? this.preJudge(task, wt.path, base) : [];
+      verdict = issues.length
+        ? { pass: false, score: 0, summary: 'Pre-judge checks failed', issues, testsPassed: null }
+        : await this.judge(task, wt.path, base, work);
+      if (issues.length) this.ledgerOutcome(task, 'prejudge_fail');
     }
     task.verdict = verdict;
     const label = verdict.judgeError ? 'JUDGE ERROR' : `${verdict.pass ? 'PASS' : 'FAIL'} ${verdict.score.toFixed(2)}`;
@@ -361,6 +466,16 @@ export class Conductor {
     task.status = 'merging';
     this.save();
     await this.enqueueMerge(task);
+  }
+
+  // Cheap deterministic checks that run before any judge call.
+  private preJudge(task: Task, cwd: string, base: string): string[] {
+    const { lintCommand, requireTests } = this.store.config().preJudge;
+    const lint = lintCommand ? { ...g.runTests(cwd, lintCommand), cmd: lintCommand } : null;
+    const testIssues = requireTests ? missingTestIssues(g.diffSince(cwd, base), g.changedFiles(cwd, base)) : [];
+    const issues = preJudgeIssues({ lint, testIssues });
+    if (issues.length) this.emit('log', `${task.id} pre-judge checks failed (${issues.length}), skipping judge`, undefined, task.id);
+    return issues;
   }
 
   private async judge(task: Task, cwd: string, base: string, work: AgentResult): Promise<Verdict> {
@@ -423,10 +538,7 @@ export class Conductor {
     if (!v || typeof v.score !== 'number') {
       return { pass: false, score: 0, summary: `Judge failed twice: ${error}`, issues: [], testsPassed: tests?.ok ?? null, judgeError: error };
     }
-    const pass = Boolean(v.pass) && v.score >= this.harness.config.passThreshold && testsOk !== false;
-    const issues = [...(v.issues ?? [])];
-    if (testsOk === false) issues.unshift(`Test command \`${cfg.testCommand}\` fails. Output tail:\n${tests!.tail.slice(-1200)}`);
-    return { pass, score: round(v.score), summary: v.summary ?? '', issues, testsPassed: testsOk };
+    return buildVerdict(v, testsOk, this.harness.config.passThreshold, testsOk === false ? `Test command \`${cfg.testCommand}\` fails. Output tail:\n${tests!.tail.slice(-1200)}` : undefined);
   }
 
   // Refinery: merges are serialized; post-merge tests guard the integration branch.
@@ -466,10 +578,24 @@ export class Conductor {
       this.fail(task, `out of attempts (${task.attempts}). Last issues: ${issues.join(' | ').slice(0, 300)}`);
       return;
     }
+    this.writeProgress(task, issues);
     task.notes = issues;
     task.status = 'repair';
     this.emit('task.repair', `${task.id} -> repair: ${issues[0]?.split('\n')[0] ?? ''}`, { issues }, task.id);
     this.save();
+  }
+
+  // Repair attempts read this file instead of getting long text inlined in the prompt.
+  private writeProgress(task: Task, issues: string[]): void {
+    let diffSummary = '';
+    if (task.worktree) {
+      try {
+        diffSummary = g.diffStat(task.worktree, g.mergeBase(task.worktree, 'HEAD', this.integration.branch));
+      } catch (e) {
+        this.emit('log', `${task.id} diff summary unavailable: ${(e as Error).message.split('\n')[0]}`, undefined, task.id);
+      }
+    }
+    this.store.writeJson(progressRel(this.run.id, task.id), buildProgress({ task, verdict: task.verdict, issues, diffSummary }));
   }
 
   private fail(task: Task, reason: string): void {

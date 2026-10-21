@@ -5,7 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import type { Runner } from '../src/agent.ts';
-import { runGoal, normalizeTasks, shouldEscalate } from '../src/conductor.ts';
+import * as g from '../src/git.ts';
+import { runGoal, normalizeTasks, shouldEscalate, missingTestIssues, preJudgeIssues, fastPathDecision, FAST_PLAN_SCHEMA } from '../src/conductor.ts';
 import { DEFAULT_PROJECT_CONFIG } from '../src/store.ts';
 import { fakeRunner } from '../src/fake.ts';
 import { readLearnings } from '../src/learnings.ts';
@@ -32,6 +33,11 @@ test('happy path: plans, repairs a rejected task, merges all, learns', async () 
   assert.equal(store.readJson<unknown[]>(`holdout/${run.id}.json`, []).length, 1);
   // Every agent session is in the ledger.
   assert.ok(store.ledgerRows().some((r) => r.role === 'judge' && r.task === 'T2' && r.attempt === 2));
+  // The repair path wrote a progress file; tasks that merged first time did not need one.
+  const prog = store.readJson<Record<string, unknown>>(`runs/${run.id}/progress/T2.json`, {});
+  for (const k of ['taskId', 'attempt', 'issues', 'failingCriteria', 'diffSummary']) assert.ok(k in prog, k);
+  assert.equal(prog.taskId, 'T2');
+  assert.equal(store.readJson<unknown>(`runs/${run.id}/progress/T1.json`, null), null);
   const kinds = store.events(run.id).map((e) => e.kind);
   for (const k of ['run.start', 'plan', 'task.repair', 'task.merged', 'learn', 'run.end']) assert.ok(kinds.includes(k as never), k);
 });
@@ -229,4 +235,86 @@ test('tiers enabled: a borderline cheap verdict escalates and the strong verdict
   assert.equal(run.tasks[0].status, 'merged');
   assert.equal(run.tasks[0].verdict!.summary, 'Meets criteria');
   assert.deepEqual(store.ledgerRows().filter((r) => r.role === 'judge').map((r) => r.model), ['haiku', 'opus']);
+});
+
+test('preJudge defaults off and an older config.json gets the full default', () => {
+  assert.deepEqual(DEFAULT_PROJECT_CONFIG.preJudge, { enabled: false, lintCommand: null, requireTests: true });
+  const store = tempRepo();
+  const cfg = store.readJson<Record<string, unknown>>('config.json', {});
+  delete cfg.preJudge;
+  store.writeJson('config.json', cfg);
+  assert.deepEqual(store.config().preJudge, { enabled: false, lintCommand: null, requireTests: true });
+});
+
+test('missingTestIssues flags new src exports without a changed test', () => {
+  const add = '+++ b/src/x.ts\n@@ -1 +1,2 @@\n+export function f() {}\n';
+  assert.equal(missingTestIssues(add, ['src/x.ts']).length, 1);
+  assert.match(missingTestIssues(add, ['src/x.ts'])[0], /src\/x\.ts/);
+  assert.deepEqual(missingTestIssues(add, ['src/x.ts', 'test/x.test.ts']), []);
+  assert.deepEqual(missingTestIssues(add, ['src/x.ts', 'src/y.test.ts']), []);
+  assert.deepEqual(missingTestIssues('+++ b/src/x.ts\n+const a = 1;\n', ['src/x.ts']), []);
+  assert.deepEqual(missingTestIssues('+++ b/src/x.ts\n@@\n context\n', ['src/x.ts']), []);
+  assert.deepEqual(missingTestIssues('+++ b/README.md\n+export nothing\n', ['README.md']), []);
+});
+
+test('fastPath defaults off and an older config.json gets it', () => {
+  assert.deepEqual(DEFAULT_PROJECT_CONFIG.fastPath, { enabled: false, maxGoalChars: 400 });
+  const store = tempRepo();
+  const cfg = store.readJson<Record<string, unknown>>('config.json', {});
+  delete cfg.fastPath;
+  store.writeJson('config.json', cfg);
+  assert.deepEqual(store.config().fastPath, { enabled: false, maxGoalChars: 400 });
+});
+
+test('fastPathDecision applies each rule', () => {
+  const on = { enabled: true, maxGoalChars: 100 };
+  assert.equal(fastPathDecision('Fix the typo in README.', { ...on, enabled: false }).fast, false);
+  assert.deepEqual(fastPathDecision('Fix the typo in README.', on), { fast: true, reason: 'small single-concern goal' });
+  assert.equal(fastPathDecision('x'.repeat(101), on).fast, false);
+  assert.equal(fastPathDecision('Do this:\n- one\n- two', on).fast, false);
+  assert.equal(fastPathDecision('Do this:\n1. one\n2) two', on).fast, false);
+  assert.equal(fastPathDecision('Do (1) a and (2) b', on).fast, false);
+  assert.equal(fastPathDecision('   ', on).fast, false);
+});
+
+test('fast plan schema allows one task and does not require scenarios', () => {
+  assert.equal(FAST_PLAN_SCHEMA.properties.tasks.maxItems, 1);
+  assert.deepEqual(FAST_PLAN_SCHEMA.required, ['tasks']);
+});
+
+test('preJudgeIssues combines lint failure and test issues', () => {
+  assert.deepEqual(preJudgeIssues({ lint: { ok: true, tail: '' }, testIssues: [] }), []);
+  assert.deepEqual(preJudgeIssues({ lint: null, testIssues: ['t'] }), ['t']);
+  const out = preJudgeIssues({ lint: { ok: false, tail: 'boom', cmd: 'npm run lint' }, testIssues: ['t'] });
+  assert.equal(out.length, 2);
+  assert.match(out[0], /Lint command `npm run lint` fails\. Output tail: boom/);
+});
+
+test('preJudge enabled with a failing lint goes to repair without a judge call', async () => {
+  const store = tempRepo({ preJudge: { enabled: true, lintCommand: 'exit 1', requireTests: true } });
+  const { runner, calls } = oneTaskRunner(0);
+  const run = await runGoal({ store, runner, goal: 'g' });
+  const t = run.tasks[0];
+  assert.equal(t.status, 'failed');
+  assert.equal(t.attempts, 3);
+  assert.equal(calls.judge ?? 0, 0);
+  const rows = store.ledgerRows();
+  assert.ok(!rows.some((r) => r.role === 'judge' && r.attempt === 1));
+  assert.ok(rows.some((r) => (r as { outcome?: string }).outcome === 'prejudge_fail'));
+  assert.ok(store.events(run.id).some((e) => e.kind === 'task.repair'));
+  assert.match(t.verdict!.issues[0], /Lint command `exit 1` fails/);
+});
+
+test('preJudge disabled (default) still calls the judge', async () => {
+  const store = tempRepo({ preJudge: { enabled: false, lintCommand: 'exit 1', requireTests: true } });
+  const { runner, calls } = oneTaskRunner(0);
+  const run = await runGoal({ store, runner, goal: 'g' });
+  assert.equal(calls.judge, 1);
+  assert.equal(run.tasks[0].status, 'merged');
+});
+
+test('diffStat throws on a bogus base (repairOrFail guards it) and is empty for no changes', async () => {
+  const store = tempRepo();
+  assert.throws(() => g.diffStat(store.root, 'no-such-ref'));
+  assert.equal(g.diffStat(store.root, 'HEAD'), '');
 });

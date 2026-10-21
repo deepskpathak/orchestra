@@ -14,6 +14,8 @@ export const DEFAULT_PROJECT_CONFIG: ProjectConfig = {
   permissionMode: 'acceptEdits',
   runBudgetUsd: 20,
   judgeTiers: { enabled: false, cheapModel: 'haiku', margin: 0.1 },
+  preJudge: { enabled: false, lintCommand: null, requireTests: true },
+  fastPath: { enabled: false, maxGoalChars: 400 },
   evolve: { every: 3, autoPromote: true, minGain: 0.02, sample: 5, minCases: 5 },
 };
 
@@ -83,7 +85,7 @@ export class Store {
 
   config(): ProjectConfig {
     const c = this.readJson<Partial<ProjectConfig>>('config.json', {});
-    return { ...DEFAULT_PROJECT_CONFIG, ...c, judgeTiers: { ...DEFAULT_PROJECT_CONFIG.judgeTiers, ...(c.judgeTiers ?? {}) }, evolve: { ...DEFAULT_PROJECT_CONFIG.evolve, ...(c.evolve ?? {}) } };
+    return { ...DEFAULT_PROJECT_CONFIG, ...c, judgeTiers: { ...DEFAULT_PROJECT_CONFIG.judgeTiers, ...(c.judgeTiers ?? {}) }, preJudge: { ...DEFAULT_PROJECT_CONFIG.preJudge, ...(c.preJudge ?? {}) }, fastPath: { ...DEFAULT_PROJECT_CONFIG.fastPath, ...(c.fastPath ?? {}) }, evolve: { ...DEFAULT_PROJECT_CONFIG.evolve, ...(c.evolve ?? {}) } };
   }
 
   // ---- runs ----

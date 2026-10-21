@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { joinPrompt, judgePrompt, plannerPrompt, workerPrompt } from '../src/conductor.ts';
+import { buildProgress, joinPrompt, judgePrompt, plannerPrompt, progressRel, workerPrompt } from '../src/conductor.ts';
 import type { Task } from '../src/types.ts';
 
 const mk = (id: string, over: Partial<Task> = {}): Task =>
@@ -44,4 +44,40 @@ test('planner prompt puts learnings, files, test command and goal before the ins
   assert.ok(p.prefix.indexOf('LEARNTEXT') < p.prefix.indexOf('a.ts'));
   assert.ok(p.prefix.indexOf('TEST COMMAND') < p.prefix.indexOf('GOALTEXT'));
   assert.equal(p.body, 'Produce the task graph and hidden scenarios.');
+});
+
+test('planner fast path keeps the prefix and asks for exactly one task', () => {
+  const base = { goal: 'G', files: ['a.ts'], learnings: 'L' };
+  const slow = plannerPrompt(base);
+  const fast = plannerPrompt({ ...base, fastPath: true });
+  assert.equal(fast.prefix, slow.prefix);
+  assert.match(fast.body, /exactly one task/);
+  assert.doesNotMatch(slow.body, /exactly one task/);
+});
+
+test('progress file path replaces long notes in the repair body, prefix unchanged', () => {
+  const long = `first line of issue\n${'detail line\n'.repeat(50)}END-OF-NOTE`;
+  const task = mk('T1', { attempts: 2, notes: [long] });
+  const plain = workerPrompt({ ...common, task, others: [] });
+  const withFile = workerPrompt({ ...common, task, others: [], progressFile: '/tmp/x/progress/T1.json' });
+  assert.equal(withFile.prefix, plain.prefix);
+  assert.ok(withFile.body.includes('/tmp/x/progress/T1.json'));
+  assert.ok(withFile.body.includes('first line of issue'));
+  assert.ok(!withFile.body.includes('END-OF-NOTE'));
+  assert.ok(plain.body.includes('END-OF-NOTE'), 'without progressFile notes stay inline');
+  assert.ok(!withFile.prefix.includes('/tmp/x'));
+});
+
+test('buildProgress derives failingCriteria from verdict.criteria and defaults to []', () => {
+  const task = mk('T1', { attempts: 2 });
+  const verdict = { pass: false, score: 0.4, summary: 's', issues: ['a'], testsPassed: true, criteria: [{ criterion: 'c1', pass: true, score: 1, note: '' }, { criterion: 'c2', pass: false, score: 0, note: 'bad' }] };
+  const p = buildProgress({ task, verdict, issues: ['a'], diffSummary: 'x' }) as Record<string, unknown>;
+  assert.equal(p.taskId, 'T1');
+  assert.equal(p.attempt, 2);
+  assert.equal(p.score, 0.4);
+  assert.deepEqual((p.failingCriteria as { criterion: string }[]).map((c) => c.criterion), ['c2']);
+  const q = buildProgress({ task, verdict: { ...verdict, criteria: undefined }, issues: [], diffSummary: '' }) as Record<string, unknown>;
+  assert.deepEqual(q.failingCriteria, []);
+  assert.deepEqual((buildProgress({ task, issues: [], diffSummary: '' }) as Record<string, unknown>).failingCriteria, []);
+  assert.equal(progressRel('r1', 'T1'), 'runs/r1/progress/T1.json');
 });

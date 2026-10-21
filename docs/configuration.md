@@ -7,7 +7,7 @@ Orchestra has two config layers, both plain JSON:
 
 ## Project config (`.orchestra/config.json`)
 
-Defaults come from `DEFAULT_PROJECT_CONFIG` in `src/store.ts`. Missing keys fall back to the defaults, and the `judgeTiers` and `evolve` objects are merged key by key. On `orchestra init`, `testCommand` is filled in by auto-detection (it stays `null` if nothing is detected).
+Defaults come from `DEFAULT_PROJECT_CONFIG` in `src/store.ts`. Missing keys fall back to the defaults, and the `judgeTiers`, `preJudge`, `fastPath` and `evolve` objects are merged key by key, so older configs get the defaults for newer keys automatically. On `orchestra init`, `testCommand` is filled in by auto-detection (it stays `null` if nothing is detected).
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
@@ -18,6 +18,8 @@ Defaults come from `DEFAULT_PROJECT_CONFIG` in `src/store.ts`. Missing keys fall
 | `permissionMode` | string | `"acceptEdits"` | Permission mode passed to worker sessions. |
 | `runBudgetUsd` | number | `20` | Spend cap per run. Once reached, tasks that are pending or in repair fail with "run budget exhausted". |
 | `judgeTiers` | object | see below | Tiered judging settings. |
+| `preJudge` | object | see below | Deterministic checks before any judge call. |
+| `fastPath` | object | see below | Single-task planning for small goals. |
 | `evolve` | object | see below | Self-improvement settings. |
 
 ### `judgeTiers`
@@ -29,6 +31,25 @@ Off by default. When enabled, a cheap judge runs first and its verdict is final 
 | `judgeTiers.enabled` | boolean | `false` | Turn tiered judging on. |
 | `judgeTiers.cheapModel` | string | `"haiku"` | Model alias for the first, cheap judge call. |
 | `judgeTiers.margin` | number | `0.1` | Escalate when the score is within this distance of `passThreshold`. |
+
+### `preJudge`
+
+Off by default. When enabled, cheap checks run after the worker's tests and before any judge call. If any check fails, the task goes straight to repair with the failures as repair notes, and no judge call is spent.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `preJudge.enabled` | boolean | `false` | Turn the checks on. |
+| `preJudge.lintCommand` | string or null | `null` | Command run in the task worktree. A non-zero exit fails the check. `null` skips linting. |
+| `preJudge.requireTests` | boolean | `true` | When the diff adds an `export` to a source file under `src/`, require that a test file also changed. |
+
+### `fastPath`
+
+Off by default. When enabled and the goal is short and has no list structure (numbered or bulleted lines, or inline `(1)` items), the planner is told to return exactly one task, and is not required to produce hidden scenarios. Otherwise planning is unchanged.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `fastPath.enabled` | boolean | `false` | Turn the fast path on. |
+| `fastPath.maxGoalChars` | number | `400` | Goals longer than this never take the fast path. |
 
 ### `evolve`
 
@@ -71,6 +92,27 @@ Per-role values (roles are `planner`, `worker`, `judge`, `librarian`, `evolver`)
 | judge | `opus` | `1` |
 | librarian | `sonnet` | `1` |
 | evolver | `opus` | `3` |
+
+### Model tiers and providers
+
+A value in `models` may be a literal model name (for example `opus` or a full model id), which is used unchanged, or a tier: `strong`, `balanced` or `fast`. Tiers are resolved when the harness is loaded, through the capability table in `src/models.ts`, using the optional top-level `provider` key (default `anthropic`). The conductor, ledger and dashboard only see the resolved model ids.
+
+| Tier | `anthropic` model |
+|---|---|
+| `strong` | `opus` |
+| `balanced` | `sonnet` |
+| `fast` | `haiku` |
+
+The table also records approximate context and cache-minimum token figures per tier. Treat them as approximate and re-check them against provider docs. It holds no prices. A tier with a provider that is not in the table is an error that lists the known providers, while a literal name is accepted for any provider.
+
+```json
+{
+  "provider": "anthropic",
+  "models": { "planner": "strong", "worker": "balanced", "judge": "strong", "librarian": "fast", "evolver": "strong" }
+}
+```
+
+Note: `judgeTiers.cheapModel` in the project config is not tier-resolved yet, so give it a literal model name.
 
 ## Harness versions
 
