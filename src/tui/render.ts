@@ -260,6 +260,11 @@ export function renderStats(m: VersionMetrics[], archive: ArchiveEntry[], curren
     );
     if (a.rationale && a.rationale !== 'seed') out.push(c('gray', `         ↳ ${a.rationale.slice(0, 110)}`));
   }
+  out.push('');
+  out.push(
+    'cache hit ratio     ' +
+      (m.map((x) => `${x.version} ${x.cacheHitRatio == null ? 'n/a' : `${(x.cacheHitRatio * 100).toFixed(0)}%`}`).join('  ') || 'n/a'),
+  );
   if (m.length > 1) {
     out.push('');
     out.push(`satisfaction trend  ${c('green', sparkline(m.map((x) => x.satisfaction)))}`);

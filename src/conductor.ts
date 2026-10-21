@@ -553,6 +553,10 @@ export class Conductor {
       costUsd: res.costUsd,
       durationMs: res.durationMs,
       turns: res.turns,
+      inputTokens: res.usage?.inputTokens,
+      outputTokens: res.usage?.outputTokens,
+      cacheReadTokens: res.usage?.cacheReadTokens,
+      cacheWriteTokens: res.usage?.cacheWriteTokens,
     });
     this.emit('agent.end', `${role}${task ? ` ${task.id}` : ''} ${res.ok ? 'finished' : `error: ${res.error}`} ($${res.costUsd.toFixed(2)}, ${Math.round(res.durationMs / 1000)}s)`, undefined, task?.id, role);
     this.save();

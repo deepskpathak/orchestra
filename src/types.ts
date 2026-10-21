@@ -116,6 +116,10 @@ export interface LedgerRow {
   costUsd: number;
   durationMs: number;
   turns: number;
+  inputTokens?: number; // token usage; absent on legacy rows
+  outputTokens?: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
   outcome?: string; // e.g. "pass", "fail", "merged", "conflict"
   score?: number;
 }

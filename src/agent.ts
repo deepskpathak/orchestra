@@ -26,6 +26,27 @@ export interface AgentRequest {
   onAction?: (action: string) => void;
 }
 
+export interface Usage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+}
+
+// Pulls token counts from a stream-json `result` message. Missing or non-numeric fields count as 0;
+// undefined when the message carries no usage object at all.
+export function parseUsage(msg: any): Usage | undefined {
+  const u = msg?.usage;
+  if (!u || typeof u !== 'object') return undefined;
+  const n = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
+  return {
+    inputTokens: n(u.input_tokens),
+    outputTokens: n(u.output_tokens),
+    cacheReadTokens: n(u.cache_read_input_tokens),
+    cacheWriteTokens: n(u.cache_creation_input_tokens),
+  };
+}
+
 export interface AgentResult {
   ok: boolean;
   text: string;
@@ -34,6 +55,7 @@ export interface AgentResult {
   turns: number;
   durationMs: number;
   error?: string;
+  usage?: Usage;
 }
 
 export type Runner = (req: AgentRequest) => Promise<AgentResult>;
@@ -129,6 +151,7 @@ export const claudeRunner: Runner = (req) =>
           costUsd: Number(msg.total_cost_usd ?? 0),
           turns: Number(msg.num_turns ?? 0),
           durationMs: Number(msg.duration_ms ?? Date.now() - started),
+          usage: parseUsage(msg),
           error: isError ? (msg.errors?.join('; ') || msg.result || msg.subtype) : undefined,
         };
       }
