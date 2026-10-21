@@ -34,7 +34,19 @@ export const joinPrompt = (p: BuiltPrompt): string => [p.prefix, p.body].filter(
 
 const bullets = (items: string[]): string => items.map((a) => `- ${a}`).join('\n');
 
-export function plannerPrompt(i: { goal: string; files: string[]; testCommand?: string; learnings: string }): BuiltPrompt {
+const LIST_LINE = /^\s*(?:[-*]\s|\d+[.)]\s)/m;
+const INLINE_ITEM = /\(\d+\)/;
+
+export function fastPathDecision(goal: string, cfg: { enabled: boolean; maxGoalChars: number }): { fast: boolean; reason: string } {
+  const g = (goal ?? '').trim();
+  if (!cfg.enabled) return { fast: false, reason: 'fast path disabled' };
+  if (!g) return { fast: false, reason: 'empty goal' };
+  if (g.length > cfg.maxGoalChars) return { fast: false, reason: `goal longer than ${cfg.maxGoalChars} chars` };
+  if (LIST_LINE.test(g) || INLINE_ITEM.test(g)) return { fast: false, reason: 'goal has list structure' };
+  return { fast: true, reason: 'small single-concern goal' };
+}
+
+export function plannerPrompt(i: { goal: string; files: string[]; testCommand?: string; learnings: string; fastPath?: boolean }): BuiltPrompt {
   return {
     prefix: [
       `LEARNINGS:\n${i.learnings}`,
@@ -42,7 +54,9 @@ export function plannerPrompt(i: { goal: string; files: string[]; testCommand?: 
       `TEST COMMAND: ${i.testCommand ?? '(none configured)'}`,
       `GOAL:\n${i.goal}`,
     ].join('\n\n'),
-    body: 'Produce the task graph and hidden scenarios.',
+    body: i.fastPath
+      ? 'Produce the task graph and hidden scenarios.\nThis goal is small and single-concern: return exactly one task and an empty or minimal scenarios list.'
+      : 'Produce the task graph and hidden scenarios.',
   };
 }
 
@@ -167,6 +181,12 @@ const PLAN_SCHEMA = {
     },
   },
   required: ['tasks', 'scenarios'],
+};
+
+export const FAST_PLAN_SCHEMA = {
+  ...PLAN_SCHEMA,
+  properties: { ...PLAN_SCHEMA.properties, tasks: { ...PLAN_SCHEMA.properties.tasks, maxItems: 1 } },
+  required: ['tasks'],
 };
 
 // Per-criterion judging: mean score, and pass only when every criterion passes. Malformed entries are skipped.
@@ -321,18 +341,20 @@ export class Conductor {
     const learnings = readLearnings(store);
     const cfg = store.config();
     const files = g.trackedFiles(this.integration.path);
+    const fp = fastPathDecision(run.goal, cfg.fastPath);
     const built = plannerPrompt({
       goal: run.goal,
       files,
       testCommand: cfg.testCommand,
       learnings: formatLearnings(learnings, 'planner'),
+      fastPath: fp.fast,
     });
     const prompt = joinPrompt(built);
 
     const res = await this.call('planner', undefined, 1, {
       prompt,
       cwd: this.integration.path,
-      schema: PLAN_SCHEMA,
+      schema: fp.fast ? FAST_PLAN_SCHEMA : PLAN_SCHEMA,
       tools: ['Read', 'Grep', 'Glob'],
     });
     const out = extractJson(res) as { tasks?: any[]; scenarios?: Scenario[] } | undefined;
@@ -342,8 +364,10 @@ export class Conductor {
     this.scenarios = out.scenarios ?? [];
     // Holdout: only the judge ever receives these. .orchestra is outside every worktree.
     store.writeJson(`holdout/${run.id}.json`, this.scenarios);
+    if (fp.fast) this.emit('log', `Fast path: ${fp.reason}`);
     this.emit('plan', `Planned ${run.tasks.length} tasks, ${this.scenarios.length} hidden scenarios`, {
       tasks: run.tasks.map((t) => ({ id: t.id, title: t.title, deps: t.deps })),
+      ...(fp.fast ? { fastPath: true } : {}),
     });
     this.save();
   }

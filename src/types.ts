@@ -158,6 +158,10 @@ export interface ProjectConfig {
     lintCommand: string | null;
     requireTests: boolean; // new exports under src/ need a changed test file
   };
+  fastPath: {
+    enabled: boolean; // small single-concern goals get one task and no hidden-scenario requirement
+    maxGoalChars: number;
+  };
   evolve: {
     every: number; // auto-evolve after every N completed runs, 0 disables
     autoPromote: boolean;
