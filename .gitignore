@@ -1,2 +1,7 @@
 node_modules/
 .orchestra/
+.DS_Store
+*.log
+coverage/
+.env
+.env.*
