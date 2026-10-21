@@ -161,6 +161,37 @@ export interface EvolveOutcome {
   reason: string;
 }
 
+export interface PromotionInput {
+  incumbentScores: number[]; // per-case scores, same order as candidateScores
+  candidateScores: number[];
+  regressions: string[];
+  minGain: number;
+  minCases: number;
+  incumbent?: string;
+}
+
+export interface PromotionDecision {
+  promote: boolean;
+  reason: string;
+  gain: number;
+  spread: number;
+}
+
+// Pure promotion gate. With few cases a lucky run looks like a gain, so refuse below minCases,
+// and require the mean gain to beat the observed spread (stddev of per-case deltas).
+export function promotionDecision(i: PromotionInput): PromotionDecision {
+  const n = Math.min(i.incumbentScores.length, i.candidateScores.length);
+  const deltas = Array.from({ length: n }, (_, k) => i.candidateScores[k] - i.incumbentScores[k]);
+  const gain = n ? deltas.reduce((a, b) => a + b, 0) / n : 0;
+  const spread = n ? Math.sqrt(deltas.reduce((a, d) => a + (d - gain) ** 2, 0) / n) : 0;
+  const out = (promote: boolean, reason: string): PromotionDecision => ({ promote, reason, gain: round(gain), spread: round(spread) });
+  if (n < i.minCases) return out(false, `only ${n} eval cases, need at least ${i.minCases}`);
+  if (i.regressions.length) return out(false, `regressed on ${i.regressions.join(', ')}`);
+  const bar = Math.max(i.minGain, spread);
+  if (!(gain > bar)) return out(false, `gain ${gain.toFixed(3)} not above ${spread > i.minGain ? 'spread' : 'minGain'} ${bar.toFixed(3)}`);
+  return out(true, `+${gain.toFixed(3)} over ${i.incumbent ?? 'incumbent'} with no regressions (spread ${spread.toFixed(3)})`);
+}
+
 export async function evolve(store: Store, runner: Runner, log: (msg: string) => void, onRun?: (r: Run) => void): Promise<EvolveOutcome> {
   const incumbent = currentVersion(store);
   const h = loadHarness(store, incumbent);
@@ -222,13 +253,16 @@ export async function evolve(store: Store, runner: Runner, log: (msg: string) =>
   updateArchive(store, candidate, { evalScore: cand.score, evalDetail: cand.detail });
 
   const regressions = cases.filter((c) => inc.passed[c.id] && !cand.passed[c.id]).map((c) => c.id);
-  const gain = cand.score - inc.score;
-  const better = gain >= cfg.evolve.minGain && regressions.length === 0;
-  const reason = better
-    ? `+${gain.toFixed(3)} over ${incumbent} with no regressions`
-    : regressions.length
-      ? `regressed on ${regressions.join(', ')}`
-      : `gain ${gain.toFixed(3)} below minGain ${cfg.evolve.minGain}`;
+  const decision = promotionDecision({
+    incumbentScores: cases.map((c) => inc.detail[c.id] ?? 0),
+    candidateScores: cases.map((c) => cand.detail[c.id] ?? 0),
+    regressions,
+    minGain: cfg.evolve.minGain,
+    minCases: cfg.evolve.minCases,
+    incumbent,
+  });
+  const better = decision.promote;
+  const reason = decision.reason;
 
   if (better && cfg.evolve.autoPromote) {
     promote(store, candidate);

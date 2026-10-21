@@ -13,7 +13,7 @@ export const DEFAULT_PROJECT_CONFIG: ProjectConfig = {
   disallowedTools: ['WebFetch', 'WebSearch', 'Bash(git push:*)', 'Bash(curl:*)', 'Bash(wget:*)'],
   permissionMode: 'acceptEdits',
   runBudgetUsd: 20,
-  evolve: { every: 3, autoPromote: true, minGain: 0.02, sample: 3 },
+  evolve: { every: 3, autoPromote: true, minGain: 0.02, sample: 5, minCases: 5 },
 };
 
 export class Store {

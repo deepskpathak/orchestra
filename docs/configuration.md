@@ -25,8 +25,9 @@ Defaults come from `DEFAULT_PROJECT_CONFIG` in `src/store.ts`. Missing keys fall
 |---|---|---|---|
 | `evolve.every` | number | `3` | Auto-evolve after every N completed runs. `0` disables. |
 | `evolve.autoPromote` | boolean | `true` | Promote a candidate automatically when it beats the current version. If `false`, a winning candidate is kept but not promoted. |
-| `evolve.minGain` | number | `0.02` | Minimum eval score gain a candidate needs, with no regressions, to count as better. |
-| `evolve.sample` | number | `3` | Eval cases used per evaluation, newest first. Bounds cost. |
+| `evolve.minGain` | number | `0.02` | Minimum eval score gain a candidate needs to count as better. The gain must also exceed the observed spread (standard deviation of per-case score deltas), with no regressions. |
+| `evolve.sample` | number | `5` | Eval cases used per evaluation, newest first. Bounds cost. Keep it at or above `evolve.minCases`, or promotion is never possible. |
+| `evolve.minCases` | number | `5` | Minimum eval cases that must be evaluated before a candidate can be promoted. Fewer cases and the candidate is rejected with a reason. |
 
 Example:
 

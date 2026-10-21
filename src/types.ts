@@ -138,5 +138,6 @@ export interface ProjectConfig {
     autoPromote: boolean;
     minGain: number;
     sample: number; // eval cases per evaluation, newest first; bounds cost
+    minCases: number; // refuse to promote when fewer eval cases were evaluated
   };
 }
