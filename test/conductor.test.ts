@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import type { Runner } from '../src/agent.ts';
 import * as g from '../src/git.ts';
-import { runGoal, normalizeTasks, shouldEscalate, missingTestIssues, preJudgeIssues } from '../src/conductor.ts';
+import { runGoal, normalizeTasks, shouldEscalate, missingTestIssues, preJudgeIssues, fastPathDecision, FAST_PLAN_SCHEMA } from '../src/conductor.ts';
 import { DEFAULT_PROJECT_CONFIG } from '../src/store.ts';
 import { fakeRunner } from '../src/fake.ts';
 import { readLearnings } from '../src/learnings.ts';
@@ -255,6 +255,31 @@ test('missingTestIssues flags new src exports without a changed test', () => {
   assert.deepEqual(missingTestIssues('+++ b/src/x.ts\n+const a = 1;\n', ['src/x.ts']), []);
   assert.deepEqual(missingTestIssues('+++ b/src/x.ts\n@@\n context\n', ['src/x.ts']), []);
   assert.deepEqual(missingTestIssues('+++ b/README.md\n+export nothing\n', ['README.md']), []);
+});
+
+test('fastPath defaults off and an older config.json gets it', () => {
+  assert.deepEqual(DEFAULT_PROJECT_CONFIG.fastPath, { enabled: false, maxGoalChars: 400 });
+  const store = tempRepo();
+  const cfg = store.readJson<Record<string, unknown>>('config.json', {});
+  delete cfg.fastPath;
+  store.writeJson('config.json', cfg);
+  assert.deepEqual(store.config().fastPath, { enabled: false, maxGoalChars: 400 });
+});
+
+test('fastPathDecision applies each rule', () => {
+  const on = { enabled: true, maxGoalChars: 100 };
+  assert.equal(fastPathDecision('Fix the typo in README.', { ...on, enabled: false }).fast, false);
+  assert.deepEqual(fastPathDecision('Fix the typo in README.', on), { fast: true, reason: 'small single-concern goal' });
+  assert.equal(fastPathDecision('x'.repeat(101), on).fast, false);
+  assert.equal(fastPathDecision('Do this:\n- one\n- two', on).fast, false);
+  assert.equal(fastPathDecision('Do this:\n1. one\n2) two', on).fast, false);
+  assert.equal(fastPathDecision('Do (1) a and (2) b', on).fast, false);
+  assert.equal(fastPathDecision('   ', on).fast, false);
+});
+
+test('fast plan schema allows one task and does not require scenarios', () => {
+  assert.equal(FAST_PLAN_SCHEMA.properties.tasks.maxItems, 1);
+  assert.deepEqual(FAST_PLAN_SCHEMA.required, ['tasks']);
 });
 
 test('preJudgeIssues combines lint failure and test issues', () => {

@@ -46,6 +46,15 @@ test('planner prompt puts learnings, files, test command and goal before the ins
   assert.equal(p.body, 'Produce the task graph and hidden scenarios.');
 });
 
+test('planner fast path keeps the prefix and asks for exactly one task', () => {
+  const base = { goal: 'G', files: ['a.ts'], learnings: 'L' };
+  const slow = plannerPrompt(base);
+  const fast = plannerPrompt({ ...base, fastPath: true });
+  assert.equal(fast.prefix, slow.prefix);
+  assert.match(fast.body, /exactly one task/);
+  assert.doesNotMatch(slow.body, /exactly one task/);
+});
+
 test('progress file path replaces long notes in the repair body, prefix unchanged', () => {
   const long = `first line of issue\n${'detail line\n'.repeat(50)}END-OF-NOTE`;
   const task = mk('T1', { attempts: 2, notes: [long] });
