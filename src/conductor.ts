@@ -8,7 +8,7 @@ import * as g from './git.ts';
 import { loadHarness, type Harness } from './harness.ts';
 import { formatLearnings, readLearnings, writeLearnings, type Lesson } from './learnings.ts';
 import { newRunId, type Store } from './store.ts';
-import type { ActiveAgent, OrchestraEvent, Role, Run, Scenario, Task, Verdict } from './types.ts';
+import type { ActiveAgent, CriterionResult, OrchestraEvent, Role, Run, Scenario, Task, Verdict } from './types.ts';
 
 export interface ConductorOptions {
   store: Store;
@@ -84,7 +84,7 @@ export function judgePrompt(i: {
   return {
     prefix: `HIDDEN SCENARIOS for the whole goal (judge only the parts this task is responsible for):\n${i.scenarios
       .map((s) => `- ${s.id}: GIVEN ${s.given} WHEN ${s.when} THEN ${s.then}`)
-      .join('\n') || '(none)'}`,
+      .join('\n') || '(none)'}\n\nAlso return criteria: one entry per acceptance criterion, in order, each with pass, score and a short note.`,
     body: [
       `TASK ${task.id}: ${task.title}\n${task.description}`,
       `ACCEPTANCE CRITERIA:\n${bullets(task.acceptance)}`,
@@ -125,6 +125,30 @@ const PLAN_SCHEMA = {
   required: ['tasks', 'scenarios'],
 };
 
+// Per-criterion judging: mean score, and pass only when every criterion passes. Malformed entries are skipped.
+export function aggregateCriteria(criteria: unknown): { score: number; pass: boolean; failing: CriterionResult[]; list: CriterionResult[] } | undefined {
+  if (!Array.isArray(criteria)) return undefined;
+  const list: CriterionResult[] = [];
+  for (const c of criteria) {
+    if (!c || typeof c !== 'object' || typeof c.criterion !== 'string' || typeof c.pass !== 'boolean') continue;
+    const n = Number.isFinite(c.score) ? Math.min(1, Math.max(0, c.score)) : 0;
+    list.push({ criterion: c.criterion, pass: c.pass, score: n, ...(typeof c.note === 'string' ? { note: c.note } : {}) });
+  }
+  if (!list.length) return undefined;
+  return { score: list.reduce((a, c) => a + c.score, 0) / list.length, pass: list.every((c) => c.pass), failing: list.filter((c) => !c.pass), list };
+}
+
+// Combines the judge's raw verdict with test results and per-criterion results (when given).
+export function buildVerdict(v: Partial<Verdict>, testsOk: boolean | null, passThreshold: number, testIssue?: string): Verdict {
+  const agg = aggregateCriteria(v.criteria);
+  const score = agg ? agg.score : (v.score as number);
+  const pass = Boolean(v.pass) && score >= passThreshold && testsOk !== false && (agg?.pass ?? true);
+  const issues = [...(v.issues ?? [])];
+  if (agg) issues.unshift(...agg.failing.map((c) => `Criterion failed: ${c.criterion}${c.note ? `: ${c.note}` : ''}`));
+  if (testsOk === false && testIssue) issues.unshift(testIssue);
+  return { pass, score: round(score), summary: v.summary ?? '', issues, testsPassed: testsOk, ...(agg ? { criteria: agg.list } : {}) };
+}
+
 const VERDICT_SCHEMA = {
   type: 'object',
   properties: {
@@ -132,6 +156,14 @@ const VERDICT_SCHEMA = {
     score: { type: 'number', minimum: 0, maximum: 1 },
     summary: { type: 'string' },
     issues: { type: 'array', items: { type: 'string' } },
+    criteria: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: { criterion: { type: 'string' }, pass: { type: 'boolean' }, score: { type: 'number', minimum: 0, maximum: 1 }, note: { type: 'string' } },
+        required: ['criterion', 'pass', 'score'],
+      },
+    },
   },
   required: ['pass', 'score', 'summary', 'issues'],
 };
@@ -423,10 +455,7 @@ export class Conductor {
     if (!v || typeof v.score !== 'number') {
       return { pass: false, score: 0, summary: `Judge failed twice: ${error}`, issues: [], testsPassed: tests?.ok ?? null, judgeError: error };
     }
-    const pass = Boolean(v.pass) && v.score >= this.harness.config.passThreshold && testsOk !== false;
-    const issues = [...(v.issues ?? [])];
-    if (testsOk === false) issues.unshift(`Test command \`${cfg.testCommand}\` fails. Output tail:\n${tests!.tail.slice(-1200)}`);
-    return { pass, score: round(v.score), summary: v.summary ?? '', issues, testsPassed: testsOk };
+    return buildVerdict(v, testsOk, this.harness.config.passThreshold, testsOk === false ? `Test command \`${cfg.testCommand}\` fails. Output tail:\n${tests!.tail.slice(-1200)}` : undefined);
   }
 
   // Refinery: merges are serialized; post-merge tests guard the integration branch.
