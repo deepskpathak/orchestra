@@ -13,6 +13,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Token and cache usage per agent session in the ledger, and cache hit ratio in `orchestra stats`.
 - Tiered judging (`judgeTiers` in `.orchestra/config.json`): a cheap judge model first, escalating to the strong judge on test failure, borderline scores or open issues. Off by default.
 - Research notes and a ranked improvement backlog in `docs/research/cost-accuracy-speed.md`.
+- Per-criterion judging: verdicts may carry an optional `criteria` list (pass, score and note per acceptance criterion), the score is aggregated from it, and repair notes list the failing criteria.
+- Planner fast path (`fastPath` in `.orchestra/config.json`): a small single-concern goal gets exactly one task and no hidden-scenario requirement. Off by default.
+- Model tiers (`strong`, `balanced`, `fast`) in harness `models`, resolved through the capability table in `src/models.ts` using the optional `provider` key. Literal model names are still accepted unchanged.
+- Progress file for repair attempts at `.orchestra/runs/<run>/progress/<task>.json`, holding the previous diff summary and judge issues. The repair prompt points at it instead of inlining long text.
+- Deterministic pre-judge checks (`preJudge` in `.orchestra/config.json`): an optional lint command and a check that new exports under `src/` come with a changed test file. Failures go straight to repair without a judge call. Off by default.
 
 ### Changed
 
