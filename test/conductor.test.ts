@@ -237,7 +237,7 @@ test('tiers enabled: a borderline cheap verdict escalates and the strong verdict
   assert.deepEqual(store.ledgerRows().filter((r) => r.role === 'judge').map((r) => r.model), ['haiku', 'opus']);
 });
 
-test('diffStat throws on a bogus base and a progress file is not written when out of attempts', async () => {
+test('diffStat throws on a bogus base (repairOrFail guards it) and is empty for no changes', async () => {
   const store = tempRepo();
   assert.throws(() => g.diffStat(store.root, 'no-such-ref'));
   assert.equal(g.diffStat(store.root, 'HEAD'), '');
