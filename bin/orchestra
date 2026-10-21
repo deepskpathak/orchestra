@@ -1,0 +1,4 @@
+#!/bin/sh
+# PATH shim: Claude Code adds a plugin's bin/ to the Bash tool PATH, so `orchestra` works in-session.
+DIR=$(cd "$(dirname "$0")" && pwd)
+exec node "$DIR/orchestra.ts" "$@"

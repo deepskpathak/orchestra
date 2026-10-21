@@ -1,0 +1,68 @@
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import { buildArgs, extractJson, summarizeTool } from '../src/agent.ts';
+import { detectTestCommand } from '../src/cli.ts';
+import { decide } from '../src/guard.ts';
+import { fit, renderDashboard, renderStatusLine, sparkline, visible } from '../src/tui/render.ts';
+import type { Run } from '../src/types.ts';
+
+test('guard blocks holdout access, network, harness edits, secrets', () => {
+  assert.equal(decide('Read', { file_path: '/r/.orchestra/holdout/x.json' }).allow, false);
+  assert.equal(decide('Bash', { command: 'cat ../../.orchestra/holdout/r1.json' }).allow, false);
+  assert.equal(decide('Bash', { command: 'curl https://example.com' }).allow, false);
+  assert.equal(decide('Bash', { command: 'git push origin main' }).allow, false);
+  assert.equal(decide('Edit', { file_path: '/r/.orchestra/harness/v1/judge.md' }).allow, false);
+  assert.equal(decide('Read', { file_path: '/r/.env' }).allow, false);
+  assert.equal(decide('Bash', { command: 'npm test' }).allow, true);
+  assert.equal(decide('Edit', { file_path: '/r/src/app.ts' }).allow, true);
+});
+
+test('claude args: isolated settings, guard hook, no prompts, schema', () => {
+  const args = buildArgs({ role: 'judge', prompt: 'p', system: 's', cwd: '.', model: 'opus', budgetUsd: 1, schema: { type: 'object' }, tools: ['Read'] });
+  const at = (f: string) => args[args.indexOf(f) + 1];
+  assert.equal(at('--output-format'), 'stream-json');
+  assert.equal(at('--setting-sources'), 'project,local');
+  assert.equal(at('--permission-prompts'), 'none');
+  assert.equal(at('--tools'), 'Read');
+  assert.match(at('--settings'), /orchestra\.ts\\?" guard/);
+  assert.equal(at('--json-schema'), '{"type":"object"}');
+});
+
+test('extractJson prefers structured output and falls back to text', () => {
+  assert.deepEqual(extractJson({ ok: true, text: '', structured: { a: 1 }, costUsd: 0, turns: 0, durationMs: 0 }), { a: 1 });
+  assert.deepEqual(extractJson({ ok: true, text: 'here: {"b":2} done', costUsd: 0, turns: 0, durationMs: 0 }), { b: 2 });
+  assert.equal(extractJson({ ok: true, text: 'nothing', costUsd: 0, turns: 0, durationMs: 0 }), undefined);
+});
+
+test('summarizeTool shows the salient argument', () => {
+  assert.equal(summarizeTool('Edit', { file_path: 'src/a.ts' }), 'Edit src/a.ts');
+  assert.equal(summarizeTool('Bash', { command: 'npm   test' }), 'Bash npm test');
+  assert.equal(summarizeTool('TodoWrite', {}), 'TodoWrite');
+});
+
+test('fit pads and truncates by visible width, keeping ANSI codes', () => {
+  assert.equal(visible(fit('\x1b[32mhello\x1b[0m', 8)), 8);
+  assert.equal(visible(fit('abcdefghij', 5)), 5);
+  assert.ok(fit('abcdefghij', 5).endsWith('…'));
+  assert.equal(sparkline([0, 0.5, 1]).length, 3);
+});
+
+test('dashboard renders all sections at a fixed width', () => {
+  const run: Run = {
+    id: 'r1', goal: 'Add dark mode', harness: 'v2', kind: 'goal', status: 'running', startedAt: 0, costUsd: 1.23,
+    tasks: [
+      { id: 'T1', title: 'Theme context', description: '', acceptance: [], deps: [], status: 'merged', attempts: 1, notes: [], costUsd: 0.2, verdict: { pass: true, score: 0.9, summary: '', issues: [], testsPassed: true } },
+      { id: 'T2', title: 'Toggle', description: '', acceptance: [], deps: ['T1'], status: 'running', attempts: 2, notes: [], costUsd: 0.4 },
+    ],
+    active: [{ key: 'k', role: 'worker', task: 'T2', model: 'sonnet', startedAt: 0, lastAction: 'Edit src/Toggle.tsx', tools: 4, costUsd: 0 }],
+  };
+  const out = renderDashboard(run, [{ t: 1000, run: 'r1', kind: 'task.merged', msg: 'T1 merged' }], { width: 100, now: 65_000, color: false, frame: 0 });
+  for (const s of ['ORCHESTRA', 'harness v2', 'Add dark mode', 'Agents (1)', 'Edit src/Toggle.tsx', 'T1', '⇠ T1', 'T1 merged', '01:05']) assert.ok(out.includes(s), s);
+  for (const line of out.split('\n')) assert.equal(visible(line), 100, `line width: ${line}`);
+  assert.match(renderStatusLine(run, { harness: 'v2', color: false, frame: 0 }), /1\/2 .*W:T2/);
+  assert.match(renderStatusLine(null, { harness: 'v2', color: false, frame: 0 }), /idle · harness v2/);
+});
+
+test('detectTestCommand recognises common stacks', () => {
+  assert.equal(detectTestCommand('/nonexistent'), null);
+});

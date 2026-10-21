@@ -1,0 +1,125 @@
+import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { test } from 'node:test';
+import type { Runner } from '../src/agent.ts';
+import { runGoal, normalizeTasks } from '../src/conductor.ts';
+import { fakeRunner } from '../src/fake.ts';
+import { readLearnings } from '../src/learnings.ts';
+import { tempRepo } from './helpers.ts';
+
+test('happy path: plans, repairs a rejected task, merges all, learns', async () => {
+  const store = tempRepo();
+  const run = await runGoal({ store, runner: fakeRunner(), goal: 'demo goal' });
+
+  assert.equal(run.status, 'done');
+  assert.deepEqual(run.tasks.map((t) => t.status), ['merged', 'merged', 'merged', 'merged']);
+  assert.equal(run.tasks.find((t) => t.id === 'T2')!.attempts, 2, 'T2 is rejected once, then repaired');
+  assert.ok(run.satisfaction! > 0.8);
+  assert.ok(run.costUsd > 0);
+  assert.equal(readLearnings(store).length, 2);
+
+  // Merged work landed on the integration branch, the user's checkout is untouched.
+  const files = execFileSync('git', ['ls-tree', '-r', '--name-only', run.integrationBranch!], { cwd: store.root, encoding: 'utf8' });
+  for (const id of ['T1', 'T2', 'T3', 'T4']) assert.match(files, new RegExp(`fake/${id}.txt`));
+  const mainFiles = execFileSync('git', ['ls-tree', '-r', '--name-only', 'main'], { cwd: store.root, encoding: 'utf8' });
+  assert.doesNotMatch(mainFiles, /fake\//);
+
+  // Holdout scenarios exist for the judge only, outside every worktree.
+  assert.equal(store.readJson<unknown[]>(`holdout/${run.id}.json`, []).length, 1);
+  // Every agent session is in the ledger.
+  assert.ok(store.ledgerRows().some((r) => r.role === 'judge' && r.task === 'T2' && r.attempt === 2));
+  const kinds = store.events(run.id).map((e) => e.kind);
+  for (const k of ['run.start', 'plan', 'task.repair', 'task.merged', 'learn', 'run.end']) assert.ok(kinds.includes(k as never), k);
+});
+
+test('a task that never passes fails after maxAttempts and blocks dependents', async () => {
+  const store = tempRepo();
+  const run = await runGoal({ store, runner: fakeRunner({ failAlways: ['T1'], failFirstAttemptOf: [] }), goal: 'g' });
+  const by = Object.fromEntries(run.tasks.map((t) => [t.id, t]));
+  assert.equal(by.T1.status, 'failed');
+  assert.equal(by.T1.attempts, 3);
+  assert.equal(by.T3.status, 'blocked');
+  assert.equal(by.T4.status, 'blocked');
+  assert.equal(by.T2.status, 'merged');
+  assert.equal(run.status, 'failed');
+});
+
+test('merge conflict sends the task back for a fresh attempt on the latest code', async () => {
+  const store = tempRepo({ concurrency: 2 });
+  const base = fakeRunner();
+  // Two independent tasks both write shared.txt: whichever merges second conflicts.
+  const runner: Runner = async (req) => {
+    if (req.role === 'planner') {
+      return {
+        ok: true, text: '', costUsd: 0, turns: 1, durationMs: 1,
+        structured: {
+          tasks: [
+            { id: 'T1', title: 'a', description: 'a', acceptance: [], deps: [] },
+            { id: 'T2', title: 'b', description: 'b', acceptance: [], deps: [] },
+          ],
+          scenarios: [],
+        },
+      };
+    }
+    if (req.role === 'worker') {
+      writeFileSync(join(req.cwd, 'shared.txt'), `${req.meta!.task} attempt ${req.meta!.attempt}\n` + execFileSync('git', ['log', '--oneline'], { cwd: req.cwd, encoding: 'utf8' }));
+      execFileSync('git', ['add', '-A'], { cwd: req.cwd });
+      execFileSync('git', ['commit', '-qm', 'w'], { cwd: req.cwd });
+      return { ok: true, text: 'done', costUsd: 0, turns: 1, durationMs: 1 };
+    }
+    if (req.role === 'judge') return { ok: true, text: '', costUsd: 0, turns: 1, durationMs: 1, structured: { pass: true, score: 0.9, summary: 'ok', issues: [] } };
+    return base(req);
+  };
+  const run = await runGoal({ store, runner, goal: 'g' });
+  assert.equal(run.status, 'done');
+  assert.ok(run.tasks.some((t) => t.attempts === 2), 'one task needed a second attempt after the conflict');
+  assert.ok(store.ledgerRows().some((r) => r.outcome === 'conflict'));
+});
+
+test('failing test command rejects the change and the repair attempt lands', async () => {
+  // Test command fails while a marker file exists; the worker removes it on attempt 2.
+  const store = tempRepo({ testCommand: 'test ! -f broken.txt', concurrency: 1 });
+  const runner: Runner = async (req) => {
+    if (req.role === 'planner') {
+      return { ok: true, text: '', costUsd: 0, turns: 1, durationMs: 1, structured: { tasks: [{ id: 'T1', title: 'a', description: 'a', acceptance: [], deps: [] }], scenarios: [] } };
+    }
+    if (req.role === 'worker') {
+      if (req.meta!.attempt === 1) writeFileSync(join(req.cwd, 'broken.txt'), 'x');
+      else execFileSync('git', ['rm', '-q', 'broken.txt'], { cwd: req.cwd });
+      writeFileSync(join(req.cwd, `work${req.meta!.attempt}.txt`), 'w');
+      return { ok: true, text: 'done', costUsd: 0, turns: 1, durationMs: 1 };
+    }
+    if (req.role === 'judge') return { ok: true, text: '', costUsd: 0, turns: 1, durationMs: 1, structured: { pass: true, score: 0.9, summary: 'ok', issues: [] } };
+    return { ok: true, text: '', costUsd: 0, turns: 1, durationMs: 1, structured: { lessons: [] } };
+  };
+  const run = await runGoal({ store, runner, goal: 'g' });
+  const t1 = run.tasks[0];
+  assert.equal(t1.status, 'merged');
+  assert.equal(t1.attempts, 2);
+  assert.equal(t1.verdict!.testsPassed, true);
+});
+
+test('planner crash fails the run cleanly', async () => {
+  const store = tempRepo();
+  const runner: Runner = async () => ({ ok: false, text: '', costUsd: 0, turns: 0, durationMs: 0, error: 'Failed to authenticate' });
+  const run = await runGoal({ store, runner, goal: 'g' });
+  assert.equal(run.status, 'failed');
+  assert.match(run.error!, /Failed to authenticate/);
+  const wts = execFileSync('git', ['worktree', 'list'], { cwd: store.root, encoding: 'utf8' }).trim().split('\n');
+  assert.equal(wts.length, 1, 'worktrees are cleaned up');
+});
+
+test('normalizeTasks dedupes ids, drops unknown deps and breaks cycles', () => {
+  const tasks = normalizeTasks([
+    { id: 'A', title: 'a', description: '', acceptance: [], deps: ['B', 'ZZ'] },
+    { id: 'B', title: 'b', description: '', acceptance: [], deps: ['A'] },
+    { id: 'A', title: 'dup', description: '', acceptance: [], deps: [] },
+  ]);
+  assert.deepEqual(tasks.map((t) => t.id), ['A', 'B', 'A-3']);
+  const a = tasks[0];
+  const b = tasks[1];
+  assert.ok(!(a.deps.includes('B') && b.deps.includes('A')), 'cycle broken');
+  assert.ok(!a.deps.includes('ZZ'));
+});

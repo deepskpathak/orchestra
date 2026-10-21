@@ -1,0 +1,14 @@
+{
+  "name": "orchestra-local",
+  "description": "Local marketplace for the Orchestra plugin",
+  "owner": {
+    "name": "Deepak"
+  },
+  "plugins": [
+    {
+      "name": "orchestra",
+      "source": "./",
+      "description": "Self-improving multi-agent software factory on Claude Code"
+    }
+  ]
+}

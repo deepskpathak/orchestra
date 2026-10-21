@@ -1,0 +1,14 @@
+{
+  "name": "orchestra",
+  "version": "0.1.0",
+  "description": "Self-improving multi-agent software factory on Claude Code",
+  "type": "module",
+  "bin": { "orchestra": "bin/orchestra.ts" },
+  "engines": { "node": ">=23.6" },
+  "scripts": {
+    "test": "node --test test/*.test.ts",
+    "demo": "node bin/orchestra.ts demo"
+  },
+  "license": "UNLICENSED",
+  "private": true
+}
