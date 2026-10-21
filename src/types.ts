@@ -12,12 +12,20 @@ export type TaskStatus =
   | 'failed' // out of attempts
   | 'blocked'; // a dependency failed
 
+export interface CriterionResult {
+  criterion: string;
+  pass: boolean;
+  score: number; // 0..1
+  note?: string;
+}
+
 export interface Verdict {
   pass: boolean;
   score: number; // 0..1 satisfaction estimate from the judge
   summary: string;
   issues: string[];
   testsPassed: boolean | null; // null when no test command is configured
+  criteria?: CriterionResult[]; // per-acceptance-criterion results, when the judge supplied them
   judgeError?: string; // set when the judge itself failed; score is meaningless then
 }
 
