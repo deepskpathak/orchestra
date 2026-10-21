@@ -44,7 +44,7 @@ Test conventions:
 - Keep the project dependency-free. Adding a dependency needs a strong justification in the PR.
 - Comment the why, not the what. Handle errors explicitly; no silent catches.
 - Do not reformat unrelated lines.
-- Do not hardcode the version string. Read it from `package.json` (`packageVersion()` in `src/cli.ts`).
+- Do not hardcode the version string. Read it from `package.json`.
 - When adding a CLI flag or command, update the `--help` output and keep its alignment. Unknown commands must still fail with the existing `unknown command` error and exit code 1.
 
 ## Changes to `harness/v1` prompts
