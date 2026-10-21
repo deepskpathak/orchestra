@@ -46,7 +46,31 @@ export function plannerPrompt(i: { goal: string; files: string[]; testCommand?: 
   };
 }
 
-export function workerPrompt(i: { goal: string; learnings: string; testCommand?: string; task: Task; others: string[] }): BuiltPrompt {
+const firstLine = (s: string, max = 200): string => (s.split('\n')[0] ?? '').slice(0, max);
+
+function repairSection(notes: string[], progressFile?: string): string {
+  if (!progressFile) return `REPAIR NOTES (previous attempt was rejected, fix all of these):\n${bullets(notes)}`;
+  return `REPAIR NOTES (previous attempt was rejected, fix all of these). Read ${progressFile} for the full diff summary and judge issues. Summary:\n${bullets(notes.map((n) => firstLine(n)))}`;
+}
+
+export const progressRel = (runId: string, taskId: string): string => `runs/${runId}/progress/${taskId}.json`;
+
+export function buildProgress(i: { task: Task; verdict?: Verdict; issues: string[]; diffSummary: string }): object {
+  const { task, verdict } = i;
+  return {
+    taskId: task.id,
+    title: task.title,
+    attempt: task.attempts,
+    score: verdict?.score ?? null,
+    testsPassed: verdict?.testsPassed ?? null,
+    issues: i.issues,
+    failingCriteria: (verdict?.criteria ?? []).filter((c) => c.pass === false),
+    diffSummary: i.diffSummary,
+    writtenAt: new Date().toISOString(),
+  };
+}
+
+export function workerPrompt(i: { goal: string; learnings: string; testCommand?: string; task: Task; others: string[]; progressFile?: string }): BuiltPrompt {
   const { task } = i;
   return {
     prefix: [
@@ -58,7 +82,7 @@ export function workerPrompt(i: { goal: string; learnings: string; testCommand?:
       `YOUR TASK ${task.id}: ${task.title}\n${task.description}`,
       `ACCEPTANCE CRITERIA:\n${bullets(task.acceptance)}`,
       `OTHER TASKS (owned by other workers, do not do them):\n${i.others.join('\n') || '(none)'}`,
-      task.notes.length ? `REPAIR NOTES (previous attempt was rejected, fix all of these):\n${bullets(task.notes)}` : '',
+      task.notes.length ? repairSection(task.notes, i.progressFile) : '',
     ]
       .filter(Boolean)
       .join('\n\n'),
@@ -354,6 +378,7 @@ export class Conductor {
         testCommand: cfg.testCommand,
         task,
         others,
+        progressFile: task.notes.length ? store.path(progressRel(this.run.id, task.id)) : undefined,
       }),
     );
 
@@ -495,10 +520,24 @@ export class Conductor {
       this.fail(task, `out of attempts (${task.attempts}). Last issues: ${issues.join(' | ').slice(0, 300)}`);
       return;
     }
+    this.writeProgress(task, issues);
     task.notes = issues;
     task.status = 'repair';
     this.emit('task.repair', `${task.id} -> repair: ${issues[0]?.split('\n')[0] ?? ''}`, { issues }, task.id);
     this.save();
+  }
+
+  // Repair attempts read this file instead of getting long text inlined in the prompt.
+  private writeProgress(task: Task, issues: string[]): void {
+    let diffSummary = '';
+    if (task.worktree) {
+      try {
+        diffSummary = g.diffStat(task.worktree, g.mergeBase(task.worktree, 'HEAD', this.integration.branch));
+      } catch (e) {
+        this.emit('log', `${task.id} diff summary unavailable: ${(e as Error).message.split('\n')[0]}`, undefined, task.id);
+      }
+    }
+    this.store.writeJson(progressRel(this.run.id, task.id), buildProgress({ task, verdict: task.verdict, issues, diffSummary }));
   }
 
   private fail(task: Task, reason: string): void {

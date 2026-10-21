@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import type { Runner } from '../src/agent.ts';
+import * as g from '../src/git.ts';
 import { runGoal, normalizeTasks, shouldEscalate } from '../src/conductor.ts';
 import { DEFAULT_PROJECT_CONFIG } from '../src/store.ts';
 import { fakeRunner } from '../src/fake.ts';
@@ -32,6 +33,11 @@ test('happy path: plans, repairs a rejected task, merges all, learns', async () 
   assert.equal(store.readJson<unknown[]>(`holdout/${run.id}.json`, []).length, 1);
   // Every agent session is in the ledger.
   assert.ok(store.ledgerRows().some((r) => r.role === 'judge' && r.task === 'T2' && r.attempt === 2));
+  // The repair path wrote a progress file; tasks that merged first time did not need one.
+  const prog = store.readJson<Record<string, unknown>>(`runs/${run.id}/progress/T2.json`, {});
+  for (const k of ['taskId', 'attempt', 'issues', 'failingCriteria', 'diffSummary']) assert.ok(k in prog, k);
+  assert.equal(prog.taskId, 'T2');
+  assert.equal(store.readJson<unknown>(`runs/${run.id}/progress/T1.json`, null), null);
   const kinds = store.events(run.id).map((e) => e.kind);
   for (const k of ['run.start', 'plan', 'task.repair', 'task.merged', 'learn', 'run.end']) assert.ok(kinds.includes(k as never), k);
 });
@@ -229,4 +235,10 @@ test('tiers enabled: a borderline cheap verdict escalates and the strong verdict
   assert.equal(run.tasks[0].status, 'merged');
   assert.equal(run.tasks[0].verdict!.summary, 'Meets criteria');
   assert.deepEqual(store.ledgerRows().filter((r) => r.role === 'judge').map((r) => r.model), ['haiku', 'opus']);
+});
+
+test('diffStat throws on a bogus base (repairOrFail guards it) and is empty for no changes', async () => {
+  const store = tempRepo();
+  assert.throws(() => g.diffStat(store.root, 'no-such-ref'));
+  assert.equal(g.diffStat(store.root, 'HEAD'), '');
 });
