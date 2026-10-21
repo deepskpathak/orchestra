@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-22
+
 ### Added
 
 - Community and project health files: contributing guide, code of conduct, security policy, issue and pull request templates.
@@ -39,5 +41,5 @@ First release.
 - **Simulated runner** for tests and `orchestra demo`.
 - **Read-only web dashboard**: `orchestra serve` and `orchestra run --serve`. A dependency-free `node:http` server on `127.0.0.1` streams `run.json` and `events.jsonl` over SSE to a single-file HTML page, with task detail (verdict, diff, agent log tails) and an `/orchestra:serve` skill.
 
-[Unreleased]: https://github.com/OWNER/orchestra/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/OWNER/orchestra/releases/tag/v0.1.0
+[Unreleased]: https://github.com/deepskpathak/orchestra/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/deepskpathak/orchestra/releases/tag/v0.2.0
