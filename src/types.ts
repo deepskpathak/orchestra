@@ -125,7 +125,9 @@ export interface LedgerRow {
 }
 
 export interface HarnessConfig {
+  // Role to literal model name or tier (strong, balanced, fast). loadHarness resolves tiers.
   models: Record<Role, string>;
+  provider?: string;
   maxAttempts: number;
   passThreshold: number;
   budgetUsd: Record<Role, number>;

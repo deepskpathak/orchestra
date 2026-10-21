@@ -72,6 +72,27 @@ Per-role values (roles are `planner`, `worker`, `judge`, `librarian`, `evolver`)
 | librarian | `sonnet` | `1` |
 | evolver | `opus` | `3` |
 
+### Model tiers and providers
+
+A value in `models` may be a literal model name (for example `opus` or a full model id), which is used unchanged, or a tier: `strong`, `balanced` or `fast`. Tiers are resolved when the harness is loaded, through the capability table in `src/models.ts`, using the optional top-level `provider` key (default `anthropic`). The conductor, ledger and dashboard only see the resolved model ids.
+
+| Tier | `anthropic` model |
+|---|---|
+| `strong` | `opus` |
+| `balanced` | `sonnet` |
+| `fast` | `haiku` |
+
+The table also records approximate context and cache-minimum token figures per tier. Treat them as approximate and re-check them against provider docs. It holds no prices. A tier with a provider that is not in the table is an error that lists the known providers, while a literal name is accepted for any provider.
+
+```json
+{
+  "provider": "anthropic",
+  "models": { "planner": "strong", "worker": "balanced", "judge": "strong", "librarian": "fast", "evolver": "strong" }
+}
+```
+
+Note: `judgeTiers.cheapModel` in the project config is not tier-resolved yet, so give it a literal model name.
+
 ## Harness versions
 
 The harness is the evolvable part of Orchestra: role prompts (`planner.md`, `worker.md`, `judge.md`, `librarian.md`, `evolver.md`) plus `config.json` (see `src/harness.ts`). Paths below are relative to the `.orchestra` directory.
