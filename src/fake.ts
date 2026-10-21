@@ -8,10 +8,11 @@ import type { AgentRequest, AgentResult, Runner } from './agent.ts';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-export function fakeRunner(opts: { stepMs?: number; failFirstAttemptOf?: string[]; failAlways?: string[] } = {}): Runner {
+export function fakeRunner(opts: { stepMs?: number; failFirstAttemptOf?: string[]; failAlways?: string[]; judgeFailTimes?: number } = {}): Runner {
   const step = opts.stepMs ?? 0;
   const failFirst = new Set(opts.failFirstAttemptOf ?? ['T2']);
   const failAlways = new Set(opts.failAlways ?? []);
+  let judgeFailsLeft = opts.judgeFailTimes ?? 0;
 
   return async (req: AgentRequest): Promise<AgentResult> => {
     const act = async (a: string) => {
@@ -62,6 +63,10 @@ export function fakeRunner(opts: { stepMs?: number; failFirstAttemptOf?: string[
         return done(undefined, `Implemented ${task}`, 0.2);
       }
       case 'judge': {
+        if (judgeFailsLeft > 0) {
+          judgeFailsLeft -= 1;
+          return { ok: false, text: '', error: 'simulated judge crash', costUsd: 0.01, turns: 1, durationMs: step };
+        }
         await act('Bash git diff');
         await act('says: checking acceptance');
         let careful = false;

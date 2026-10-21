@@ -18,6 +18,7 @@ export interface Verdict {
   summary: string;
   issues: string[];
   testsPassed: boolean | null; // null when no test command is configured
+  judgeError?: string; // set when the judge itself failed; score is meaningless then
 }
 
 export interface Task {

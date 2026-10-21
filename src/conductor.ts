@@ -273,7 +273,14 @@ export class Conductor {
       verdict = await this.judge(task, wt.path, base, work);
     }
     task.verdict = verdict;
-    this.emit('task.verdict', `${task.id} ${verdict.pass ? 'PASS' : 'FAIL'} ${verdict.score.toFixed(2)}: ${verdict.summary}`, { verdict }, task.id);
+    const label = verdict.judgeError ? 'JUDGE ERROR' : `${verdict.pass ? 'PASS' : 'FAIL'} ${verdict.score.toFixed(2)}`;
+    this.emit('task.verdict', `${task.id} ${label}: ${verdict.summary}`, { verdict }, task.id);
+
+    // The worker is not at fault, so do not spend a repair attempt (which would redo it).
+    if (verdict.judgeError) {
+      this.ledgerOutcome(task, 'judge_error');
+      return this.fail(task, `judge failed twice: ${verdict.judgeError}. Raise budgetUsd.judge in the harness config or re-run`);
+    }
 
     // ---- self-correction ----
     if (!verdict.pass) return this.repairOrFail(task, verdict.issues.length ? verdict.issues : [verdict.summary]);
@@ -299,21 +306,29 @@ export class Conductor {
       `DIFF vs base:\n${g.diffSince(cwd, base)}`,
     ].join('\n\n');
 
-    const res = await this.call('judge', task, task.attempts, {
-      prompt,
-      cwd,
-      schema: VERDICT_SCHEMA,
-      tools: ['Read', 'Grep', 'Glob', 'Bash'],
-      allowedTools: ['Read', 'Grep', 'Glob', 'Bash'],
-      disallowedTools: ['Edit', 'Write', 'Bash(git commit:*)', 'Bash(git reset:*)', 'Bash(rm:*)'],
-      permissionMode: 'default',
-    });
-    // Judges never edit. If one did anyway, discard it.
-    g.resetTo(cwd, headBefore);
-
-    const v = extractJson(res) as Partial<Verdict> | undefined;
-    if (!res.ok || !v || typeof v.score !== 'number') {
-      return { pass: false, score: 0, summary: `Judge failed: ${res.error ?? 'no verdict'}`, issues: ['Judge could not verify; re-check the change is complete and tested.'], testsPassed: tests?.ok ?? null };
+    // A judge crash or budget exhaustion says nothing about the worker: retry the judge alone, once.
+    let v: Partial<Verdict> | undefined;
+    let error: string | undefined;
+    for (let tryNo = 1; tryNo <= 2; tryNo++) {
+      const res = await this.call('judge', task, task.attempts, {
+        prompt,
+        cwd,
+        schema: VERDICT_SCHEMA,
+        tools: ['Read', 'Grep', 'Glob', 'Bash'],
+        allowedTools: ['Read', 'Grep', 'Glob', 'Bash'],
+        disallowedTools: ['Edit', 'Write', 'Bash(git commit:*)', 'Bash(git reset:*)', 'Bash(rm:*)'],
+        permissionMode: 'default',
+      });
+      // Judges never edit. If one did anyway, discard it.
+      g.resetTo(cwd, headBefore);
+      v = extractJson(res) as Partial<Verdict> | undefined;
+      if (res.ok && v && typeof v.score === 'number') break;
+      v = undefined;
+      error = res.error ?? 'no verdict';
+      if (tryNo === 1) this.emit('log', `${task.id} judge failed (${error}), retrying judge once`, undefined, task.id);
+    }
+    if (!v || typeof v.score !== 'number') {
+      return { pass: false, score: 0, summary: `Judge failed twice: ${error}`, issues: [], testsPassed: tests?.ok ?? null, judgeError: error };
     }
     const testsOk = tests ? tests.ok : null;
     const pass = Boolean(v.pass) && v.score >= this.harness.config.passThreshold && testsOk !== false;
@@ -493,7 +508,7 @@ export class Conductor {
       durationMs: 0,
       turns: 0,
       outcome,
-      score: task.verdict?.score,
+      score: task.verdict?.judgeError ? undefined : task.verdict?.score,
     });
   }
 
