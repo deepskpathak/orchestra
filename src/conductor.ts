@@ -89,6 +89,26 @@ export function workerPrompt(i: { goal: string; learnings: string; testCommand?:
   };
 }
 
+const isTestFile = (f: string) => f.startsWith('test/') || f.includes('.test.');
+
+// Source files under src/ that gained an `export` in the unified diff, when no test file changed.
+export function missingTestIssues(diff: string, changed: string[]): string[] {
+  if (changed.some(isTestFile)) return [];
+  const gained = new Set<string>();
+  let file = '';
+  for (const line of diff.split('\n')) {
+    if (line.startsWith('+++ ')) file = line.startsWith('+++ b/') ? line.slice(6) : '';
+    else if (line.startsWith('+export ') && /^src\/.+\.(ts|js)$/.test(file) && !isTestFile(file)) gained.add(file);
+  }
+  return gained.size ? [`New exports were added in ${[...gained].join(', ')} but no test file changed. Add or update tests under test/.`] : [];
+}
+
+export function preJudgeIssues(i: { lint: { ok: boolean; tail: string; cmd?: string } | null; testIssues: string[] }): string[] {
+  const out: string[] = [];
+  if (i.lint && !i.lint.ok) out.push(`Lint command \`${i.lint.cmd ?? ''}\` fails. Output tail: ${i.lint.tail.slice(-1200)}`);
+  return [...out, ...i.testIssues];
+}
+
 // Cheap-judge verdicts stand only when tests pass, the score clears the threshold by more than
 // the margin, and no issues were raised. A missing verdict always escalates.
 export function shouldEscalate(v: Partial<Verdict> | undefined, testsOk: boolean | null, passThreshold: number, margin: number): boolean {
@@ -400,7 +420,11 @@ export class Conductor {
     } else if (!g.hasChangesSince(wt.path, base)) {
       verdict = { pass: false, score: 0, summary: 'No changes were committed', issues: ['No code changes were produced. Implement the task.'], testsPassed: null };
     } else {
-      verdict = await this.judge(task, wt.path, base, work);
+      const issues = cfg.preJudge.enabled ? this.preJudge(task, wt.path, base) : [];
+      verdict = issues.length
+        ? { pass: false, score: 0, summary: 'Pre-judge checks failed', issues, testsPassed: null }
+        : await this.judge(task, wt.path, base, work);
+      if (issues.length) this.ledgerOutcome(task, 'prejudge_fail');
     }
     task.verdict = verdict;
     const label = verdict.judgeError ? 'JUDGE ERROR' : `${verdict.pass ? 'PASS' : 'FAIL'} ${verdict.score.toFixed(2)}`;
@@ -418,6 +442,16 @@ export class Conductor {
     task.status = 'merging';
     this.save();
     await this.enqueueMerge(task);
+  }
+
+  // Cheap deterministic checks that run before any judge call.
+  private preJudge(task: Task, cwd: string, base: string): string[] {
+    const { lintCommand, requireTests } = this.store.config().preJudge;
+    const lint = lintCommand ? { ...g.runTests(cwd, lintCommand), cmd: lintCommand } : null;
+    const testIssues = requireTests ? missingTestIssues(g.diffSince(cwd, base), g.changedFiles(cwd, base)) : [];
+    const issues = preJudgeIssues({ lint, testIssues });
+    if (issues.length) this.emit('log', `${task.id} pre-judge checks failed (${issues.length}), skipping judge`, undefined, task.id);
+    return issues;
   }
 
   private async judge(task: Task, cwd: string, base: string, work: AgentResult): Promise<Verdict> {

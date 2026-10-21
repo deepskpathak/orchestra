@@ -69,6 +69,10 @@ export function diffStat(cwd: string, base: string, maxChars = 4000): string {
   return d.length > maxChars ? d.slice(0, maxChars) + '\n... [stat truncated]' : d;
 }
 
+export function changedFiles(cwd: string, base: string): string[] {
+  return git(cwd, 'diff', '--name-only', base).split('\n').filter(Boolean);
+}
+
 export function hasChangesSince(cwd: string, base: string): boolean {
   return tryGit(cwd, 'rev-list', '--count', `${base}..HEAD`).out !== '0';
 }
