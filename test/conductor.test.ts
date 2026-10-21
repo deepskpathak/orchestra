@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import type { Runner } from '../src/agent.ts';
@@ -122,4 +123,58 @@ test('normalizeTasks dedupes ids, drops unknown deps and breaks cycles', () => {
   const b = tasks[1];
   assert.ok(!(a.deps.includes('B') && b.deps.includes('A')), 'cycle broken');
   assert.ok(!a.deps.includes('ZZ'));
+});
+
+function countingRunner(inner: Runner) {
+  const calls = { worker: 0, judge: 0 };
+  const runner: Runner = async (req) => {
+    if (req.role === 'worker' && req.meta?.task === 'T1') calls.worker += 1;
+    if (req.role === 'judge') calls.judge += 1;
+    return inner(req);
+  };
+  return { runner, calls };
+}
+
+const oneTaskRunner = (judgeFailTimes: number) => {
+  const base = fakeRunner({ judgeFailTimes, failFirstAttemptOf: [] });
+  const inner: Runner = async (req) =>
+    req.role === 'planner'
+      ? { ok: true, text: '', costUsd: 0, turns: 1, durationMs: 1, structured: { tasks: [{ id: 'T1', title: 'a', description: 'a', acceptance: [], deps: [] }], scenarios: [] } }
+      : base(req);
+  return countingRunner(inner);
+};
+
+test('a failed judge is retried alone once and the task still merges', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'orch-judge-'));
+  const log = join(dir, 'runs.log');
+  const store = tempRepo({ testCommand: `echo x >> '${log}'` });
+  const { runner, calls } = oneTaskRunner(1);
+  const run = await runGoal({ store, runner, goal: 'g' });
+  // Tests run once for the attempt (plus once post-merge), never again for the judge retry.
+  assert.equal(readFileSync(log, 'utf8').trim().split('\n').length, 2);
+  rmSync(dir, { recursive: true, force: true });
+  const t = run.tasks[0];
+  assert.equal(t.status, 'merged');
+  assert.equal(t.attempts, 1);
+  assert.equal(calls.worker, 1);
+  assert.equal(calls.judge, 2);
+  assert.equal(t.verdict!.judgeError, undefined);
+});
+
+test('two judge failures fail the task without a repair attempt or a 0.00 score', async () => {
+  const store = tempRepo();
+  const { runner, calls } = oneTaskRunner(2);
+  const run = await runGoal({ store, runner, goal: 'g' });
+  const t = run.tasks[0];
+  assert.equal(t.status, 'failed');
+  assert.equal(calls.worker, 1);
+  assert.equal(calls.judge, 2);
+  assert.ok(t.verdict!.judgeError);
+  const ev = store.events(run.id);
+  const failed = ev.find((e) => e.kind === 'task.failed')!;
+  assert.match(failed.msg, /judge failed twice/);
+  assert.match(failed.msg, /budgetUsd\.judge/);
+  assert.doesNotMatch(ev.find((e) => e.kind === 'task.verdict')!.msg, /0\.00/);
+  assert.ok(!ev.some((e) => e.kind === 'task.repair'));
+  assert.ok(store.ledgerRows().every((r) => r.score === undefined || r.score > 0));
 });
