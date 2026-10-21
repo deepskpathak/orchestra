@@ -5,7 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import type { Runner } from '../src/agent.ts';
-import { runGoal, normalizeTasks } from '../src/conductor.ts';
+import { runGoal, normalizeTasks, shouldEscalate } from '../src/conductor.ts';
+import { DEFAULT_PROJECT_CONFIG } from '../src/store.ts';
 import { fakeRunner } from '../src/fake.ts';
 import { readLearnings } from '../src/learnings.ts';
 import { tempRepo } from './helpers.ts';
@@ -177,4 +178,55 @@ test('two judge failures fail the task without a repair attempt or a 0.00 score'
   assert.doesNotMatch(ev.find((e) => e.kind === 'task.verdict')!.msg, /0\.00/);
   assert.ok(!ev.some((e) => e.kind === 'task.repair'));
   assert.ok(store.ledgerRows().every((r) => r.score === undefined || r.score > 0));
+});
+
+test('judgeTiers is off by default and shouldEscalate covers each trigger', () => {
+  assert.equal(DEFAULT_PROJECT_CONFIG.judgeTiers.enabled, false);
+  const clean = { score: 0.95, issues: [] as string[] };
+  assert.equal(shouldEscalate(clean, true, 0.75, 0.1), false);
+  assert.equal(shouldEscalate(clean, null, 0.75, 0.1), false);
+  assert.equal(shouldEscalate(clean, false, 0.75, 0.1), true);
+  assert.equal(shouldEscalate({ score: 0.8, issues: [] }, true, 0.75, 0.1), true);
+  assert.equal(shouldEscalate({ score: 0.65, issues: [] }, true, 0.75, 0.1), true);
+  assert.equal(shouldEscalate({ score: 0.95, issues: ['nit'] }, true, 0.75, 0.1), true);
+  assert.equal(shouldEscalate(undefined, true, 0.75, 0.1), true);
+});
+
+test('default config makes one strong judge call per attempt', async () => {
+  const store = tempRepo();
+  const { runner, calls } = oneTaskRunner(0);
+  await runGoal({ store, runner, goal: 'g' });
+  assert.equal(calls.judge, 1);
+  assert.ok(store.ledgerRows().filter((r) => r.role === 'judge').every((r) => r.model === 'opus'));
+});
+
+const tieredRun = async (cheapScore: number) => {
+  const store = tempRepo({ judgeTiers: { enabled: true, cheapModel: 'haiku', margin: 0.1 } });
+  const { runner: base } = oneTaskRunner(0);
+  const models: string[] = [];
+  const runner: Runner = async (req) => {
+    if (req.role === 'judge') {
+      models.push(req.model);
+      if (req.model === 'haiku') return { ok: true, text: '', costUsd: 0.01, turns: 1, durationMs: 1, structured: { pass: true, score: cheapScore, summary: 'cheap', issues: [] } };
+    }
+    return base(req);
+  };
+  const run = await runGoal({ store, runner, goal: 'g' });
+  return { run, models, store };
+};
+
+test('tiers enabled: a clean confident cheap verdict merges without the strong judge', async () => {
+  const { run, models, store } = await tieredRun(0.95);
+  assert.deepEqual(models, ['haiku']);
+  assert.equal(run.tasks[0].status, 'merged');
+  assert.equal(run.tasks[0].verdict!.summary, 'cheap');
+  assert.deepEqual(store.ledgerRows().filter((r) => r.role === 'judge').map((r) => r.model), ['haiku']);
+});
+
+test('tiers enabled: a borderline cheap verdict escalates and the strong verdict is final', async () => {
+  const { run, models, store } = await tieredRun(0.78);
+  assert.deepEqual(models, ['haiku', 'opus']);
+  assert.equal(run.tasks[0].status, 'merged');
+  assert.equal(run.tasks[0].verdict!.summary, 'Meets criteria');
+  assert.deepEqual(store.ledgerRows().filter((r) => r.role === 'judge').map((r) => r.model), ['haiku', 'opus']);
 });

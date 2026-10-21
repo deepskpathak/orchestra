@@ -13,6 +13,7 @@ export const DEFAULT_PROJECT_CONFIG: ProjectConfig = {
   disallowedTools: ['WebFetch', 'WebSearch', 'Bash(git push:*)', 'Bash(curl:*)', 'Bash(wget:*)'],
   permissionMode: 'acceptEdits',
   runBudgetUsd: 20,
+  judgeTiers: { enabled: false, cheapModel: 'haiku', margin: 0.1 },
   evolve: { every: 3, autoPromote: true, minGain: 0.02, sample: 5, minCases: 5 },
 };
 
@@ -82,7 +83,7 @@ export class Store {
 
   config(): ProjectConfig {
     const c = this.readJson<Partial<ProjectConfig>>('config.json', {});
-    return { ...DEFAULT_PROJECT_CONFIG, ...c, evolve: { ...DEFAULT_PROJECT_CONFIG.evolve, ...(c.evolve ?? {}) } };
+    return { ...DEFAULT_PROJECT_CONFIG, ...c, judgeTiers: { ...DEFAULT_PROJECT_CONFIG.judgeTiers, ...(c.judgeTiers ?? {}) }, evolve: { ...DEFAULT_PROJECT_CONFIG.evolve, ...(c.evolve ?? {}) } };
   }
 
   // ---- runs ----

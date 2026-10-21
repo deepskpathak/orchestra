@@ -65,6 +65,13 @@ export function workerPrompt(i: { goal: string; learnings: string; testCommand?:
   };
 }
 
+// Cheap-judge verdicts stand only when tests pass, the score clears the threshold by more than
+// the margin, and no issues were raised. A missing verdict always escalates.
+export function shouldEscalate(v: Partial<Verdict> | undefined, testsOk: boolean | null, passThreshold: number, margin: number): boolean {
+  if (!v || typeof v.score !== 'number') return true;
+  return testsOk === false || Math.abs(v.score - passThreshold) <= margin || (v.issues?.length ?? 0) > 0;
+}
+
 export function judgePrompt(i: {
   task: Task;
   scenarios: Scenario[];
@@ -372,31 +379,50 @@ export class Conductor {
       }),
     );
 
-    // A judge crash or budget exhaustion says nothing about the worker: retry the judge alone, once.
-    let v: Partial<Verdict> | undefined;
-    let error: string | undefined;
-    for (let tryNo = 1; tryNo <= 2; tryNo++) {
-      const res = await this.call('judge', task, task.attempts, {
-        prompt,
-        cwd,
-        schema: VERDICT_SCHEMA,
-        tools: ['Read', 'Grep', 'Glob', 'Bash'],
-        allowedTools: ['Read', 'Grep', 'Glob', 'Bash'],
-        disallowedTools: ['Edit', 'Write', 'Bash(git commit:*)', 'Bash(git reset:*)', 'Bash(rm:*)'],
-        permissionMode: 'default',
-      });
+    const testsOk = tests ? tests.ok : null;
+    const runJudge = async (model?: string): Promise<{ res: AgentResult; v?: Partial<Verdict> }> => {
+      const res = await this.call(
+        'judge',
+        task,
+        task.attempts,
+        {
+          prompt,
+          cwd,
+          schema: VERDICT_SCHEMA,
+          tools: ['Read', 'Grep', 'Glob', 'Bash'],
+          allowedTools: ['Read', 'Grep', 'Glob', 'Bash'],
+          disallowedTools: ['Edit', 'Write', 'Bash(git commit:*)', 'Bash(git reset:*)', 'Bash(rm:*)'],
+          permissionMode: 'default',
+        },
+        model,
+      );
       // Judges never edit. If one did anyway, discard it.
       g.resetTo(cwd, headBefore);
-      v = extractJson(res) as Partial<Verdict> | undefined;
-      if (res.ok && v && typeof v.score === 'number') break;
-      v = undefined;
-      error = res.error ?? 'no verdict';
+      const v = extractJson(res) as Partial<Verdict> | undefined;
+      return { res, v: res.ok && v && typeof v.score === 'number' ? v : undefined };
+    };
+
+    // Tiered judging (off by default): a cheap verdict stands only when it is clean and confident.
+    let v: Partial<Verdict> | undefined;
+    let error: string | undefined;
+    const tiers = cfg.judgeTiers;
+    if (tiers.enabled) {
+      const cheap = await runJudge(tiers.cheapModel);
+      if (cheap.v && !shouldEscalate(cheap.v, testsOk, this.harness.config.passThreshold, tiers.margin)) v = cheap.v;
+      else this.emit('log', `${task.id} cheap judge not decisive, escalating to ${this.harness.config.models.judge}`, undefined, task.id);
+    }
+
+    // A judge crash or budget exhaustion says nothing about the worker: retry the judge alone, once.
+    for (let tryNo = 1; tryNo <= 2 && !v; tryNo++) {
+      const r = await runJudge();
+      v = r.v;
+      if (v) break;
+      error = r.res.error ?? 'no verdict';
       if (tryNo === 1) this.emit('log', `${task.id} judge failed (${error}), retrying judge once`, undefined, task.id);
     }
     if (!v || typeof v.score !== 'number') {
       return { pass: false, score: 0, summary: `Judge failed twice: ${error}`, issues: [], testsPassed: tests?.ok ?? null, judgeError: error };
     }
-    const testsOk = tests ? tests.ok : null;
     const pass = Boolean(v.pass) && v.score >= this.harness.config.passThreshold && testsOk !== false;
     const issues = [...(v.issues ?? [])];
     if (testsOk === false) issues.unshift(`Test command \`${cfg.testCommand}\` fails. Output tail:\n${tests!.tail.slice(-1200)}`);
@@ -501,9 +527,9 @@ export class Conductor {
 
   // ---------- plumbing ----------
 
-  private async call(role: Role, task: Task | undefined, attempt: number, req: Omit<AgentRequest, 'role' | 'system' | 'model' | 'budgetUsd'>): Promise<AgentResult> {
+  private async call(role: Role, task: Task | undefined, attempt: number, req: Omit<AgentRequest, 'role' | 'system' | 'model' | 'budgetUsd'>, modelOverride?: string): Promise<AgentResult> {
     const { run, harness } = this;
-    const model = harness.config.models[role];
+    const model = modelOverride ?? harness.config.models[role];
     const agent: ActiveAgent = {
       key: `${role}:${task?.id ?? '-'}:${attempt}`,
       role,

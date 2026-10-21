@@ -7,7 +7,7 @@ Orchestra has two config layers, both plain JSON:
 
 ## Project config (`.orchestra/config.json`)
 
-Defaults come from `DEFAULT_PROJECT_CONFIG` in `src/store.ts`. Missing keys fall back to the defaults, and the `evolve` object is merged key by key. On `orchestra init`, `testCommand` is filled in by auto-detection (it stays `null` if nothing is detected).
+Defaults come from `DEFAULT_PROJECT_CONFIG` in `src/store.ts`. Missing keys fall back to the defaults, and the `judgeTiers` and `evolve` objects are merged key by key. On `orchestra init`, `testCommand` is filled in by auto-detection (it stays `null` if nothing is detected).
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
@@ -17,7 +17,18 @@ Defaults come from `DEFAULT_PROJECT_CONFIG` in `src/store.ts`. Missing keys fall
 | `disallowedTools` | string[] | `["WebFetch", "WebSearch", "Bash(git push:*)", "Bash(curl:*)", "Bash(wget:*)"]` | Tools workers may not use. Keeps workers off the network and from publishing. A guard hook enforces more. |
 | `permissionMode` | string | `"acceptEdits"` | Permission mode passed to worker sessions. |
 | `runBudgetUsd` | number | `20` | Spend cap per run. Once reached, tasks that are pending or in repair fail with "run budget exhausted". |
+| `judgeTiers` | object | see below | Tiered judging settings. |
 | `evolve` | object | see below | Self-improvement settings. |
+
+### `judgeTiers`
+
+Off by default. When enabled, a cheap judge runs first and its verdict is final only if tests passed (or none ran), the score differs from `passThreshold` by more than `margin`, and it listed no issues. Otherwise, or if the cheap judge returns no verdict, the strong judge from the harness config (`models.judge`) runs and its verdict is final. Ledger rows record the model actually used.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `judgeTiers.enabled` | boolean | `false` | Turn tiered judging on. |
+| `judgeTiers.cheapModel` | string | `"haiku"` | Model alias for the first, cheap judge call. |
+| `judgeTiers.margin` | number | `0.1` | Escalate when the score is within this distance of `passThreshold`. |
 
 ### `evolve`
 
