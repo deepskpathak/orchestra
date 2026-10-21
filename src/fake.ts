@@ -26,6 +26,7 @@ export function fakeRunner(opts: { stepMs?: number; failFirstAttemptOf?: string[
       costUsd,
       turns: 3,
       durationMs: step * 3,
+      usage: { inputTokens: 1200, outputTokens: 400, cacheReadTokens: 3000, cacheWriteTokens: 800 },
     });
     const task = req.meta?.task ?? '';
     const attempt = req.meta?.attempt ?? 1;
@@ -65,7 +66,7 @@ export function fakeRunner(opts: { stepMs?: number; failFirstAttemptOf?: string[
       case 'judge': {
         if (judgeFailsLeft > 0) {
           judgeFailsLeft -= 1;
-          return { ok: false, text: '', error: 'simulated judge crash', costUsd: 0.01, turns: 1, durationMs: step };
+          return { ok: false, text: '', error: 'simulated judge crash', costUsd: 0.01, turns: 1, durationMs: step, usage: { inputTokens: 300, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 } };
         }
         await act('Bash git diff');
         await act('says: checking acceptance');

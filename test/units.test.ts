@@ -2,11 +2,12 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { buildArgs, extractJson, summarizeTool } from '../src/agent.ts';
+import { buildArgs, extractJson, parseUsage, summarizeTool } from '../src/agent.ts';
 import { detectTestCommand } from '../src/cli.ts';
 import { decide } from '../src/guard.ts';
-import { fit, renderDashboard, renderStatusLine, sparkline, visible } from '../src/tui/render.ts';
-import type { Run } from '../src/types.ts';
+import { metrics } from '../src/evolve.ts';
+import { fit, renderDashboard, renderStats, renderStatusLine, sparkline, visible } from '../src/tui/render.ts';
+import type { LedgerRow, Run } from '../src/types.ts';
 
 test('guard blocks holdout access, network, harness edits, secrets', () => {
   assert.equal(decide('Read', { file_path: '/r/.orchestra/holdout/x.json' }).allow, false);
@@ -77,4 +78,35 @@ test('release metadata: MIT license, consistent package and plugin manifests', (
   assert.equal(pkg.license, 'MIT');
   assert.equal(plugin.license, 'MIT');
   assert.equal(pkg.version, plugin.version);
+});
+
+test('parseUsage reads full, partial and absent usage', () => {
+  assert.deepEqual(
+    parseUsage({ usage: { input_tokens: 10, output_tokens: 20, cache_read_input_tokens: 30, cache_creation_input_tokens: 40 } }),
+    { inputTokens: 10, outputTokens: 20, cacheReadTokens: 30, cacheWriteTokens: 40 },
+  );
+  assert.deepEqual(parseUsage({ usage: { input_tokens: 5, output_tokens: 'x' } }), {
+    inputTokens: 5,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+  });
+  assert.equal(parseUsage({ type: 'result' }), undefined);
+});
+
+function statsStore(rows: Partial<LedgerRow>[]) {
+  const run = { id: 'r1', kind: 'goal', harness: 'v1', endedAt: 1, tasks: [], satisfaction: 0 };
+  return { listRuns: () => ['r1'], loadRun: () => run, ledgerRows: () => rows.map((r) => ({ harness: 'v1', kind: 'goal', costUsd: 0, ...r })) } as any;
+}
+
+test('stats cache hit ratio: computed from usage, n/a for legacy rows', () => {
+  const archive = [{ version: 'v1', status: 'promoted', evalScore: null, rationale: 'seed' }] as any;
+  const withUsage = metrics(statsStore([{ inputTokens: 100, cacheReadTokens: 300, cacheWriteTokens: 100 }]));
+  assert.equal(withUsage[0].cacheHitRatio, 0.6);
+  assert.match(renderStats(withUsage, archive, 'v1', false), /cache hit ratio\s+v1 60%/);
+  const legacy = metrics(statsStore([{}]));
+  assert.equal(legacy[0].cacheHitRatio, null);
+  const out = renderStats(legacy, archive, 'v1', false);
+  assert.match(out, /cache hit ratio\s+v1 n\/a/);
+  assert.doesNotMatch(out, /NaN/);
 });

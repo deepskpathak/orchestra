@@ -31,6 +31,7 @@ export interface VersionMetrics {
   satisfaction: number; // mean run satisfaction
   costPerMerged: number;
   totalCost: number;
+  cacheHitRatio?: number | null; // cacheRead / (input + cacheRead + cacheWrite); null when no ledger rows have usage
 }
 
 export interface EvalCase {
@@ -57,8 +58,12 @@ export function metrics(store: Store): VersionMetrics[] {
     const tasks = rs.flatMap((r) => r.tasks);
     const merged = tasks.filter((t) => t.status === 'merged');
     const totalCost = rows.filter((r) => r.harness === version).reduce((s, r) => s + r.costUsd, 0);
+    const withUsage = rows.filter((r) => r.harness === version && r.cacheReadTokens !== undefined);
+    const sum = (k: 'inputTokens' | 'cacheReadTokens' | 'cacheWriteTokens') => withUsage.reduce((s, r) => s + (r[k] ?? 0), 0);
+    const denom = sum('inputTokens') + sum('cacheReadTokens') + sum('cacheWriteTokens');
     return {
       version,
+      cacheHitRatio: withUsage.length && denom > 0 ? sum('cacheReadTokens') / denom : null,
       runs: rs.length,
       tasks: tasks.length,
       merged: merged.length,
