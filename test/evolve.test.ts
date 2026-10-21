@@ -2,15 +2,16 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { Runner } from '../src/agent.ts';
 import { runGoal } from '../src/conductor.ts';
-import { evolutionDue, evolve, harvest, listEvals, metrics } from '../src/evolve.ts';
+import { evolutionDue, evolve, harvest, listEvals, metrics, promotionDecision } from '../src/evolve.ts';
 import { fakeRunner } from '../src/fake.ts';
 import { createVariant, currentVersion, loadHarness, readArchive } from '../src/harness.ts';
 import { tempRepo } from './helpers.ts';
+import { DEFAULT_PROJECT_CONFIG } from '../src/store.ts';
 
 const quiet = () => {};
 
 test('full self-improvement loop: run, harvest, evolve, evaluate, promote', async () => {
-  const store = tempRepo({ evolve: { every: 1, autoPromote: true, minGain: 0.02, sample: 1 } });
+  const store = tempRepo({ evolve: { every: 1, autoPromote: true, minGain: 0.02, sample: 1, minCases: 1 } });
   const runner = fakeRunner();
   const run = await runGoal({ store, runner, goal: 'build it' });
   assert.ok(harvest(store, run), 'clean run is harvested into the Factory Eval');
@@ -34,7 +35,7 @@ test('full self-improvement loop: run, harvest, evolve, evaluate, promote', asyn
 });
 
 test('variant that does not beat the incumbent is rejected and kept in the archive', async () => {
-  const store = tempRepo({ evolve: { every: 1, autoPromote: true, minGain: 0.02, sample: 1 } });
+  const store = tempRepo({ evolve: { every: 1, autoPromote: true, minGain: 0.02, sample: 1, minCases: 1 } });
   const runner = fakeRunner();
   const run = await runGoal({ store, runner, goal: 'build it' });
   harvest(store, run);
@@ -62,4 +63,35 @@ test('without eval cases a candidate is created but not promoted', async () => {
   assert.equal(out.promoted, false);
   assert.match(out.reason, /No Factory Eval cases/);
   assert.equal(currentVersion(store), 'v1');
+});
+
+const base = { regressions: [], minGain: 0.02, minCases: 5 };
+
+test('promotion gate refuses below minCases even with a large gain', () => {
+  const d = promotionDecision({ ...base, incumbentScores: [0, 0, 0], candidateScores: [1, 1, 1] });
+  assert.equal(d.promote, false);
+  assert.match(d.reason, /only 3 eval cases, need at least 5/);
+});
+
+test('promotion gate requires gain above the observed spread', () => {
+  // deltas 0.25, -0.05, 0.25, -0.05, 0.25 -> mean 0.15, stddev ~0.14: rejected
+  const noisy = promotionDecision({ ...base, incumbentScores: [0.5, 0.5, 0.5, 0.5, 0.5], candidateScores: [0.75, 0.45, 0.75, 0.45, 0.75] });
+  assert.equal(noisy.promote, false);
+  assert.ok(noisy.gain > 0.02 && noisy.spread > noisy.gain);
+  const steady = promotionDecision({ ...base, incumbentScores: [0.5, 0.5, 0.5, 0.5, 0.5], candidateScores: [0.6, 0.7, 0.65, 0.7, 0.6] });
+  assert.equal(steady.promote, true, steady.reason);
+  assert.ok(steady.gain > steady.spread);
+});
+
+test('promotion gate rejects any regression regardless of gain', () => {
+  const d = promotionDecision({ ...base, regressions: ['c1'], incumbentScores: [0, 0, 0, 0, 0], candidateScores: [1, 1, 1, 1, 1] });
+  assert.equal(d.promote, false);
+  assert.match(d.reason, /regressed on c1/);
+});
+
+test('minCases defaults to 5 and is filled for configs that lack it', () => {
+  assert.equal(DEFAULT_PROJECT_CONFIG.evolve.minCases, 5);
+  const store = tempRepo();
+  store.writeJson('config.json', { evolve: { every: 3, autoPromote: true, minGain: 0.02, sample: 3 } });
+  assert.equal(store.config().evolve.minCases, 5);
 });
