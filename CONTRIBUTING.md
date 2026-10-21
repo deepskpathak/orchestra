@@ -53,6 +53,15 @@ Test conventions:
 
 **Any PR that modifies `harness/v1` must include eval evidence**: the Factory Eval output comparing the candidate against the current harness (scores, and confirmation of no regressions). Paste it in the PR description. Prompt edits justified only by intuition will be asked for evidence before review.
 
+## Branching
+
+One meaningful iteration per branch. An iteration is a distinct feature, fix, research-backed improvement, or release step.
+
+- Branch from `main` and name it `iter/<short-topic>`, for example `iter/web-dashboard`.
+- Never commit directly to `main`. Open a pull request from the iteration branch. CI (`test`) must pass.
+- Keep unrelated iterations on separate branches so each can be reviewed, reverted, or released alone.
+- Orchestra's own `orchestra/<run>/integration` branches are run-level and local. Land them into an iteration branch, not into `main`.
+
 ## Commits and pull requests
 
 - Keep PRs small and focused on one change. Separate refactors from features.

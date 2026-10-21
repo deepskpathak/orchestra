@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          # Orchestra runs .ts files directly, which needs Node >= 23.6.
+          node-version: 24
+      - name: Configure git identity for tests that commit
+        run: |
+          git config --global user.name ci
+          git config --global user.email ci@localhost
+      - run: npm test
