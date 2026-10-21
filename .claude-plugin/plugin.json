@@ -3,6 +3,6 @@
   "version": "0.1.0",
   "description": "Self-improving multi-agent software factory: plan, parallel build, judge, repair, merge, learn, evolve. Live terminal dashboard.",
   "author": { "name": "Deepak" },
-  "license": "UNLICENSED",
+  "license": "MIT",
   "keywords": ["multi-agent", "software-factory", "orchestration", "self-improving"]
 }

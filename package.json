@@ -1,14 +1,17 @@
 {
   "name": "orchestra",
   "version": "0.1.0",
-  "description": "Self-improving multi-agent software factory on Claude Code",
+  "description": "Self-improving multi-agent software factory on Claude Code: plan, parallel build, judge, repair, merge, learn, evolve. Live terminal dashboard.",
+  "author": "Deepak Kumar",
+  "keywords": ["multi-agent", "software-factory", "orchestration", "self-improving"],
   "type": "module",
   "bin": { "orchestra": "bin/orchestra.ts" },
+  "files": ["bin", "src", "harness", "skills", ".claude-plugin", "README.md", "LICENSE", "docs"],
   "engines": { "node": ">=23.6" },
   "scripts": {
     "test": "node --test test/*.test.ts",
     "demo": "node bin/orchestra.ts demo"
   },
-  "license": "UNLICENSED",
+  "license": "MIT",
   "private": true
 }
