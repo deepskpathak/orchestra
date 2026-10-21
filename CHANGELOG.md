@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- `orchestra evolve` no longer scores an eval run that died of infrastructure (usage limit, auth, network) as 0 and rejects the candidate; the result is inconclusive and the candidate stays available.
+- `evolve` raises `evolve.sample` to `evolve.minCases`, and exits before running any eval when there are too few cases, instead of spending runs and then refusing to promote.
+
 ## [0.2.0] - 2026-10-22
 
 ### Added

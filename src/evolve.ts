@@ -101,6 +101,13 @@ export interface EvalResult {
   cost: number;
 }
 
+const INFRA_ERROR = /usage limit|session limit|rate limit|overloaded|quota|credit|not logged in|\/login|authentication|ECONN|ETIMEDOUT|ENOTFOUND|network/i;
+
+// A failed run whose error is infrastructure, not the harness's fault.
+export function isInfraFailure(run: Run): boolean {
+  return run.status === 'failed' && INFRA_ERROR.test(run.error ?? '');
+}
+
 export async function evaluate(store: Store, runner: Runner, version: string, cases: EvalCase[], onRun?: (r: Run) => void): Promise<EvalResult> {
   const detail: Record<string, number> = {};
   const passed: Record<string, boolean> = {};
@@ -108,6 +115,10 @@ export async function evaluate(store: Store, runner: Runner, version: string, ca
   for (const c of cases) {
     const run = await runGoal({ store, runner, goal: c.goal, harnessVersion: version, baseRef: c.base, kind: 'eval', onUpdate: onRun });
     cost += run.costUsd;
+    if (isInfraFailure(run)) {
+      deleteRunBranches(store, run);
+      return { score: 0, detail, passed, cost: round(cost), inconclusive: run.error };
+    }
     let ok = run.status === 'done';
     if (ok && c.check && run.integrationBranch) ok = checkBranch(store, run.integrationBranch, c.check);
     passed[c.id] = ok;
@@ -246,15 +257,25 @@ export async function evolve(store: Store, runner: Runner, log: (msg: string) =>
   }
   log(`Candidate ${candidate}: ${out.rationale}`);
 
-  const cases = listEvals(store).slice(-cfg.evolve.sample);
+  // A sample below minCases could never promote (a stale config.json can pin an old, smaller sample).
+  const cases = listEvals(store).slice(-Math.max(cfg.evolve.sample, cfg.evolve.minCases));
   if (!cases.length) {
     return { candidate, incumbent, candidateScore: null, incumbentScore: null, promoted: false, reason: 'No Factory Eval cases yet. Successful runs are harvested automatically; candidate kept for later evaluation.' };
   }
 
+  if (cases.length < cfg.evolve.minCases) {
+    // Cheaper than evaluating first and then refusing to promote: no eval runs are spent.
+    const reason = `only ${cases.length} eval cases, need at least ${cfg.evolve.minCases}; candidate kept for later evaluation`;
+    return { candidate, incumbent, candidateScore: null, incumbentScore: null, promoted: false, reason };
+  }
+
   log(`Evaluating ${incumbent} vs ${candidate} on ${cases.length} eval case(s)`);
   const inc = await evaluate(store, runner, incumbent, cases, onRun);
+  if (inc.inconclusive) return inconclusive(candidate, incumbent, inc.inconclusive);
   updateArchive(store, incumbent, { evalScore: inc.score, evalDetail: inc.detail });
   const cand = await evaluate(store, runner, candidate, cases, onRun);
+  // Leave the candidate's archive entry as it was: a half-run evaluation must not mark it rejected.
+  if (cand.inconclusive) return inconclusive(candidate, incumbent, cand.inconclusive);
   updateArchive(store, candidate, { evalScore: cand.score, evalDetail: cand.detail });
 
   const regressions = cases.filter((c) => inc.passed[c.id] && !cand.passed[c.id]).map((c) => c.id);
@@ -277,6 +298,10 @@ export async function evolve(store: Store, runner: Runner, log: (msg: string) =>
   updateArchive(store, candidate, { status: better ? 'candidate' : 'rejected' });
   log(`${better ? 'Kept (autoPromote off)' : 'Rejected'} ${candidate}: ${reason}`);
   return { candidate, incumbent, candidateScore: cand.score, incumbentScore: inc.score, promoted: false, reason };
+}
+
+function inconclusive(candidate: string, incumbent: string, error: string): EvolveOutcome {
+  return { candidate, incumbent, candidateScore: null, incumbentScore: null, promoted: false, reason: `inconclusive, infrastructure failure (${error}); candidate kept for later evaluation` };
 }
 
 // Should a completed run trigger evolution? Every N goal runs since the last harness change.

@@ -65,7 +65,7 @@ One evolution cycle (`evolve()` in `src/evolve.ts`):
 
 The command prints whether it promoted or kept the incumbent, with the reason and both eval scores. Evaluation reruns past goals, so one cycle costs roughly `sample x 2` runs plus the evolver call.
 
-The `evolve` settings live in `config.json`, with defaults `every: 3`, `autoPromote: true`, `minGain: 0.02`, `sample: 3`.
+The `evolve` settings live in `config.json`, with defaults `every: 3`, `autoPromote: true`, `minGain: 0.02`, `sample: 5`, `minCases: 5`. A `sample` below `minCases` is raised to `minCases`, so an old `config.json` that pins a small value cannot block promotion. With fewer than `minCases` eval cases, `evolve` keeps the candidate for later and spends no eval runs. If an eval run dies of infrastructure (usage limit, auth, network), the result is inconclusive: the candidate stays a candidate and no score is recorded.
 
 ## Automatic evolution after a run
 

@@ -95,3 +95,44 @@ test('minCases defaults to 5 and is filled for configs that lack it', () => {
   store.writeJson('config.json', { evolve: { every: 3, autoPromote: true, minGain: 0.02, sample: 3 } });
   assert.equal(store.config().evolve.minCases, 5);
 });
+
+test('too few eval cases: candidate is kept without spending any eval runs', async () => {
+  const store = tempRepo({ evolve: { every: 1, autoPromote: true, minGain: 0.02, sample: 3, minCases: 5 } });
+  const runner = fakeRunner();
+  harvest(store, await runGoal({ store, runner, goal: 'build it' }));
+  let evalCalls = 0;
+  const counting: Runner = async (req) => {
+    if (req.role !== 'evolver') evalCalls++;
+    return runner(req);
+  };
+  const out = await evolve(store, counting, quiet);
+  assert.equal(out.promoted, false);
+  assert.match(out.reason, /only 1 eval cases, need at least 5/);
+  assert.equal(evalCalls, 0, 'no planner/worker/judge sessions were spent');
+  assert.equal(readArchive(store).find((a) => a.version === 'v2')!.status, 'candidate', 'not marked rejected');
+});
+
+test('a stale sample below minCases is raised to minCases', async () => {
+  const store = tempRepo({ evolve: { every: 1, autoPromote: true, minGain: 0.02, sample: 1, minCases: 2 } });
+  const runner = fakeRunner();
+  harvest(store, await runGoal({ store, runner, goal: 'first goal' }));
+  harvest(store, await runGoal({ store, runner, goal: 'second goal' }));
+  const logs: string[] = [];
+  await evolve(store, runner, (m) => logs.push(m));
+  assert.ok(logs.some((l) => /on 2 eval case/.test(l)), logs.join('\n'));
+});
+
+test('infrastructure failure during evaluation is inconclusive, not a rejection', async () => {
+  const store = tempRepo({ evolve: { every: 1, autoPromote: true, minGain: 0.02, sample: 1, minCases: 1 } });
+  const runner = fakeRunner();
+  harvest(store, await runGoal({ store, runner, goal: 'build it' }));
+  const limited: Runner = async (req) =>
+    req.role === 'planner' ? { ok: false, text: '', costUsd: 0, turns: 0, durationMs: 1, error: "You've hit your session limit" } : runner(req);
+  const out = await evolve(store, limited, quiet);
+  assert.equal(out.promoted, false);
+  assert.match(out.reason, /inconclusive/);
+  const v2 = readArchive(store).find((a) => a.version === 'v2')!;
+  assert.equal(v2.status, 'candidate');
+  assert.equal(v2.evalScore, null, 'no fake zero score recorded');
+  assert.equal(currentVersion(store), 'v1');
+});
