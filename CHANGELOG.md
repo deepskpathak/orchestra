@@ -9,6 +9,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Added
 
 - Community and project health files: contributing guide, code of conduct, security policy, issue and pull request templates.
+- GitHub Actions CI (`npm test` on Node 24) and a branching section in the contributing guide (one `iter/<topic>` branch per iteration, changes land by pull request).
+- Token and cache usage per agent session in the ledger, and cache hit ratio in `orchestra stats`.
+- Tiered judging (`judgeTiers` in `.orchestra/config.json`): a cheap judge model first, escalating to the strong judge on test failure, borderline scores or open issues. Off by default.
+- Research notes and a ranked improvement backlog in `docs/research/cost-accuracy-speed.md`.
+
+### Changed
+
+- The judge now retries once on failure and never scores a worker 0.00 for a judge error.
+- Role prompts are ordered from stable to volatile content so their prefix can be shared and cached.
+- Harness promotion requires a minimum number of eval cases (`evolve.minCases`, default 5) and a gain above the observed spread. `evolve.sample` defaults to 5.
 
 ## [0.1.0]
 
