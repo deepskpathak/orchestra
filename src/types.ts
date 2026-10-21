@@ -138,6 +138,11 @@ export interface ProjectConfig {
   disallowedTools: string[];
   permissionMode: string;
   runBudgetUsd: number;
+  judgeTiers: {
+    enabled: boolean; // cheap judge first, escalate to the harness judge model when not decisive
+    cheapModel: string;
+    margin: number; // escalate when |score - passThreshold| <= margin
+  };
   evolve: {
     every: number; // auto-evolve after every N completed runs, 0 disables
     autoPromote: boolean;
