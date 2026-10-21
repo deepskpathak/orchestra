@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import { buildArgs, extractJson, summarizeTool } from '../src/agent.ts';
 import { detectTestCommand } from '../src/cli.ts';
@@ -65,4 +67,14 @@ test('dashboard renders all sections at a fixed width', () => {
 
 test('detectTestCommand recognises common stacks', () => {
   assert.equal(detectTestCommand('/nonexistent'), null);
+});
+
+test('release metadata: MIT license, consistent package and plugin manifests', () => {
+  const root = join(import.meta.dirname, '..');
+  assert.match(readFileSync(join(root, 'LICENSE'), 'utf8'), /MIT License/);
+  const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
+  const plugin = JSON.parse(readFileSync(join(root, '.claude-plugin', 'plugin.json'), 'utf8'));
+  assert.equal(pkg.license, 'MIT');
+  assert.equal(plugin.license, 'MIT');
+  assert.equal(pkg.version, plugin.version);
 });
