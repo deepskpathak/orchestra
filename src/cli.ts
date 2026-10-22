@@ -10,6 +10,7 @@ import { evolutionDue, evolve, harvest, listEvals, metrics } from './evolve.ts';
 import { fakeRunner } from './fake.ts';
 import { excludeOrchestra } from './git.ts';
 import { guardMain } from './guard.ts';
+import { GLOBAL, listDomains, readLearnings } from './learnings.ts';
 import { PACKAGE_ROOT, currentVersion, packageVersion, listVersions, promote, readArchive, seedHarness } from './harness.ts';
 import { DEFAULT_PROJECT_CONFIG, Store, findRepoRoot } from './store.ts';
 import { serve } from './web/server.ts';
@@ -31,7 +32,8 @@ Usage:
   orchestra status [runId]       One-shot board of the current or given run
   orchestra stats                Factory health per harness version (self-evaluation)
   orchestra evolve               Propose, evaluate, and maybe promote a better harness
-  orchestra learnings            Show what the factory has learned in this repo
+  orchestra learnings [--domain <slug>]
+                                 Show what the factory has learned (all, or one domain; "global" for cross-domain lessons)
   orchestra evals                List Factory Eval cases
   orchestra --version            Print the installed Orchestra version
   orchestra promote <vN>         Promote a harness version (also used for rollback)
@@ -276,9 +278,29 @@ async function cmdEvolve(): Promise<void> {
   if (out.candidateScore !== null) console.log(`  eval: ${out.incumbent} ${out.incumbentScore} vs ${out.candidate} ${out.candidateScore}`);
 }
 
-function cmdLearnings(): void {
+function cmdLearnings(args: string[]): void {
   const store = storeOrDie();
-  console.log(store.readText('learnings.md', 'No learnings yet. They appear after the first completed run.'));
+  const i = args.indexOf('--domain');
+  if (i < 0) {
+    console.log(store.readText('learnings.md', 'No learnings yet. They appear after the first completed run.'));
+    return;
+  }
+  const domain = args[i + 1];
+  if (!domain || domain.startsWith('--')) die('--domain needs a value, e.g. `orchestra learnings --domain cli`.');
+  const known = listDomains(store);
+  if (domain !== GLOBAL && domain !== 'global' && !known.includes(domain)) {
+    die(`Unknown domain "${domain}". Known domains: ${['global', ...known].join(', ')}`);
+  }
+  const lessons = readLearnings(store, domain === 'global' ? GLOBAL : domain);
+  if (!lessons.length) {
+    console.log(`No learnings yet for domain ${domain}.`);
+    return;
+  }
+  console.log(`## ${domain}\n`);
+  for (const l of lessons) {
+    const ev = l.evidence.map((e) => (e.task ? `${e.run}/${e.task}` : e.run)).join(', ');
+    console.log(`- [${l.role}] ${l.lesson}\n  evidence: ${ev}; hits: ${l.hits}`);
+  }
 }
 
 function cmdEvals(): void {
@@ -374,7 +396,7 @@ export async function main(argv: string[]): Promise<void> {
       await cmdEvolve();
       break;
     case 'learnings':
-      cmdLearnings();
+      cmdLearnings(args);
       break;
     case 'evals':
       cmdEvals();

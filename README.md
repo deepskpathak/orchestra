@@ -86,7 +86,7 @@ Set `ORCHESTRA_RUNNER=fake` to use the simulator instead of real Claude sessions
 | `orchestra status [runId]` | One-shot board of the current or given run |
 | `orchestra stats` | Factory health per harness version (self-evaluation) |
 | `orchestra evolve` | Propose, evaluate, and maybe promote a better harness |
-| `orchestra learnings` | Show what the factory has learned in this repo |
+| `orchestra learnings [--domain <slug>]` | Show what the factory has learned in this repo (`--domain` filters to one domain, `global` for cross-domain lessons) |
 | `orchestra evals` | List Factory Eval cases |
 | `orchestra promote <vN>` | Promote a harness version (also used for rollback) |
 | `orchestra doctor` | Check Claude CLI and headless auth |

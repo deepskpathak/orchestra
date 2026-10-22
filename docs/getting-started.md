@@ -127,7 +127,7 @@ ORCHESTRA_RUNNER=fake orchestra run "Add a health endpoint"
 | `orchestra serve [--port N]` | Read-only web dashboard (default port 4317) |
 | `orchestra stats` | Factory health per harness version |
 | `orchestra evolve` | Propose, evaluate and maybe promote a better harness |
-| `orchestra learnings` | Show what the factory has learned in this repo |
+| `orchestra learnings [--domain <slug>]` | Show what the factory has learned in this repo (`--domain` filters to one domain, `global` for cross-domain lessons) |
 | `orchestra evals` | List Factory Eval cases |
 | `orchestra promote <vN>` | Promote a harness version (also used for rollback) |
 | `orchestra doctor` | Check Claude CLI and headless auth |
