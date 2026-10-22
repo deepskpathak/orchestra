@@ -102,6 +102,7 @@ export type EventKind =
   | 'task.verdict'
   | 'task.repair'
   | 'task.merged'
+  | 'task.contrast'
   | 'task.failed'
   | 'agent.start'
   | 'agent.action'
