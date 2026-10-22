@@ -10,7 +10,7 @@ import { evolutionDue, evolve, harvest, listEvals, metrics } from './evolve.ts';
 import { fakeRunner } from './fake.ts';
 import { excludeOrchestra } from './git.ts';
 import { guardMain } from './guard.ts';
-import { PACKAGE_ROOT, currentVersion, listVersions, promote, readArchive, seedHarness } from './harness.ts';
+import { PACKAGE_ROOT, currentVersion, packageVersion, listVersions, promote, readArchive, seedHarness } from './harness.ts';
 import { DEFAULT_PROJECT_CONFIG, Store, findRepoRoot } from './store.ts';
 import { serve } from './web/server.ts';
 import { compactLine, renderDashboard, renderStats, renderStatusLine } from './tui/render.ts';
@@ -31,6 +31,7 @@ Usage:
   orchestra evolve               Propose, evaluate, and maybe promote a better harness
   orchestra learnings            Show what the factory has learned in this repo
   orchestra evals                List Factory Eval cases
+  orchestra --version            Print the installed Orchestra version
   orchestra promote <vN>         Promote a harness version (also used for rollback)
   orchestra doctor               Check Claude CLI and headless auth
   orchestra demo                 Simulated run in a temp repo (no tokens spent)
@@ -371,6 +372,10 @@ export async function main(argv: string[]): Promise<void> {
       break;
     case 'guard':
       await guardMain();
+      break;
+    case '-v':
+    case '--version':
+      console.log(packageVersion());
       break;
     case undefined:
     case '-h':
