@@ -9,7 +9,7 @@ import type { Store } from './store.ts';
 import type { HarnessConfig, Role } from './types.ts';
 
 export const ROLES: Role[] = ['planner', 'worker', 'judge', 'librarian', 'evolver'];
-export const EVOLVABLE_FILES = ['planner.md', 'worker.md', 'judge.md', 'librarian.md', 'config.json'];
+export const EVOLVABLE_FILES = ['planner.md', 'worker.md', 'judge.md', 'librarian.md', 'config.json', 'tools.md', 'style.md', 'checklist.md'];
 
 export const PACKAGE_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -21,6 +21,8 @@ export interface Harness {
   version: string;
   prompts: Record<Role, string>;
   config: HarnessConfig;
+  // Optional evolvable text; '' when the version predates the file.
+  guidance: { tools: string; style: string; checklist: string };
 }
 
 export interface ArchiveEntry {
@@ -59,7 +61,9 @@ export function loadHarness(store: Store, version = currentVersion(store)): Harn
   const config = JSON.parse(readFileSync(join(dir, 'config.json'), 'utf8')) as HarnessConfig;
   // Resolve tiers here so the conductor, ledger and dashboard only see concrete model ids.
   if (config.models) config.models = resolveModels(config.models, config.provider ?? DEFAULT_PROVIDER);
-  return { version, prompts, config };
+  const optional = (name: string) => (existsSync(join(dir, name)) ? readFileSync(join(dir, name), 'utf8') : '');
+  const guidance = { tools: optional('tools.md'), style: optional('style.md'), checklist: optional('checklist.md') };
+  return { version, prompts, config, guidance };
 }
 
 export function listVersions(store: Store): string[] {
@@ -81,6 +85,15 @@ export function createVariant(store: Store, parent: string, files: Record<string
     // Guard against the cheapest way to "improve": lowering the bar.
     if (next.passThreshold < prev.passThreshold) throw new Error('Evolver may not lower passThreshold');
     for (const role of ROLES) if (!next.models?.[role]) throw new Error(`config.json missing models.${role}`);
+  }
+  if (files['checklist.md'] !== undefined) {
+    const prev = loadHarness(store, parent).guidance.checklist;
+    // The checklist may only add strictness. A line counts as kept only if its trimmed text is
+    // still present as a line, so appending or rewording-by-addition is fine but dropping is not.
+    const kept = new Set(files['checklist.md'].split('\n').map((l) => l.trim()));
+    for (const line of prev.split('\n').map((l) => l.trim())) {
+      if (line && !kept.has(line)) throw new Error('Evolver may not remove checklist lines');
+    }
   }
   const versions = listVersions(store);
   const nextNum = Math.max(0, ...versions.map((v) => Number(v.slice(1)))) + 1;
