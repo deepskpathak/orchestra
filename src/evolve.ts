@@ -151,7 +151,7 @@ function deleteRunBranches(store: Store, run: Run): void {
 
 // ---- Evolution ----
 
-const VARIANT_SCHEMA = {
+const VARIANT_ITEM = {
   type: 'object',
   properties: {
     rationale: { type: 'string' },
@@ -167,6 +167,24 @@ const VARIANT_SCHEMA = {
   },
   required: ['rationale', 'files'],
 };
+
+const VARIANT_SCHEMA = {
+  type: 'object',
+  properties: { variants: { type: 'array', minItems: 1, items: VARIANT_ITEM } },
+  required: ['variants'],
+};
+
+interface ProposedVariant {
+  rationale?: string;
+  files?: { name: string; content: string }[];
+}
+
+// Accepts { variants: [...] } and the legacy single { rationale, files } shape.
+function parseVariants(structured: unknown): ProposedVariant[] {
+  const raw = structured as (ProposedVariant & { variants?: ProposedVariant[] }) | undefined;
+  if (Array.isArray(raw?.variants)) return raw.variants;
+  return raw?.files ? [raw] : [];
+}
 
 export interface EvolveOutcome {
   candidate: string | null;
@@ -223,7 +241,9 @@ export async function evolve(store: Store, runner: Runner, log: (msg: string) =>
     .slice(-5)
     .map((a) => `- ${a.version} (score ${a.evalScore}): ${a.rationale}`);
 
+  const k = Math.max(1, Math.floor(cfg.evolve.candidates ?? 1));
   const prompt = [
+    ...(k > 1 ? [`PROPOSE ${k} VARIANTS in one response. Each variant must target a different weakness; do not overlap edits.`] : []),
     `CURRENT HARNESS ${incumbent}:\n${files}`,
     `METRICS PER VERSION:\n${JSON.stringify(m, null, 2)}`,
     `RECENT REPAIR NOTES AND FAILURES:\n${recentIssues.map((i) => `- ${i.split('\n')[0]}`).join('\n') || '(none)'}`,
@@ -231,33 +251,42 @@ export async function evolve(store: Store, runner: Runner, log: (msg: string) =>
     `LEARNINGS SUMMARY (per domain):\n${JSON.stringify(summarizeLearnings(store))}`,
   ].join('\n\n');
 
-  log(`Evolver studying ${incumbent} (${m.find((x) => x.version === incumbent)?.runs ?? 0} runs of evidence)`);
-  const res = await runner({
-    role: 'evolver',
-    prompt,
-    system: h.prompts.evolver,
-    cwd: store.root,
-    model: h.config.models.evolver,
-    budgetUsd: h.config.budgetUsd.evolver,
-    schema: VARIANT_SCHEMA,
-    tools: [],
-    onAction: (a) => log(`evolver: ${a}`),
-  });
-  store.ledger({ t: Date.now(), run: 'evolve', kind: 'eval', harness: incumbent, role: 'evolver', model: h.config.models.evolver, ok: res.ok, costUsd: res.costUsd, durationMs: res.durationMs, turns: res.turns });
-  // The fake evolver now answers { variants: [...] }; accept that until evolve() proposes k variants.
-  const raw = extractJson(res) as { rationale?: string; files?: { name: string; content: string }[]; variants?: { rationale?: string; files?: { name: string; content: string }[] }[] } | undefined;
-  const out = raw?.variants ? raw.variants[0] : raw;
-  if (!res.ok || !out?.files?.length) {
-    return { candidate: null, incumbent, candidateScore: null, incumbentScore: null, promoted: false, reason: `Evolver produced no variant: ${res.error ?? 'empty'}` };
-  }
+  // One evolver call, always ledgered.
+  const askEvolver = async (p: string) => {
+    const res = await runner({
+      role: 'evolver',
+      prompt: p,
+      system: h.prompts.evolver,
+      cwd: store.root,
+      model: h.config.models.evolver,
+      budgetUsd: h.config.budgetUsd.evolver,
+      schema: VARIANT_SCHEMA,
+      tools: [],
+      onAction: (a) => log(`evolver: ${a}`),
+    });
+    store.ledger({ t: Date.now(), run: 'evolve', kind: 'eval', harness: incumbent, role: 'evolver', model: h.config.models.evolver, ok: res.ok, costUsd: res.costUsd, durationMs: res.durationMs, turns: res.turns });
+    return { res, variants: res.ok ? parseVariants(extractJson(res)).filter((v) => v.files?.length) : [] };
+  };
+  const noOutcome = (reason: string): EvolveOutcome => ({ candidate: null, incumbent, candidateScore: null, incumbentScore: null, promoted: false, reason });
 
-  let candidate: string;
-  try {
-    candidate = createVariant(store, incumbent, Object.fromEntries(out.files.map((f) => [f.name, f.content])), out.rationale ?? '');
-  } catch (err) {
-    return { candidate: null, incumbent, candidateScore: null, incumbentScore: null, promoted: false, reason: `Variant rejected by guard: ${(err as Error).message}` };
+  log(`Evolver studying ${incumbent} (${m.find((x) => x.version === incumbent)?.runs ?? 0} runs of evidence)`);
+  const proposal = await askEvolver(prompt);
+  if (!proposal.variants.length) return noOutcome(`Evolver produced no variant: ${proposal.res.error ?? 'empty'}`);
+
+  const created: { version: string; rationale: string; files: string[] }[] = [];
+  let guardError = '';
+  for (const out of proposal.variants.slice(0, k)) {
+    try {
+      const version = createVariant(store, incumbent, Object.fromEntries(out.files!.map((f) => [f.name, f.content])), out.rationale ?? '');
+      created.push({ version, rationale: out.rationale ?? '', files: out.files!.map((f) => f.name) });
+      log(`Candidate ${version}: ${out.rationale}`);
+    } catch (err) {
+      guardError = (err as Error).message;
+      log(`Variant rejected by guard: ${guardError}`);
+    }
   }
-  log(`Candidate ${candidate}: ${out.rationale}`);
+  if (!created.length) return noOutcome(`Variant rejected by guard: ${guardError}`);
+  let candidate = created[0].version;
 
   // A sample below minCases could never promote (a stale config.json can pin an old, smaller sample).
   const cases = listEvals(store).slice(-Math.max(cfg.evolve.sample, cfg.evolve.minCases));
@@ -269,6 +298,56 @@ export async function evolve(store: Store, runner: Runner, log: (msg: string) =>
     // Cheaper than evaluating first and then refusing to promote: no eval runs are spent.
     const reason = `only ${cases.length} eval cases, need at least ${cfg.evolve.minCases}; candidate kept for later evaluation`;
     return { candidate, incumbent, candidateScore: null, incumbentScore: null, promoted: false, reason };
+  }
+
+  if (k > 1) {
+    // Screen cheaply: the newest min(2, sample) cases. Drop any candidate that fails a case the incumbent passes.
+    const screen = cases.slice(-Math.max(1, Math.min(2, cfg.evolve.sample)));
+    log(`Screening ${created.length} candidate(s) on ${screen.length} case(s)`);
+    const sInc = await evaluate(store, runner, incumbent, screen, onRun);
+    if (sInc.inconclusive) return inconclusive(candidate, incumbent, sInc.inconclusive);
+    const survivors: { version: string; rationale: string; files: string[]; screenScore: number; detail: Record<string, number> }[] = [];
+    for (const c of created) {
+      const sc = await evaluate(store, runner, c.version, screen, onRun);
+      if (sc.inconclusive) return inconclusive(candidate, incumbent, sc.inconclusive);
+      const regressed = screen.filter((e) => sInc.passed[e.id] && !sc.passed[e.id]).map((e) => e.id);
+      if (regressed.length) {
+        updateArchive(store, c.version, { status: 'rejected', evalScore: sc.score, screenScore: sc.score, evalDetail: sc.detail });
+        log(`Screened out ${c.version}: regressed on ${regressed.join(', ')}`);
+      } else {
+        updateArchive(store, c.version, { screenScore: sc.score, evalDetail: sc.detail });
+        survivors.push({ ...c, screenScore: sc.score, detail: sc.detail });
+      }
+    }
+    if (!survivors.length) {
+      return { candidate, incumbent, candidateScore: null, incumbentScore: null, promoted: false, reason: `all ${created.length} candidates regressed in screening; none evaluated further` };
+    }
+    // Survivors that are not the finalist keep status 'candidate' with their screening score:
+    // they were never judged on the full sample, so they are not rejected.
+    let finalist = survivors.reduce((best, s) => (s.screenScore > best.screenScore ? s : best));
+    if (survivors.length >= 2) {
+      const composePrompt = [
+        'COMPOSE VARIANTS: merge the surviving variants below into ONE variant. Keep only edits that the per-case screening scores support; drop the rest.',
+        `CURRENT HARNESS ${incumbent}:\n${files}`,
+        ...survivors.map((s) => `SURVIVOR ${s.version}\nrationale: ${s.rationale}\nfiles: ${s.files.join(', ')}\nper-case screening scores (mean ${s.screenScore}): ${JSON.stringify(s.detail)}`),
+        `INCUMBENT ${incumbent} per-case screening scores: ${JSON.stringify(sInc.detail)}`,
+      ].join('\n\n');
+      const composed = await askEvolver(composePrompt);
+      const out = composed.variants[0];
+      if (out) {
+        const parents = survivors.map((s) => s.version);
+        try {
+          const version = createVariant(store, incumbent, Object.fromEntries(out.files!.map((f) => [f.name, f.content])), `Composed from ${parents.join(', ')}: ${out.rationale ?? ''}`, parents);
+          log(`Composed ${version} from ${parents.join(', ')}`);
+          finalist = { version, rationale: out.rationale ?? '', files: out.files!.map((f) => f.name), screenScore: 0, detail: {} };
+        } catch (err) {
+          log(`Compose rejected by guard: ${(err as Error).message}; falling back to ${finalist.version}`);
+        }
+      } else {
+        log(`Compose produced no variant: ${composed.res.error ?? 'empty'}; falling back to ${finalist.version}`);
+      }
+    }
+    candidate = finalist.version;
   }
 
   log(`Evaluating ${incumbent} vs ${candidate} on ${cases.length} eval case(s)`);
