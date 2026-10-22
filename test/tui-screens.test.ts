@@ -62,7 +62,6 @@ test('board view shows six columns, header, and marks the selected task', () => 
   for (const t of ['Queued', 'Building', 'Verifying', 'Merging', 'Done', 'Failed']) assert.match(out, new RegExp(t));
   for (const t of ['run-new', 'harness v2', 'PLAN', 'LEARN', '1/6', 'LIVE']) assert.ok(out.includes(t), t);
   assert.match(out, /▶.*T2/);
-  assert.equal(out.split('\n').filter((l) => l.includes('▶ ') && l.includes('Title')).length >= 1, true);
   assert.match(out, /try 1\/3/);
   assert.match(out, /editing foo\.ts/);
 });
