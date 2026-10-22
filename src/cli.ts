@@ -13,6 +13,7 @@ import { guardMain } from './guard.ts';
 import { PACKAGE_ROOT, currentVersion, packageVersion, listVersions, promote, readArchive, seedHarness } from './harness.ts';
 import { DEFAULT_PROJECT_CONFIG, Store, findRepoRoot } from './store.ts';
 import { serve } from './web/server.ts';
+import { startTui } from './tui/app.ts';
 import { compactLine, renderDashboard, renderStats, renderStatusLine } from './tui/render.ts';
 import type { Run } from './types.ts';
 
@@ -25,6 +26,7 @@ Usage:
       --no-evolve                Skip the automatic evolution check after the run
       --serve                    Also serve the web dashboard while the run is live
   orchestra serve [--port N]     Web dashboard on localhost (default 4317), read-only
+  orchestra serve --tui [runId]  Interactive terminal dashboard (no browser, opens no port); alias: orchestra tui
   orchestra watch [runId]        Full-screen live dashboard (q to quit)
   orchestra status [runId]       One-shot board of the current or given run
   orchestra stats                Factory health per harness version (self-evaluation)
@@ -223,7 +225,23 @@ async function cmdWatch(args: string[]): Promise<void> {
   setInterval(draw, 150);
 }
 
+async function cmdTui(args: string[]): Promise<void> {
+  if (!process.stdout.isTTY || !process.stdin.isTTY) {
+    die('the terminal dashboard needs an interactive terminal (stdin and stdout must be a TTY). Use `orchestra status` for a one-shot board or `orchestra watch` for a live view.');
+  }
+  const store = storeOrDie();
+  const runId = args.find((a) => !a.startsWith('--'));
+  if (runId && !store.loadRun(runId)) die(`unknown run "${runId}".`);
+  try {
+    await startTui({ store, stdin: process.stdin, stdout: process.stdout, runId, handleProcessSignals: true });
+  } catch (e) {
+    die(`terminal dashboard failed: ${(e as Error).message}`);
+  }
+  process.exit(0);
+}
+
 async function cmdServe(args: string[]): Promise<void> {
+  if (args.includes('--tui')) return cmdTui(args.filter((a) => a !== '--tui'));
   const store = storeOrDie();
   const i = args.indexOf('--port');
   const port = i >= 0 ? Number(args[i + 1]) : undefined;
@@ -342,6 +360,9 @@ export async function main(argv: string[]): Promise<void> {
       break;
     case 'serve':
       await cmdServe(args);
+      break;
+    case 'tui':
+      await cmdTui(args);
       break;
     case 'status':
       cmdStatus(args);
