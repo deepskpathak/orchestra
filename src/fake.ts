@@ -89,8 +89,8 @@ export function fakeRunner(opts: { stepMs?: number; failFirstAttemptOf?: string[
         await act('says: distilling lessons');
         return done({
           lessons: [
-            { role: 'worker', lesson: 'Handle empty config files explicitly; judges reject missing edge cases.' },
-            { role: 'planner', lesson: 'Split config and CLI work; they parallelize cleanly.' },
+            { role: 'worker', lesson: 'Handle empty config files explicitly; judges reject missing edge cases.', evidence: [{ run: 'fake-run', task: 'T2' }] },
+            { role: 'planner', lesson: 'Split config and CLI work; they parallelize cleanly.', evidence: [{ run: 'fake-run' }] },
           ],
         });
       }
