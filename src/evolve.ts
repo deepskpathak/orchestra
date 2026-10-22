@@ -244,7 +244,9 @@ export async function evolve(store: Store, runner: Runner, log: (msg: string) =>
     onAction: (a) => log(`evolver: ${a}`),
   });
   store.ledger({ t: Date.now(), run: 'evolve', kind: 'eval', harness: incumbent, role: 'evolver', model: h.config.models.evolver, ok: res.ok, costUsd: res.costUsd, durationMs: res.durationMs, turns: res.turns });
-  const out = extractJson(res) as { rationale?: string; files?: { name: string; content: string }[] } | undefined;
+  // The fake evolver now answers { variants: [...] }; accept that until evolve() proposes k variants.
+  const raw = extractJson(res) as { rationale?: string; files?: { name: string; content: string }[]; variants?: { rationale?: string; files?: { name: string; content: string }[] }[] } | undefined;
+  const out = raw?.variants ? raw.variants[0] : raw;
   if (!res.ok || !out?.files?.length) {
     return { candidate: null, incumbent, candidateScore: null, incumbentScore: null, promoted: false, reason: `Evolver produced no variant: ${res.error ?? 'empty'}` };
   }
