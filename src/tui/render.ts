@@ -13,7 +13,7 @@ export interface RenderOpts {
   maxEvents?: number;
 }
 
-const SPIN = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+export const SPIN = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
 const CODES = {
   reset: '\x1b[0m',
@@ -26,8 +26,9 @@ const CODES = {
   magenta: '\x1b[35m',
   cyan: '\x1b[36m',
   gray: '\x1b[90m',
+  inverse: '\x1b[7m',
 } as const;
-type Style = keyof typeof CODES;
+export type Style = keyof typeof CODES;
 
 export function paint(on: boolean) {
   return (style: Style | Style[], s: string): string => {
@@ -83,7 +84,7 @@ export function sparkline(values: number[]): string {
   return values.map((v) => ticks[Math.min(7, Math.floor((v / max) * 7.999))]).join('');
 }
 
-const STATUS_ICON: Record<TaskStatus, [string, Style]> = {
+export const STATUS_ICON: Record<TaskStatus, [string, Style]> = {
   pending: ['◌', 'gray'],
   running: ['●', 'cyan'],
   judging: ['◆', 'magenta'],
@@ -94,7 +95,7 @@ const STATUS_ICON: Record<TaskStatus, [string, Style]> = {
   blocked: ['⊘', 'red'],
 };
 
-const ROLE_STYLE: Record<Role, Style> = {
+export const ROLE_STYLE: Record<Role, Style> = {
   planner: 'blue',
   worker: 'cyan',
   judge: 'magenta',
@@ -114,7 +115,7 @@ export function counts(run: Run) {
   };
 }
 
-function phases(run: Run, c: ReturnType<typeof paint>): string {
+export function phases(run: Run, c: ReturnType<typeof paint>): string {
   const k = counts(run);
   const hasJudge = run.active.some((a) => a.role === 'judge');
   const hasWorker = run.active.some((a) => a.role === 'worker');
