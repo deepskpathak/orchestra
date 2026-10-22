@@ -70,3 +70,23 @@ test('stream sends snapshot then only new events', async () => {
     await web.close();
   }
 });
+
+test('page script parses and loads nothing from outside localhost', async () => {
+  const { PAGE } = await import('../src/web/page.ts');
+  const scripts = [...PAGE.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]);
+  assert.equal(scripts.length, 1);
+  assert.doesNotThrow(() => new Function(scripts[0]));
+  assert.doesNotMatch(PAGE, /<script[^>]+src=|<link[^>]+href=|@import|url\(\s*['"]?https?:/i);
+  assert.doesNotMatch(PAGE.replace(/http:\/\/www\.w3\.org\/2000\/svg/g, ''), /https?:\/\//);
+});
+
+test('info exposes harness retry and pass limits', async () => {
+  const web = await serve({ store: seed(), port: 4440 });
+  try {
+    const info = JSON.parse((await get(web.url + '/api/info')).body);
+    assert.equal(typeof info.maxAttempts, 'number');
+    assert.equal(typeof info.passThreshold, 'number');
+  } finally {
+    await web.close();
+  }
+});

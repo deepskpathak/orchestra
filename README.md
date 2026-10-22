@@ -29,7 +29,7 @@ You give Orchestra a goal. It plans a task graph, builds tasks in parallel git w
 - **Merge queue.** Tasks merge one at a time onto `orchestra/<run>/integration`, with tests after each merge.
 - **Self-evaluating.** Every agent session is recorded in a ledger, and `orchestra stats` reports health per harness version.
 - **Self-improving.** The evolver proposes a harness change, a Factory Eval compares it to the incumbent, and promotion needs a measured gain. Rollback is `orchestra promote <vN>`.
-- **Live dashboards.** A terminal dashboard, a read-only localhost web dashboard, and a Claude Code statusline.
+- **Live dashboards.** A terminal dashboard, a read-only localhost web task board with dependency arrows, and a Claude Code statusline.
 - **Guard rails in code.** A PreToolUse hook blocks holdout reads, network commands, `git push`, and edits to the harness and evals. Each run has a budget.
 
 ## Quick start

@@ -5,7 +5,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { git } from '../git.ts';
-import { currentVersion } from '../harness.ts';
+import { currentVersion, loadHarness } from '../harness.ts';
 import type { Store } from '../store.ts';
 import type { Run } from '../types.ts';
 import { PAGE } from './page.ts';
@@ -60,6 +60,16 @@ export function listRunSummaries(store: Store) {
       tasks: r.tasks.length,
       merged: r.tasks.filter((t) => t.status === 'merged').length,
     }));
+}
+
+// Retry and pass limits of the current harness, so the board can show "try 2 of 3" and the pass line.
+function harnessLimits(store: Store): { maxAttempts?: number; passThreshold?: number } {
+  try {
+    const { maxAttempts, passThreshold } = loadHarness(store).config;
+    return { maxAttempts, passThreshold };
+  } catch {
+    return {}; // harness missing or unreadable: the page simply omits these
+  }
 }
 
 // Task detail: verdict is already in run.json; add the branch diff and the tail of each agent log.
@@ -134,7 +144,7 @@ export function handler(store: Store) {
 
     try {
       if (parts[1] === 'info' && parts.length === 2) {
-        return json(res, 200, { schema: API_SCHEMA, harness: currentVersion(store), current: store.currentRunId(), repo: store.root });
+        return json(res, 200, { schema: API_SCHEMA, harness: currentVersion(store), current: store.currentRunId(), repo: store.root, ...harnessLimits(store) });
       }
       if (parts[1] === 'runs' && parts.length === 2) return json(res, 200, { schema: API_SCHEMA, runs: listRunSummaries(store) });
       if (parts[1] === 'runs' && parts[2] && RUN_ID.test(parts[2])) {
