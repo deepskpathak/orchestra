@@ -58,6 +58,8 @@ orchestra learnings --domain global  # only the global lessons
 
 An unknown domain exits non-zero and lists the known domains.
 
+**Contrast evidence.** When [contrastive repair](configuration.md#contrastive) ran, the comparison judge's reasons for why one attempt beat the other are passed to the librarian as lesson evidence, so lessons can cite a concrete winning approach.
+
 ## Factory Eval: `orchestra evals`
 
 ```
