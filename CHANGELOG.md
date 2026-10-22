@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-22
+
+### Added
+
+- Per-domain learning libraries (#10). The planner tags each run with a short `domain` slug (existing domains plus at most one new one per run), stored on the run. Lessons live in `learnings/<domain>.json` plus `learnings/_global.json`, and the `learnings.md` mirror is grouped by domain.
+- Every lesson carries `evidence` (the run or task that supports it) and a `hits` count. The librarian must cite evidence, and lessons without it are dropped.
+- `orchestra learnings --domain <slug>` filters the list to one domain.
+
+### Changed
+
+- Prompts receive the run's domain lessons then global ones under a token budget, instead of the whole store.
+- The 25-lesson cap applies per domain, and the least recently evidenced lessons are dropped first.
+- `orchestra evolve` receives a per-domain summary (counts and top lessons) instead of the full store.
+- An existing `learnings.json` is migrated to `_global.json` on first read.
+
 ## [0.4.0] - 2026-10-22
 
 ### Added
