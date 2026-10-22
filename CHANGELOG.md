@@ -9,6 +9,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Added
 
 - `orchestra --version` (and `-v`) prints the installed version.
+- Web dashboard redesign: a Trello-style task board with SVG dependency arrows (coloured by whether the dependency is merged, in progress, waiting or failed), a Flow view that groups tasks by dependency depth, a run progress ring, pipeline stepper and status mix bar, per-card stage tracks, live agent lanes, and a slide-in task drawer with per-criterion results, the judge score against the pass line, diff and logs. Still a single dependency-free page.
+- `/api/info` also returns the current harness `maxAttempts` and `passThreshold`.
 
 ### Fixed
 
