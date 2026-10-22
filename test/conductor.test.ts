@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -21,7 +21,13 @@ test('happy path: plans, repairs a rejected task, merges all, learns', async () 
   assert.equal(run.tasks.find((t) => t.id === 'T2')!.attempts, 2, 'T2 is rejected once, then repaired');
   assert.ok(run.satisfaction! > 0.8);
   assert.ok(run.costUsd > 0);
-  assert.equal(readLearnings(store).length, 2);
+  assert.equal(run.domain, 'cli');
+  assert.equal(store.readJson<{ domain?: string }>(`runs/${run.id}/run.json`, {}).domain, 'cli');
+  const domainLessons = readLearnings(store, 'cli');
+  assert.equal(domainLessons.length, 2);
+  assert.ok(domainLessons.every((l) => l.evidence.some((e) => e.run === run.id)));
+  assert.equal(readLearnings(store).length, 0);
+  assert.ok(existsSync(store.path('learnings/cli.json')));
 
   // Merged work landed on the integration branch, the user's checkout is untouched.
   const files = execFileSync('git', ['ls-tree', '-r', '--name-only', run.integrationBranch!], { cwd: store.root, encoding: 'utf8' });
@@ -107,6 +113,20 @@ test('failing test command rejects the change and the repair attempt lands', asy
   assert.equal(t1.status, 'merged');
   assert.equal(t1.attempts, 2);
   assert.equal(t1.verdict!.testsPassed, true);
+});
+
+test('an invalid planner domain leaves run.domain unset without failing the run', async () => {
+  const store = tempRepo();
+  const inner = fakeRunner();
+  const runner: Runner = async (req) => {
+    const r = await inner(req);
+    if (req.role === 'planner') (r.structured as { domain?: string }).domain = 'Not A Slug!';
+    return r;
+  };
+  const run = await runGoal({ store, runner, goal: 'g' });
+  assert.equal(run.status, 'done');
+  assert.equal(run.domain, undefined);
+  assert.equal(readLearnings(store).length, 2, 'lessons land in global');
 });
 
 test('planner crash fails the run cleanly', async () => {
