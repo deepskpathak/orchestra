@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-22
+
+### Added
+
+- `orchestra serve --tui` (alias `orchestra tui`): an interactive full-screen terminal dashboard for environments where a browser is not allowed. It needs no HTTP server or port. It shows the run board, tasks, agents and events live, follows new runs (`f` re-follows), and opens a drawer with per-task diff and logs. Keyboard driven, restores the terminal on exit and signals, and exits 1 with a hint to use `orchestra status` or `orchestra watch` when not attached to a TTY.
+
+### Changed
+
+- Dashboard data access moved from the web server into a shared `src/dashboard-data.ts`, used by both the web dashboard and the TUI.
+
 ## [0.3.0] - 2026-10-22
 
 ### Added

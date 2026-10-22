@@ -1,6 +1,6 @@
 {
   "name": "orchestra",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Self-improving multi-agent software factory on Claude Code: plan, parallel build, judge, repair, merge, learn, evolve. Live terminal dashboard.",
   "author": "Deepak Kumar",
   "keywords": ["multi-agent", "software-factory", "orchestration", "self-improving"],
