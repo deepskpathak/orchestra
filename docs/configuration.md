@@ -116,12 +116,12 @@ Note: `judgeTiers.cheapModel` in the project config is not tier-resolved yet, so
 
 ## Harness versions
 
-The harness is the evolvable part of Orchestra: role prompts (`planner.md`, `worker.md`, `judge.md`, `librarian.md`, `evolver.md`) plus `config.json` (see `src/harness.ts`). Paths below are relative to the `.orchestra` directory.
+The harness is the evolvable part of Orchestra: role prompts (`planner.md`, `worker.md`, `judge.md`, `librarian.md`, `evolver.md`) plus `config.json` and the optional small files `tools.md`, `style.md` and `checklist.md` (see `src/harness.ts`). Paths below are relative to the `.orchestra` directory.
 
 - Each version lives in its own directory, `harness/<vN>/`. `orchestra init` seeds `v1` from the package.
 - `harness/current` holds the name of the promoted version.
 - `archive.json` records every version with its parent, rationale, eval score and status (`promoted`, `candidate`, `rejected` or `retired`).
-- The evolver creates `vN+1` as a copy of a parent with changed files. It may edit only `planner.md`, `worker.md`, `judge.md`, `librarian.md` and `config.json`.
+- The evolver creates `vN+1` as a copy of a parent with changed files. It may edit only `planner.md`, `worker.md`, `judge.md`, `librarian.md`, `config.json`, `tools.md`, `style.md` and `checklist.md`. Lines in `checklist.md` may be added but not removed. See [self-improvement](self-improvement.md).
 - Guard rails: a candidate `config.json` may not lower `passThreshold`, and must define a model for every role.
 - Promoting a version marks it `promoted` and the previous one `retired`. See [self-improvement.md](self-improvement.md) for the full evolve, promote and rollback flow.
 - Agent sessions cannot write to the harness, evals or archive (enforced by the guard hook in `src/guard.ts`).

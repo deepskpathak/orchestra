@@ -6,7 +6,21 @@ All paths below are relative to the `.orchestra` directory in your repo.
 
 ## The harness
 
-The harness is the evolvable part of the factory: role prompts (`planner.md`, `worker.md`, `judge.md`, `librarian.md`, `evolver.md`) plus `config.json` (models, `maxAttempts`, `passThreshold`, per-role `budgetUsd`).
+The harness is the evolvable part of the factory: role prompts (`planner.md`, `worker.md`, `judge.md`, `librarian.md`, `evolver.md`) plus `config.json` (models, `maxAttempts`, `passThreshold`, per-role `budgetUsd`) and three small optional text files (`tools.md`, `style.md`, `checklist.md`).
+
+### Small evolvable files
+
+The evolver can tune one habit by editing a short file instead of rewriting a whole role prompt. Each file is injected as its own labelled section in the stable part of the prompt, so prompt caching still works.
+
+| File | Section | Received by | Purpose |
+| --- | --- | --- | --- |
+| `tools.md` | `TOOL GUIDANCE:` | worker, and the read-only part of the judge | Tool-use habits, such as how to search or run tests |
+| `style.md` | `STYLE:` | worker only | Repo coding conventions learned over time |
+| `checklist.md` | `REVIEW CHECKLIST:` | judge only | Extra review checks |
+
+- **Checklist only adds strictness.** A variant may append lines to `checklist.md` or reword a line by adding to it, but may not remove any line the parent had. This is the same spirit as `passThreshold` never going down, and `createVariant` rejects violations.
+- **Missing files are empty.** Harness versions created before these files existed still load, and a missing file is treated as empty, so no section is added.
+- **Out of scope.** Evolvable skills and executable scripts are not part of the harness. Only text files are evolvable.
 
 - Each version lives in `harness/<vN>/`, seeded from `harness/v1` in the package on `orchestra init`.
 - `harness/current` names the active version.
@@ -114,8 +128,8 @@ There is no separate rollback command: rolling back is promoting an older versio
 
 Rails are enforced in code, not only in prompts:
 
-- **Evolvable set.** The evolver can only edit `planner.md`, `worker.md`, `judge.md`, `librarian.md` and `config.json`. Any other file name is rejected (`EVOLVABLE_FILES` in `src/harness.ts`). It cannot edit `evolver.md`.
-- **No lowered bar.** A `config.json` with a lower `passThreshold` than its parent is rejected, as is one missing a model for any role.
+- **Evolvable set.** The evolver can only edit the 8 files `planner.md`, `worker.md`, `judge.md`, `librarian.md`, `config.json`, `tools.md`, `style.md` and `checklist.md`. Any other file name is rejected (`EVOLVABLE_FILES` in `src/harness.ts`). It cannot edit `evolver.md`.
+- **No lowered bar.** A `config.json` with a lower `passThreshold` than its parent is rejected, as is one missing a model for any role. A `checklist.md` that drops a line the parent had is rejected too.
 - **Measured gain only.** Promotion needs `minGain` and zero regressions on the sampled eval cases.
 - **Agent hook** (`src/guard.ts`, run as `orchestra guard`). Every agent session gets a PreToolUse hook that denies:
   - any access to the hidden holdout scenarios (visible to the judge only)
