@@ -88,3 +88,40 @@ test('buildProgress derives failingCriteria from verdict.criteria and defaults t
   assert.deepEqual((buildProgress({ task, issues: [], diffSummary: '' }) as Record<string, unknown>).failingCriteria, []);
   assert.equal(progressRel('r1', 'T1'), 'runs/r1/progress/T1.json');
 });
+
+const jbase = { scenarios: [], workerText: '', tests: null, diff: 'DIFFTEXT' };
+
+test('worker guidance sections go in the prefix only, and only when non-blank', () => {
+  const p = workerPrompt({ ...common, task: mk('T1'), others: [], tools: 'USE GREP', style: 'TWO SPACES' });
+  assert.ok(p.prefix.includes('TOOL GUIDANCE:\nUSE GREP'));
+  assert.ok(p.prefix.includes('STYLE:\nTWO SPACES'));
+  assert.ok(!p.body.includes('TOOL GUIDANCE') && !p.body.includes('STYLE:'));
+  assert.ok(!p.prefix.includes('REVIEW CHECKLIST'));
+  const plain = workerPrompt({ ...common, task: mk('T1'), others: [] });
+  for (const blank of [{}, { tools: '', style: '' }, { tools: '  \n', style: '\n' }]) {
+    const q = workerPrompt({ ...common, task: mk('T1'), others: [], ...blank });
+    assert.deepEqual(q, plain);
+  }
+  assert.ok(!plain.prefix.includes('TOOL GUIDANCE') && !plain.prefix.includes('STYLE:'));
+});
+
+test('judge guidance sections go in the prefix only, and only when non-blank', () => {
+  const p = judgePrompt({ ...jbase, task: mk('T1'), tools: 'USE GREP', checklist: 'CHECK ERRORS' });
+  assert.ok(p.prefix.includes('TOOL GUIDANCE:\nUSE GREP'));
+  assert.ok(p.prefix.includes('REVIEW CHECKLIST:\nCHECK ERRORS'));
+  assert.ok(!p.body.includes('TOOL GUIDANCE') && !p.body.includes('REVIEW CHECKLIST'));
+  assert.ok(!p.prefix.includes('STYLE:'));
+  const plain = judgePrompt({ ...jbase, task: mk('T1') });
+  assert.deepEqual(judgePrompt({ ...jbase, task: mk('T1'), tools: ' ', checklist: '' }), plain);
+  assert.ok(!plain.prefix.includes('TOOL GUIDANCE') && !plain.prefix.includes('REVIEW CHECKLIST'));
+});
+
+test('prefix with guidance is identical across tasks', () => {
+  const g = { tools: 'T', style: 'S', checklist: 'C' };
+  const w1 = workerPrompt({ ...common, ...g, task: mk('T1'), others: ['- T2 x'] });
+  const w2 = workerPrompt({ ...common, ...g, task: mk('T2', { attempts: 2, notes: ['n'] }), others: [] });
+  assert.equal(w1.prefix, w2.prefix);
+  const j1 = judgePrompt({ ...jbase, ...g, task: mk('T1') });
+  const j2 = judgePrompt({ ...jbase, ...g, task: mk('T2'), diff: 'other' });
+  assert.equal(j1.prefix, j2.prefix);
+});

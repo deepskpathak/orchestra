@@ -88,14 +88,30 @@ export function buildProgress(i: { task: Task; verdict?: Verdict; issues: string
   };
 }
 
-export function workerPrompt(i: { goal: string; learnings: string; testCommand?: string; task: Task; others: string[]; progressFile?: string }): BuiltPrompt {
+// Optional evolvable guidance: a labelled section only when the text is non-blank.
+const guidanceSection = (label: string, text?: string): string => (text?.trim() ? `${label}:\n${text.trim()}` : '');
+
+export function workerPrompt(i: {
+  goal: string;
+  learnings: string;
+  testCommand?: string;
+  task: Task;
+  others: string[];
+  progressFile?: string;
+  tools?: string;
+  style?: string;
+}): BuiltPrompt {
   const { task } = i;
   return {
     prefix: [
       `LEARNINGS:\n${i.learnings}`,
       `TEST COMMAND: ${i.testCommand ?? '(none configured; run relevant tests you find)'}`,
       `OVERALL GOAL (context only):\n${i.goal}`,
-    ].join('\n\n'),
+      guidanceSection('TOOL GUIDANCE', i.tools),
+      guidanceSection('STYLE', i.style),
+    ]
+      .filter(Boolean)
+      .join('\n\n'),
     body: [
       `YOUR TASK ${task.id}: ${task.title}\n${task.description}`,
       `ACCEPTANCE CRITERIA:\n${bullets(task.acceptance)}`,
@@ -141,12 +157,15 @@ export function judgePrompt(i: {
   testCommand?: string;
   tests: { ok: boolean; tail: string } | null;
   diff: string;
+  tools?: string;
+  checklist?: string;
 }): BuiltPrompt {
   const { task, tests } = i;
+  const base = `HIDDEN SCENARIOS for the whole goal (judge only the parts this task is responsible for):\n${i.scenarios
+    .map((s) => `- ${s.id}: GIVEN ${s.given} WHEN ${s.when} THEN ${s.then}`)
+    .join('\n') || '(none)'}\n\nAlso return criteria: one entry per acceptance criterion, in order, each with pass, score and a short note.`;
   return {
-    prefix: `HIDDEN SCENARIOS for the whole goal (judge only the parts this task is responsible for):\n${i.scenarios
-      .map((s) => `- ${s.id}: GIVEN ${s.given} WHEN ${s.when} THEN ${s.then}`)
-      .join('\n') || '(none)'}\n\nAlso return criteria: one entry per acceptance criterion, in order, each with pass, score and a short note.`,
+    prefix: [base, guidanceSection('TOOL GUIDANCE', i.tools), guidanceSection('REVIEW CHECKLIST', i.checklist)].filter(Boolean).join('\n\n'),
     body: [
       `TASK ${task.id}: ${task.title}\n${task.description}`,
       `ACCEPTANCE CRITERIA:\n${bullets(task.acceptance)}`,
@@ -442,6 +461,8 @@ export class Conductor {
         task,
         others,
         progressFile: task.notes.length ? store.path(progressRel(this.run.id, task.id)) : undefined,
+        tools: harness.guidance.tools,
+        style: harness.guidance.style,
       }),
     );
 
@@ -510,6 +531,8 @@ export class Conductor {
         testCommand: cfg.testCommand,
         tests,
         diff: g.diffSince(cwd, base),
+        tools: this.harness.guidance.tools,
+        checklist: this.harness.guidance.checklist,
       }),
     );
 
