@@ -32,6 +32,8 @@ export interface ArchiveEntry {
   rationale: string;
   evalScore: number | null;
   evalDetail?: Record<string, number>;
+  parents?: string[]; // composed variants list the versions they merged
+  screenScore?: number | null; // mean score on the cheap screening sample
   status: 'promoted' | 'candidate' | 'rejected' | 'retired';
 }
 
@@ -75,7 +77,7 @@ export function listVersions(store: Store): string[] {
 }
 
 // Create vN+1 from a parent plus changed files. Rejects edits outside the evolvable set.
-export function createVariant(store: Store, parent: string, files: Record<string, string>, rationale: string): string {
+export function createVariant(store: Store, parent: string, files: Record<string, string>, rationale: string, parents?: string[]): string {
   for (const name of Object.keys(files)) {
     if (!EVOLVABLE_FILES.includes(name)) throw new Error(`Evolver may not edit ${name}`);
   }
@@ -102,7 +104,7 @@ export function createVariant(store: Store, parent: string, files: Record<string
   cpSync(store.path('harness', parent), dest, { recursive: true });
   for (const [name, content] of Object.entries(files)) writeFileSync(join(dest, name), content);
   const archive = readArchive(store);
-  archive.push({ version, parent, createdAt: Date.now(), rationale, evalScore: null, status: 'candidate' });
+  archive.push({ version, parent, createdAt: Date.now(), rationale, evalScore: null, status: 'candidate', ...(parents?.length ? { parents } : {}) });
   writeArchive(store, archive);
   return version;
 }

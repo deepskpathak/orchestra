@@ -136,3 +136,169 @@ test('infrastructure failure during evaluation is inconclusive, not a rejection'
   assert.equal(v2.evalScore, null, 'no fake zero score recorded');
   assert.equal(currentVersion(store), 'v1');
 });
+
+test('evolve.candidates defaults to 1 and old config.json files resolve to it', () => {
+  assert.equal(DEFAULT_PROJECT_CONFIG.evolve.candidates, 1);
+  const store = tempRepo();
+  const { candidates: _drop, ...legacy } = DEFAULT_PROJECT_CONFIG.evolve;
+  store.writeJson('config.json', { ...DEFAULT_PROJECT_CONFIG, evolve: legacy });
+  assert.equal(store.config().evolve.candidates, 1);
+});
+
+test('createVariant records parents only when given', () => {
+  const store = tempRepo();
+  const plain = createVariant(store, 'v1', { 'worker.md': 'a' }, 'plain');
+  const composed = createVariant(store, 'v1', { 'worker.md': 'b' }, 'composed', [plain, 'v1']);
+  const archive = readArchive(store);
+  assert.equal(archive.find((a) => a.version === plain)?.parents, undefined);
+  assert.deepEqual(archive.find((a) => a.version === composed)?.parents, [plain, 'v1']);
+});
+
+test('fake evolver: k distinct variants, single by default, one composed variant', async () => {
+  const runner = fakeRunner();
+  const ask = async (prompt: string) => {
+    const res = await runner({ role: 'evolver', prompt } as Parameters<typeof runner>[0]);
+    return (res.structured as { variants: { rationale: string; files: { name: string; content: string }[] }[] }).variants;
+  };
+  const base = '--- worker.md ---\nYou are a WORKER.\n\n--- planner.md ---\nx';
+  const three = await ask(`PROPOSE 3 VARIANTS\n${base}`);
+  assert.equal(three.length, 3);
+  assert.equal(new Set(three.map((v) => v.files[0].content)).size, 3);
+  assert.equal(new Set(three.map((v) => v.rationale)).size, 3);
+  assert.equal((await ask(base)).length, 1);
+  const composed = await ask(`COMPOSE VARIANTS\n${base}`);
+  assert.equal(composed.length, 1);
+  assert.match(composed[0].files[0].content, /edge cases/);
+  assert.match(composed[0].files[0].content, /composed/);
+  assert.match(composed[0].rationale, /compos/i);
+});
+
+// ---- multi-candidate cycle ----
+
+async function seeded(candidates: number, cases = 2, extra: Record<string, unknown> = {}) {
+  const store = tempRepo({ evolve: { every: 1, autoPromote: true, minGain: 0.02, sample: cases, minCases: cases, candidates, ...extra } });
+  const runner = fakeRunner();
+  for (let i = 0; i < cases; i++) harvest(store, await runGoal({ store, runner, goal: `goal ${i}` }));
+  return { store, runner };
+}
+
+// Wraps a runner: counts non-evolver sessions per planner call, records evolver prompts, and optionally
+// makes the evolver answer with custom variants / fail planners whose prompt contains a marker.
+function instrument(inner: Runner, opts: { variants?: (prompt: string) => unknown; failMarker?: string } = {}) {
+  const evolverPrompts: string[] = [];
+  let planners = 0;
+  const runner: Runner = async (req) => {
+    if (req.role === 'evolver') {
+      evolverPrompts.push(req.prompt);
+      const custom = opts.variants?.(req.prompt);
+      if (custom) return { ok: true, text: '', costUsd: 0, turns: 1, durationMs: 1, structured: custom };
+    }
+    if (req.role === 'planner') {
+      planners++;
+      if (opts.failMarker && req.system?.includes(opts.failMarker)) return { ok: false, text: '', costUsd: 0, turns: 0, durationMs: 1, error: 'planner broke' };
+    }
+    return inner(req);
+  };
+  return { runner, evolverPrompts, planners: () => planners };
+}
+
+const planFile = (marker: string) => ({ name: 'planner.md', content: `You are the PLANNER. ${marker}` });
+
+test('candidates:3 proposes 3, screens, composes one variant with parents and bounded cost', async () => {
+  const { store, runner } = await seeded(3);
+  const inst = instrument(runner);
+  const out = await evolve(store, inst.runner, quiet);
+  const archive = readArchive(store);
+  const proposals = archive.filter((a) => a.version !== 'v1' && !a.parents);
+  const composed = archive.filter((a) => a.parents);
+  assert.equal(proposals.length, 3);
+  assert.equal(composed.length, 1);
+  assert.deepEqual(composed[0].parents, proposals.map((a) => a.version));
+  assert.equal(out.candidate, composed[0].version);
+  assert.ok(proposals.every((a) => typeof a.screenScore === 'number'));
+  assert.ok(inst.evolverPrompts[0].includes('PROPOSE 3 VARIANTS'));
+  assert.ok(inst.evolverPrompts[1].startsWith('COMPOSE VARIANTS'));
+  assert.equal(inst.evolverPrompts.length, 2);
+  // screen = min(2, sample) = 2: incumbent once + 3 candidates, then 2 x sample (2) full runs.
+  assert.ok(inst.planners() <= 3 * 2 + 2 + 2 * 2, `planner sessions ${inst.planners()}`);
+  assert.ok(inst.planners() >= 2 + 3 * 2);
+});
+
+test('candidates:1 spends exactly the legacy eval runs (2 x sample, one evolver call)', async () => {
+  const { store, runner } = await seeded(1);
+  const inst = instrument(runner);
+  await evolve(store, inst.runner, quiet);
+  assert.equal(inst.planners(), 4);
+  assert.equal(inst.evolverPrompts.length, 1);
+  assert.ok(!inst.evolverPrompts[0].includes('PROPOSE'));
+});
+
+test('screening regression is archived rejected with its score and shown in the next prompt', async () => {
+  const { store, runner } = await seeded(3);
+  const inst = instrument(runner, {
+    failMarker: 'BAD',
+    variants: (p) => (p.startsWith('COMPOSE') ? undefined : { variants: [{ rationale: 'good one', files: [planFile('GOOD1')] }, { rationale: 'bad one', files: [planFile('BAD')] }, { rationale: 'good two', files: [planFile('GOOD2')] }] }),
+  });
+  await evolve(store, inst.runner, quiet);
+  const bad = readArchive(store).find((a) => a.rationale === 'bad one')!;
+  assert.equal(bad.status, 'rejected');
+  assert.equal(bad.screenScore, 0);
+  assert.equal(bad.evalScore, 0);
+  const composed = readArchive(store).find((a) => a.parents)!;
+  assert.equal(composed.parents!.length, 2);
+  assert.ok(!composed.parents!.includes(bad.version));
+
+  const next = instrument(runner);
+  await evolve(store, next.runner, quiet);
+  assert.match(next.evolverPrompts[0], new RegExp(`PREVIOUSLY REJECTED VARIANTS[^]*- ${bad.version} \\(score 0\\): bad one`));
+});
+
+test('all candidates regress in screening: no compose, no full evaluation', async () => {
+  const { store, runner } = await seeded(2);
+  const inst = instrument(runner, {
+    failMarker: 'BAD',
+    variants: () => ({ variants: [{ rationale: 'a', files: [planFile('BAD a')] }, { rationale: 'b', files: [planFile('BAD b')] }] }),
+  });
+  const out = await evolve(store, inst.runner, quiet);
+  assert.equal(out.promoted, false);
+  assert.match(out.reason, /regressed in screening/);
+  assert.equal(inst.evolverPrompts.length, 1);
+  assert.equal(inst.planners(), 2 + 2 * 2, 'incumbent + 2 candidates on the 2 screen cases only');
+  assert.ok(readArchive(store).filter((a) => a.version !== 'v1').every((a) => a.status === 'rejected'));
+});
+
+test('compose failure falls back to the best surviving candidate', async () => {
+  const { store, runner } = await seeded(2);
+  const inst = instrument(runner, {
+    variants: (p) =>
+      p.startsWith('COMPOSE')
+        ? { variants: [] }
+        : { variants: [{ rationale: 'a', files: [planFile('A')] }, { rationale: 'b', files: [planFile('B')] }] },
+  });
+  const out = await evolve(store, inst.runner, quiet);
+  assert.equal(inst.evolverPrompts.length, 2);
+  assert.ok(!readArchive(store).some((a) => a.parents), 'no composed variant');
+  assert.ok(['v2', 'v3'].includes(out.candidate!));
+});
+
+test('finalist that does not beat the incumbent is never promoted', async () => {
+  const { store, runner } = await seeded(2);
+  const inst = instrument(runner, {
+    variants: () => ({ variants: [{ rationale: 'a', files: [planFile('A')] }, { rationale: 'b', files: [planFile('B')] }] }),
+  });
+  const out = await evolve(store, inst.runner, quiet);
+  assert.equal(out.promoted, false);
+  assert.equal(currentVersion(store), 'v1');
+  assert.equal(readArchive(store).find((a) => a.version === out.candidate)!.status, 'rejected');
+});
+
+test('too few cases with candidates:3 keeps every candidate and spends no eval runs', async () => {
+  const store = tempRepo({ evolve: { every: 1, autoPromote: true, minGain: 0.02, sample: 3, minCases: 5, candidates: 3 } });
+  const inst = instrument(fakeRunner());
+  const out = await evolve(store, inst.runner, quiet);
+  assert.equal(out.promoted, false);
+  assert.equal(inst.planners(), 0);
+  const entries = readArchive(store).filter((a) => a.version !== 'v1');
+  assert.equal(entries.length, 3);
+  assert.ok(entries.every((a) => a.status === 'candidate'));
+});

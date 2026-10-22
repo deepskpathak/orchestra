@@ -60,6 +60,7 @@ Off by default. When enabled and the goal is short and has no list structure (nu
 | `evolve.minGain` | number | `0.02` | Minimum eval score gain a candidate needs to count as better. The gain must also exceed the observed spread (standard deviation of per-case score deltas), with no regressions. |
 | `evolve.sample` | number | `5` | Eval cases used per evaluation, newest first. Bounds cost. Keep it at or above `evolve.minCases`, or promotion is never possible. |
 | `evolve.minCases` | number | `5` | Minimum eval cases that must be evaluated before a candidate can be promoted. Fewer cases and the candidate is rejected with a reason. |
+| `evolve.candidates` | number | `1` | Variants proposed per evolve cycle. `1` keeps the single-variant cycle. Above `1`, candidates are screened on `min(2, sample)` cases, survivors are composed into one variant, and only that variant gets the full evaluation. See [self-improvement.md](self-improvement.md#multi-candidate-evolution-evolvecandidates). |
 
 Example:
 
@@ -68,7 +69,7 @@ Example:
   "concurrency": 2,
   "testCommand": "npm test --silent",
   "runBudgetUsd": 10,
-  "evolve": { "every": 0 }
+  "evolve": { "every": 0, "candidates": 3 }
 }
 ```
 

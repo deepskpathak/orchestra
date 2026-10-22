@@ -9,6 +9,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Added
 
 - Wider evolvable harness surface (#9). Three small optional files, `tools.md` (worker and judge), `style.md` (worker) and `checklist.md` (judge), can now be tuned by the evolver without rewriting a role prompt. Missing files are treated as empty, and a variant may not remove lines from `checklist.md`. Skills and executable scripts remain out of scope.
+- Multi-candidate evolution (#8). The opt-in `evolve.candidates` setting (default `1`, behaviour unchanged) makes the evolver propose k variants per cycle, screen each on `min(2, sample)` eval cases and drop any that regress a case the incumbent passes, compose the survivors into one variant, and decide with the usual `promotionDecision` rules. Archive entries gain optional `parents` and `screenScore`, and screened-out candidates appear under PREVIOUSLY REJECTED VARIANTS.
+- The seed evolver prompt documents the `{ variants: [...] }` output, the different-weaknesses rule and `COMPOSE VARIANTS`.
 
 ## [0.5.0] - 2026-10-22
 
