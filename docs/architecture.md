@@ -1,5 +1,7 @@
 # Architecture
 
+For the design rationale, see the [whitepaper](whitepaper-orchestra.md).
+
 Orchestra turns a goal into merged, reviewed code by running five agent roles around git. All durable state lives in git and in a `.orchestra/` directory, never in a long conversation (see `src/agent.ts`).
 
 ```

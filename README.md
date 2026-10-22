@@ -102,6 +102,8 @@ Inside Claude Code, the plugin adds `/orchestra:setup`, `/orchestra:run`, `/orch
 - [Self-improvement](docs/self-improvement.md): ledger, Factory Eval, evolve, promote and rollback
 - [Dashboards](docs/dashboards.md): watch, status, serve, and the statusline
 - [Configuration](docs/configuration.md): `.orchestra/config.json` and harness config
+- [Whitepaper](docs/whitepaper-orchestra.md): design, methodology, limitations, and threats to validity
+- [Blog post](docs/blog/orchestra-substack-post.md): a plain-language tour with an example run
 
 ## Project
 

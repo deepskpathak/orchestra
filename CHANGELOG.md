@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- Whitepaper (`docs/whitepaper-orchestra.md`) and Substack-style blog post (`docs/blog/orchestra-substack-post.md`), linked from the README and the architecture doc.
+
 ## [0.6.0] - 2026-10-22
 
 ### Added
