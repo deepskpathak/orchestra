@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { extractJson, type AgentRequest, type AgentResult, type Runner } from './agent.ts';
 import * as g from './git.ts';
 import { loadHarness, type Harness } from './harness.ts';
-import { formatLearnings, readLearnings, writeLearnings, type Lesson } from './learnings.ts';
+import { formatLearnings, readAllLearnings, readLearnings, writeLearnings, type Lesson } from './learnings.ts';
 import { newRunId, type Store } from './store.ts';
 import type { ActiveAgent, CriterionResult, OrchestraEvent, Role, Run, Scenario, Task, Verdict } from './types.ts';
 
@@ -338,7 +338,7 @@ export class Conductor {
 
   private async plan(): Promise<void> {
     const { run, store, harness } = this;
-    const learnings = readLearnings(store);
+    const learnings = readAllLearnings(store);
     const cfg = store.config();
     const files = g.trackedFiles(this.integration.path);
     const fp = fastPathDecision(run.goal, cfg.fastPath);
@@ -413,7 +413,7 @@ export class Conductor {
     this.emit('task.start', `${task.id} attempt ${task.attempts}: ${task.title}`, undefined, task.id);
     this.save();
 
-    const learnings = readLearnings(store);
+    const learnings = readAllLearnings(store);
     const others = this.run.tasks.filter((t) => t.id !== task.id).map((t) => `- ${t.id} ${t.title} [${t.status}]`);
     const prompt = joinPrompt(
       workerPrompt({
