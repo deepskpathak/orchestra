@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-22
+
 ### Added
 
 - Wider evolvable harness surface (#9). Three small optional files, `tools.md` (worker and judge), `style.md` (worker) and `checklist.md` (judge), can now be tuned by the evolver without rewriting a role prompt. Missing files are treated as empty, and a variant may not remove lines from `checklist.md`. Skills and executable scripts remain out of scope.
