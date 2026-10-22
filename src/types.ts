@@ -169,5 +169,6 @@ export interface ProjectConfig {
     minGain: number;
     sample: number; // eval cases per evaluation, newest first; bounds cost
     minCases: number; // refuse to promote when fewer eval cases were evaluated
+    candidates: number; // variants proposed per cycle; 1 = classic single-variant loop
   };
 }

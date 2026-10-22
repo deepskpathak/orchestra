@@ -136,3 +136,39 @@ test('infrastructure failure during evaluation is inconclusive, not a rejection'
   assert.equal(v2.evalScore, null, 'no fake zero score recorded');
   assert.equal(currentVersion(store), 'v1');
 });
+
+test('evolve.candidates defaults to 1 and old config.json files resolve to it', () => {
+  assert.equal(DEFAULT_PROJECT_CONFIG.evolve.candidates, 1);
+  const store = tempRepo();
+  const { candidates: _drop, ...legacy } = DEFAULT_PROJECT_CONFIG.evolve;
+  store.writeJson('config.json', { ...DEFAULT_PROJECT_CONFIG, evolve: legacy });
+  assert.equal(store.config().evolve.candidates, 1);
+});
+
+test('createVariant records parents only when given', () => {
+  const store = tempRepo();
+  const plain = createVariant(store, 'v1', { 'worker.md': 'a' }, 'plain');
+  const composed = createVariant(store, 'v1', { 'worker.md': 'b' }, 'composed', [plain, 'v1']);
+  const archive = readArchive(store);
+  assert.equal(archive.find((a) => a.version === plain)?.parents, undefined);
+  assert.deepEqual(archive.find((a) => a.version === composed)?.parents, [plain, 'v1']);
+});
+
+test('fake evolver: k distinct variants, single by default, one composed variant', async () => {
+  const runner = fakeRunner();
+  const ask = async (prompt: string) => {
+    const res = await runner({ role: 'evolver', prompt } as Parameters<typeof runner>[0]);
+    return (res.structured as { variants: { rationale: string; files: { name: string; content: string }[] }[] }).variants;
+  };
+  const base = '--- worker.md ---\nYou are a WORKER.\n\n--- planner.md ---\nx';
+  const three = await ask(`PROPOSE 3 VARIANTS\n${base}`);
+  assert.equal(three.length, 3);
+  assert.equal(new Set(three.map((v) => v.files[0].content)).size, 3);
+  assert.equal(new Set(three.map((v) => v.rationale)).size, 3);
+  assert.equal((await ask(base)).length, 1);
+  const composed = await ask(`COMPOSE VARIANTS\n${base}`);
+  assert.equal(composed.length, 1);
+  assert.match(composed[0].files[0].content, /edge cases/);
+  assert.match(composed[0].files[0].content, /composed/);
+  assert.match(composed[0].rationale, /compos/i);
+});

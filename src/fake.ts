@@ -96,11 +96,26 @@ export function fakeRunner(opts: { stepMs?: number; failFirstAttemptOf?: string[
         });
       }
       case 'evolver': {
+        const base = req.prompt.match(/--- worker\.md ---\n([\s\S]*?)\n\n--- /)?.[1] ?? 'You are a WORKER.';
+        const edge = '- Before coding, list the edge cases and write a test for each one.';
+        if (req.prompt.startsWith('COMPOSE VARIANTS')) {
+          await act('says: composing variants');
+          return done({
+            variants: [{ rationale: 'Composition of the surviving variants, keeping the edits with evidence.', files: [{ name: 'worker.md', content: `${base}\n${edge}\n- composed: merged edits from surviving variants.\n` }] }],
+          });
+        }
         await act('says: proposing variant');
-        return done({
-          rationale: 'Repair loops cluster on missing edge cases; make the worker enumerate edge cases before coding.',
-          files: [{ name: 'worker.md', content: `${req.prompt.match(/--- worker\.md ---\n([\s\S]*?)\n\n--- /)?.[1] ?? 'You are a WORKER.'}\n- Before coding, list the edge cases and write a test for each one.\n` }],
-        });
+        const k = Math.max(1, Number(req.prompt.match(/PROPOSE (\d+) VARIANTS/)?.[1] ?? 1));
+        const variants = [];
+        for (let i = 1; i <= k; i++) {
+          // Variant 1 keeps the classic edge-case edit; the rest append distinct lines so each is a different candidate.
+          variants.push(
+            i === 1
+              ? { rationale: 'Repair loops cluster on missing edge cases; make the worker enumerate edge cases before coding.', files: [{ name: 'worker.md', content: `${base}\n${edge}\n` }] }
+              : { rationale: `Variant ${i}: target a different weakness (focus area ${i}).`, files: [{ name: 'worker.md', content: `${base}\n${edge}\n- Focus area ${i}: double-check the change against the task before finishing.\n` }] },
+          );
+        }
+        return done({ variants });
       }
     }
   };

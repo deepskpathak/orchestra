@@ -16,7 +16,7 @@ export const DEFAULT_PROJECT_CONFIG: ProjectConfig = {
   judgeTiers: { enabled: false, cheapModel: 'haiku', margin: 0.1 },
   preJudge: { enabled: false, lintCommand: null, requireTests: true },
   fastPath: { enabled: false, maxGoalChars: 400 },
-  evolve: { every: 3, autoPromote: true, minGain: 0.02, sample: 5, minCases: 5 },
+  evolve: { every: 3, autoPromote: true, minGain: 0.02, sample: 5, minCases: 5, candidates: 1 },
 };
 
 export class Store {
