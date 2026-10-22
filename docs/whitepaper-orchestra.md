@@ -14,6 +14,8 @@ Coding agents are now good enough that the hard problems move from "can the mode
 
 Orchestra is a small, zero-dependency implementation of that idea (`README.md`, `CHANGELOG.md` entry 0.1.0). It targets a developer who wants to hand over a multi-part goal and review one integration branch at the end, rather than supervise a single long conversation.
 
+For a shorter, plain-language tour with an example run, see the [blog post](blog/orchestra-substack-post.md).
+
 We built it around four problems that `PLAN.md` and `docs/research/cost-accuracy-speed.md` identify in existing practice:
 
 1. **Agents mark their own homework.** If the author of a change also decides it is done, errors pass. Orchestra separates roles: planners never code and judges never edit (`README.md`, `harness/v1/judge.md`).
