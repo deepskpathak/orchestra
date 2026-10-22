@@ -32,9 +32,31 @@ Evaluation runs (`kind: eval`) are excluded, so evolution does not distort the n
 
 ## Learnings: `orchestra learnings`
 
-After each run the librarian distills lessons for the planner, worker and judge roles. They are stored in `learnings.json` (at most 25 lessons, rewritten after each run) with a readable mirror in `learnings.md`. `orchestra learnings` prints the mirror, or a hint if no run has completed yet.
+After each run the librarian distills lessons for the planner, worker and judge roles. Lessons are scoped by domain, a short slug such as `cli`, `web-ui`, `docs` or `config` that the planner assigns to the run.
 
-Learnings are injected into the planner and worker prompts as a `LEARNINGS:` section (`src/conductor.ts`), and the evolver also receives them as evidence. They are plain text you can read and edit.
+**Layout** (relative to `.orchestra`):
+
+- `learnings/<domain>.json`: lessons for one domain.
+- `learnings/_global.json`: lessons that are clearly general across domains.
+- `learnings.md`: readable mirror, grouped by domain (global first), rewritten after each run.
+
+**Migration.** On first read, an existing `learnings.json` becomes `learnings/_global.json`. Its lessons get a placeholder evidence entry (`run: legacy`) and `hits: 0`.
+
+**Evidence and hits.** Each lesson has `evidence` (a list of `{run, task?}` ids from run reports) and `hits`. The librarian must cite evidence, and lessons without evidence are dropped.
+
+**Cap.** Each domain (and global) keeps at most 25 lessons, not the whole store. Over the cap, lessons with the least recent evidence are dropped first.
+
+**Retrieval budget.** The planner and worker prompts get a `LEARNINGS:` section (`src/conductor.ts`) with at most 15 lessons: the run's domain first, then global. The evolver gets a per-domain summary (counts and top lessons), not the full store. The files are plain JSON and Markdown you can read and edit.
+
+**Viewing.**
+
+```
+orchestra learnings                  # the whole mirror, or a hint if no run has completed yet
+orchestra learnings --domain cli     # only the cli lessons: role, text, evidence ids, hits
+orchestra learnings --domain global  # only the global lessons
+```
+
+An unknown domain exits non-zero and lists the known domains.
 
 ## Factory Eval: `orchestra evals`
 
