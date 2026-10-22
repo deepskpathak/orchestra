@@ -104,6 +104,11 @@ export function removeWorktree(root: string, path: string): void {
   tryGit(root, 'worktree', 'prune');
 }
 
+// Force-deletes a branch (loser cleanup). A missing branch is not an error.
+export function deleteBranch(root: string, branch: string): void {
+  tryGit(root, 'branch', '-D', branch);
+}
+
 export function runTests(cwd: string, command: string, timeoutMs = 10 * 60_000): { ok: boolean; tail: string } {
   const r = spawnSync('sh', ['-c', command], { cwd, encoding: 'utf8', timeout: timeoutMs, env: { ...process.env, CI: '1' } });
   const out = `${r.stdout ?? ''}${r.stderr ?? ''}`;
