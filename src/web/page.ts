@@ -900,6 +900,18 @@ pre { margin: 0; padding: 10px 12px; max-height: 420px; overflow: auto; font: 12
         (v.judgeError ? '<p>' + esc(v.judgeError) + '</p>' : '') +
         (v.issues && v.issues.length ? '<ul>' + v.issues.map(function (x) { return '<li>' + esc(x) + '</li>'; }).join('') + '</ul>' : '') + '</div>');
     }
+    var ct = t.contrast;
+    if (ct) {
+      var side = function (k, s) {
+        var sv = s && s.verdict;
+        return '<li><b>' + k + '</b> <code>' + esc(s ? s.branch : '') + '</code> ' +
+          (sv ? '<span class="num muted">score ' + (sv.judgeError ? 'n/a' : sv.score.toFixed(2)) + (sv.pass ? ' &middot; pass' : ' &middot; fail') + '</span>' : '<span class="muted">no verdict</span>') + '</li>';
+      };
+      var other = ct.picked === 'A' ? 'B' : 'A';
+      out += section('Contrastive repair (attempt ' + esc(ct.attempt) + ')', '<div class="verdict t-' + (ct.picked ? 'ok' : 'bad') + '">' +
+        '<p>' + (ct.picked ? 'Picked ' + ct.picked + ' over ' + other + (ct.reasons ? ' because ' + esc(ct.reasons) : '') : 'Neither attempt passed' + (ct.reasons ? ': ' + esc(ct.reasons) : '')) + '</p>' +
+        '<ul class="plain">' + side('A', ct.a) + side('B', ct.b) + '</ul></div>');
+    }
     if (t.notes && t.notes.length) out += section('Repair notes', '<ul class="plain">' + t.notes.map(function (n) { return '<li>' + esc(n) + '</li>'; }).join('') + '</ul>');
 
     if (!d) out += '<div class="none">Loading diff and logs&hellip;</div>';

@@ -80,6 +80,23 @@ test('page script parses and loads nothing from outside localhost', async () => 
   assert.doesNotMatch(PAGE.replace(/http:\/\/www\.w3\.org\/2000\/svg/g, ''), /https?:\/\//);
 });
 
+test('task drawer renders the contrast pick with escaped reasons, and info is unchanged', async () => {
+  const { PAGE } = await import('../src/web/page.ts');
+  assert.match(PAGE, /Picked ' \+ ct\.picked \+ ' over ' \+ other/);
+  assert.match(PAGE, /Neither attempt passed/);
+  assert.match(PAGE, /esc\(ct\.reasons\)/);
+  assert.doesNotMatch(PAGE, /ct\.reasons\s*\+\s*'<\/p>/); // reasons never injected raw
+  const web = await serve({ store: seed(), port: 4441 });
+  try {
+    const info = JSON.parse((await get(web.url + '/api/info')).body);
+    assert.equal(info.contrast, undefined);
+    assert.equal(info.current, 'r1');
+    assert.equal(typeof info.maxAttempts, 'number');
+  } finally {
+    await web.close();
+  }
+});
+
 test('info exposes harness retry and pass limits', async () => {
   const web = await serve({ store: seed(), port: 4440 });
   try {

@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- Contrastive repair (#11), opt-in via the `contrastive` block in `.orchestra/config.json`. On a repair attempt in a repo without a `testCommand`, two workers try the task in separate worktrees (one follows the repair notes, one takes a different approach) and one comparison judge call picks a winner. The winner's branch continues, the loser is deleted, and the judge's reasons feed the librarian as lesson evidence. The task drawer shows "Picked A over B because ...". Disabled by default; `passThreshold` is never lowered.
+
 ## [0.5.0] - 2026-10-22
 
 ### Added
