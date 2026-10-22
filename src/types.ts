@@ -58,6 +58,7 @@ export type RunStatus = 'planning' | 'running' | 'compounding' | 'done' | 'faile
 export interface Run {
   id: string;
   goal: string;
+  domain?: string; // learnings domain slug chosen by the planner
   harness: string; // harness version id, e.g. "v1"
   kind: 'goal' | 'eval';
   status: RunStatus;

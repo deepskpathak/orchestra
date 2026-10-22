@@ -22,7 +22,7 @@ export interface AgentRequest {
   permissionMode?: string;
   logFile?: string;
   timeoutMs?: number;
-  meta?: { task?: string; attempt?: number };
+  meta?: { task?: string; attempt?: number; run?: string };
   onAction?: (action: string) => void;
 }
 

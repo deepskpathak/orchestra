@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { extractJson, type AgentRequest, type AgentResult, type Runner } from './agent.ts';
 import * as g from './git.ts';
 import { loadHarness, type Harness } from './harness.ts';
-import { formatLearnings, readAllLearnings, readLearnings, writeLearnings, type Lesson } from './learnings.ts';
+import { formatLearnings, listDomains, normalizeDomain, readAllLearnings, readLearnings, writeLearnings, GLOBAL, type Lesson } from './learnings.ts';
 import { newRunId, type Store } from './store.ts';
 import type { ActiveAgent, CriterionResult, OrchestraEvent, Role, Run, Scenario, Task, Verdict } from './types.ts';
 
@@ -46,17 +46,21 @@ export function fastPathDecision(goal: string, cfg: { enabled: boolean; maxGoalC
   return { fast: true, reason: 'small single-concern goal' };
 }
 
-export function plannerPrompt(i: { goal: string; files: string[]; testCommand?: string; learnings: string; fastPath?: boolean }): BuiltPrompt {
+const PLAN_BODY =
+  'Produce the task graph and hidden scenarios.\nAlso set "domain": pick one existing domain slug from EXISTING DOMAINS, or propose at most one new kebab-case slug (e.g. cli, web-ui, docs, config) when none fits.';
+
+export function plannerPrompt(i: { goal: string; files: string[]; testCommand?: string; learnings: string; domains: string[]; fastPath?: boolean }): BuiltPrompt {
   return {
     prefix: [
       `LEARNINGS:\n${i.learnings}`,
+      `EXISTING DOMAINS:\n${i.domains.length ? i.domains.join('\n') : '(none yet)'}`,
       `REPOSITORY FILES (first ${i.files.length}):\n${i.files.join('\n')}`,
       `TEST COMMAND: ${i.testCommand ?? '(none configured)'}`,
       `GOAL:\n${i.goal}`,
     ].join('\n\n'),
     body: i.fastPath
-      ? 'Produce the task graph and hidden scenarios.\nThis goal is small and single-concern: return exactly one task and an empty or minimal scenarios list.'
-      : 'Produce the task graph and hidden scenarios.',
+      ? `${PLAN_BODY}\nThis goal is small and single-concern: return exactly one task and an empty or minimal scenarios list.`
+      : PLAN_BODY,
   };
 }
 
@@ -156,6 +160,7 @@ export function judgePrompt(i: {
 const PLAN_SCHEMA = {
   type: 'object',
   properties: {
+    domain: { type: 'string' },
     tasks: {
       type: 'array',
       minItems: 1,
@@ -240,8 +245,17 @@ const LESSONS_SCHEMA = {
       maxItems: 25,
       items: {
         type: 'object',
-        properties: { role: { type: 'string', enum: ['planner', 'worker', 'judge'] }, lesson: { type: 'string' } },
-        required: ['role', 'lesson'],
+        properties: {
+          role: { type: 'string', enum: ['planner', 'worker', 'judge'] },
+          lesson: { type: 'string' },
+          evidence: {
+            type: 'array',
+            minItems: 1,
+            items: { type: 'object', properties: { run: { type: 'string' }, task: { type: 'string' } }, required: ['run'] },
+          },
+          hits: { type: 'number' },
+        },
+        required: ['role', 'lesson', 'evidence'],
       },
     },
   },
@@ -347,6 +361,7 @@ export class Conductor {
       files,
       testCommand: cfg.testCommand,
       learnings: formatLearnings(learnings, 'planner'),
+      domains: listDomains(store),
       fastPath: fp.fast,
     });
     const prompt = joinPrompt(built);
@@ -357,10 +372,14 @@ export class Conductor {
       schema: fp.fast ? FAST_PLAN_SCHEMA : PLAN_SCHEMA,
       tools: ['Read', 'Grep', 'Glob'],
     });
-    const out = extractJson(res) as { tasks?: any[]; scenarios?: Scenario[] } | undefined;
+    const out = extractJson(res) as { tasks?: any[]; scenarios?: Scenario[]; domain?: unknown } | undefined;
     if (!res.ok || !out?.tasks?.length) throw new Error(`Planner failed: ${res.error ?? 'no tasks returned'}`);
 
     run.tasks = normalizeTasks(out.tasks);
+    // One domain per run, so at most one new domain can appear per run.
+    const domain = normalizeDomain(out.domain);
+    if (domain && domain !== GLOBAL) run.domain = domain;
+    else if (out.domain !== undefined && out.domain !== '') this.emit('log', `Ignoring invalid planner domain: ${JSON.stringify(out.domain)}`);
     this.scenarios = out.scenarios ?? [];
     // Holdout: only the judge ever receives these. .orchestra is outside every worktree.
     store.writeJson(`holdout/${run.id}.json`, this.scenarios);
@@ -418,7 +437,7 @@ export class Conductor {
     const prompt = joinPrompt(
       workerPrompt({
         goal: this.run.goal,
-        learnings: formatLearnings(learnings, 'worker'),
+        learnings: formatLearnings(learnings, 'worker', this.run.domain),
         testCommand: cfg.testCommand,
         task,
         others,
@@ -631,9 +650,10 @@ export class Conductor {
       .filter((e) => e.kind === 'task.repair' || e.kind === 'task.failed')
       .map((e) => `- ${e.msg}`)
       .join('\n');
-    const existing = readLearnings(store);
+    const existing = { domain: run.domain ?? GLOBAL, lessons: readLearnings(store, run.domain), global: run.domain ? readLearnings(store) : [] };
     const res = await this.call('librarian', undefined, 1, {
       prompt: [
+        `RUN ID: ${run.id}\nTASK IDS: ${run.tasks.map((t) => t.id).join(', ')}\nDOMAIN: ${run.domain ?? GLOBAL}\nEvery lesson must cite evidence ({run, task?}); lessons without evidence are dropped. Return the full revised lesson set for this domain.`,
         `RUN REPORT\nGoal: ${run.goal}\nSatisfaction: ${run.satisfaction}\nCost: $${run.costUsd.toFixed(2)}\n${report}`,
         `REPAIRS AND FAILURES:\n${events || '(none)'}`,
         `EXISTING LEARNINGS:\n${JSON.stringify(existing, null, 2)}`,
@@ -644,8 +664,10 @@ export class Conductor {
     });
     const out = extractJson(res) as { lessons?: Lesson[] } | undefined;
     if (res.ok && Array.isArray(out?.lessons)) {
-      writeLearnings(store, out.lessons, run.id);
-      this.emit('learn', `Learnings updated: ${out.lessons.length} lessons`, { count: out.lessons.length });
+      writeLearnings(store, out.lessons, run.id, run.domain);
+      const kept = readLearnings(store, run.domain).length;
+      const dropped = Math.max(0, out.lessons.length - kept);
+      this.emit('learn', `Learnings updated: ${kept} lessons kept, ${dropped} dropped (${run.domain ?? GLOBAL})`, { count: kept, kept, dropped, domain: run.domain ?? GLOBAL });
     } else {
       this.emit('log', `Librarian failed: ${res.error ?? 'no lessons'}`);
     }
@@ -678,7 +700,7 @@ export class Conductor {
       budgetUsd: harness.config.budgetUsd[role],
       timeoutMs: TIMEOUT_MS[role],
       logFile: this.store.path('runs', run.id, 'logs', `${task?.id ?? 'run'}-${role}-${attempt}.jsonl`),
-      meta: { task: task?.id, attempt },
+      meta: { task: task?.id, attempt, run: run.id },
       onAction: (action) => {
         agent.lastAction = action;
         if (!action.startsWith('says:')) agent.tools += 1;

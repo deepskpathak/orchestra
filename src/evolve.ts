@@ -18,7 +18,7 @@ import {
   readArchive,
   updateArchive,
 } from './harness.ts';
-import { readLearnings } from './learnings.ts';
+import { summarizeLearnings } from './learnings.ts';
 import type { Store } from './store.ts';
 import type { Run } from './types.ts';
 
@@ -228,7 +228,7 @@ export async function evolve(store: Store, runner: Runner, log: (msg: string) =>
     `METRICS PER VERSION:\n${JSON.stringify(m, null, 2)}`,
     `RECENT REPAIR NOTES AND FAILURES:\n${recentIssues.map((i) => `- ${i.split('\n')[0]}`).join('\n') || '(none)'}`,
     `PREVIOUSLY REJECTED VARIANTS (do not repeat):\n${rejected.join('\n') || '(none)'}`,
-    `CURRENT LEARNINGS:\n${JSON.stringify(readLearnings(store))}`,
+    `LEARNINGS SUMMARY (per domain):\n${JSON.stringify(summarizeLearnings(store))}`,
   ].join('\n\n');
 
   log(`Evolver studying ${incumbent} (${m.find((x) => x.version === incumbent)?.runs ?? 0} runs of evidence)`);

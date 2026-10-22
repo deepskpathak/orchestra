@@ -44,6 +44,7 @@ export function fakeRunner(opts: { stepMs?: number; failFirstAttemptOf?: string[
               { id: 'T3', title: 'CLI wiring', description: 'Wire CLI to core', acceptance: ['cli.txt exists'], deps: ['T1'] },
               { id: 'T4', title: 'Docs', description: 'Document usage', acceptance: ['docs.txt exists'], deps: ['T2', 'T3'] },
             ],
+            domain: 'cli',
             scenarios: [{ id: 'S1', given: 'a fresh repo', when: 'user runs the CLI', then: 'it prints help' }],
           },
           'planned',
@@ -89,8 +90,8 @@ export function fakeRunner(opts: { stepMs?: number; failFirstAttemptOf?: string[
         await act('says: distilling lessons');
         return done({
           lessons: [
-            { role: 'worker', lesson: 'Handle empty config files explicitly; judges reject missing edge cases.', evidence: [{ run: 'fake-run', task: 'T2' }] },
-            { role: 'planner', lesson: 'Split config and CLI work; they parallelize cleanly.', evidence: [{ run: 'fake-run' }] },
+            { role: 'worker', lesson: 'Handle empty config files explicitly; judges reject missing edge cases.', evidence: [{ run: req.meta?.run ?? 'fake-run', task: 'T2' }] },
+            { role: 'planner', lesson: 'Split config and CLI work; they parallelize cleanly.', evidence: [{ run: req.meta?.run ?? 'fake-run' }] },
           ],
         });
       }

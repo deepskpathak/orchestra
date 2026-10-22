@@ -40,14 +40,21 @@ test('judge prompt prefix is byte-identical across tasks and diffs, diff last', 
 });
 
 test('planner prompt puts learnings, files, test command and goal before the instruction', () => {
-  const p = plannerPrompt({ goal: 'GOALTEXT', files: ['a.ts'], testCommand: undefined, learnings: 'LEARNTEXT' });
+  const p = plannerPrompt({ goal: 'GOALTEXT', files: ['a.ts'], testCommand: undefined, learnings: 'LEARNTEXT', domains: ['cli', 'docs'] });
   assert.ok(p.prefix.indexOf('LEARNTEXT') < p.prefix.indexOf('a.ts'));
   assert.ok(p.prefix.indexOf('TEST COMMAND') < p.prefix.indexOf('GOALTEXT'));
-  assert.equal(p.body, 'Produce the task graph and hidden scenarios.');
+  assert.match(p.body, /^Produce the task graph and hidden scenarios\./);
+});
+
+test('planner prompt lists existing domains and the at-most-one-new-domain rule', () => {
+  const p = plannerPrompt({ goal: 'G', files: [], learnings: 'L', domains: ['cli', 'web-ui'] });
+  assert.match(p.prefix, /EXISTING DOMAINS:\ncli\nweb-ui/);
+  assert.match(p.body, /at most one new kebab-case slug/);
+  assert.match(plannerPrompt({ goal: 'G', files: [], learnings: 'L', domains: [] }).prefix, /EXISTING DOMAINS:\n\(none yet\)/);
 });
 
 test('planner fast path keeps the prefix and asks for exactly one task', () => {
-  const base = { goal: 'G', files: ['a.ts'], learnings: 'L' };
+  const base = { goal: 'G', files: ['a.ts'], learnings: 'L', domains: [] as string[] };
   const slow = plannerPrompt(base);
   const fast = plannerPrompt({ ...base, fastPath: true });
   assert.equal(fast.prefix, slow.prefix);
