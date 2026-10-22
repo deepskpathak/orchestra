@@ -87,7 +87,21 @@ One evolution cycle (`evolve()` in `src/evolve.ts`):
 
 The command prints whether it promoted or kept the incumbent, with the reason and both eval scores. Evaluation reruns past goals, so one cycle costs roughly `sample x 2` runs plus the evolver call.
 
-The `evolve` settings live in `config.json`, with defaults `every: 3`, `autoPromote: true`, `minGain: 0.02`, `sample: 5`, `minCases: 5`. A `sample` below `minCases` is raised to `minCases`, so an old `config.json` that pins a small value cannot block promotion. With fewer than `minCases` eval cases, `evolve` keeps the candidate for later and spends no eval runs. If an eval run dies of infrastructure (usage limit, auth, network), the result is inconclusive: the candidate stays a candidate and no score is recorded.
+The `evolve` settings live in `config.json`, with defaults `every: 3`, `autoPromote: true`, `minGain: 0.02`, `sample: 5`, `minCases: 5`, `candidates: 1`. A `sample` below `minCases` is raised to `minCases`, so an old `config.json` that pins a small value cannot block promotion. With fewer than `minCases` eval cases, `evolve` keeps the candidate for later and spends no eval runs. If an eval run dies of infrastructure (usage limit, auth, network), the result is inconclusive: the candidate stays a candidate and no score is recorded.
+
+## Multi-candidate evolution: `evolve.candidates`
+
+Opt-in. `evolve.candidates` defaults to `1`, which keeps the single-variant cycle above unchanged, in behaviour and cost. With `candidates: k` (k > 1) a cycle becomes:
+
+1. **Propose k.** One evolver call returns `{ variants: [{ rationale, files }] }` with k variants. Each must target a different weakness and must not repeat a previously rejected variant. Every variant is recorded with `createVariant` and gets an `archive.json` entry.
+2. **Screen.** Each candidate is run on a small screening sample of the eval cases, `min(2, evolve.sample)`, against the incumbent on the same cases. A candidate that regresses any case the incumbent passes is dropped: its archive entry is marked `rejected` and stores its `screenScore`, so later prompts list it under PREVIOUSLY REJECTED VARIANTS.
+3. **Compose.** If two or more candidates survive, a second evolver call (prompt starts with `COMPOSE VARIANTS`) receives the survivors, their per-case scores and their rationales. It returns one composed variant that keeps only edits backed by score evidence. It is recorded with `createVariant`, and its archive entry has `parents` listing the surviving versions it was built from. A single survivor skips this step and goes forward as is.
+4. **Decide.** The composed variant (or the single survivor) gets the full `evolve.sample` evaluation against the incumbent, and `promotionDecision()` decides exactly as before: `evolve.minCases`, the no-regression rule and the spread rule are unchanged. Screening scores never promote anything.
+5. **Record.** The result is archived like a normal candidate (`candidate`, `promoted` or `rejected`). If every candidate is screened out, nothing is promoted and the incumbent stays.
+
+**Cost model.** A dud single candidate wastes roughly `2 x sample` eval runs. Multi-candidate evolution spends about `k x screen + 2 x sample` (plus two evolver calls), where `screen = min(2, sample)`. Duds are caught at the screening price, so the full evaluation is spent on a variant that already passed a cheap check. Because `k x screen` is paid every cycle, keep `k` small (2 to 4).
+
+New archive fields: `parents` (version names a composed variant was built from, absent otherwise) and `screenScore` (the screening score, present on candidates that were screened).
 
 ## Automatic evolution after a run
 
