@@ -49,6 +49,31 @@ The page lists runs (newest first) and streams live updates for the selected run
 
 The page follows your system light or dark theme; the half-moon button overrides it. The theme and the Board or Flow choice are remembered in the browser.
 
+## Terminal dashboard
+
+```
+orchestra serve --tui [runId]
+orchestra tui [runId]
+```
+
+An interactive full-screen dashboard for environments where a browser is not allowed. It shows the same data as the web dashboard (board and flow views, live agents, event feed, task drawer with detail, diff and logs, run list) and refreshes about every 200 ms. It follows the current run automatically, including when a new run starts, until you pick a run yourself (`f` re-follows). Pass `runId` to pin a run.
+
+**It opens no port.** No HTTP server is created and nothing listens on the network; it only reads `.orchestra/` on disk. It needs an interactive terminal: if stdin or stdout is not a TTY it exits with code 1 and suggests `orchestra status` or `orchestra watch`. The terminal (cursor, alternate screen, raw mode) is restored on quit, Ctrl-C, SIGTERM and errors.
+
+| Key | Action |
+| --- | --- |
+| `↑ ↓ ← →` or `h j k l` | Move selection |
+| `Enter` | Open the task drawer, or open a run from the run list |
+| `Esc` | Close drawer or help, or go back to the run list |
+| `Tab` | Cycle drawer tabs (detail, diff, logs) |
+| `v` | Toggle Board and Flow view |
+| `t` | Toggle tool calls in the event feed |
+| `r` | Open the run list |
+| `f` | Re-follow the current run |
+| `PgUp PgDn g G` | Scroll the drawer (`g` top, `G` bottom) |
+| `?` | Toggle help |
+| `q` or `Ctrl-C` | Quit |
+
 ## Background runs
 
 ```
