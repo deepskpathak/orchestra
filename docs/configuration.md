@@ -7,7 +7,7 @@ Orchestra has two config layers, both plain JSON:
 
 ## Project config (`.orchestra/config.json`)
 
-Defaults come from `DEFAULT_PROJECT_CONFIG` in `src/store.ts`. Missing keys fall back to the defaults, and the `judgeTiers`, `preJudge`, `fastPath` and `evolve` objects are merged key by key, so older configs get the defaults for newer keys automatically. On `orchestra init`, `testCommand` is filled in by auto-detection (it stays `null` if nothing is detected).
+Defaults come from `DEFAULT_PROJECT_CONFIG` in `src/store.ts`. Missing keys fall back to the defaults, and the `judgeTiers`, `preJudge`, `contrastive`, `fastPath` and `evolve` objects are merged key by key, so older configs get the defaults for newer keys automatically. On `orchestra init`, `testCommand` is filled in by auto-detection (it stays `null` if nothing is detected).
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
@@ -20,6 +20,7 @@ Defaults come from `DEFAULT_PROJECT_CONFIG` in `src/store.ts`. Missing keys fall
 | `judgeTiers` | object | see below | Tiered judging settings. |
 | `preJudge` | object | see below | Deterministic checks before any judge call. |
 | `fastPath` | object | see below | Single-task planning for small goals. |
+| `contrastive` | object | see below | Two-worker contrastive repair. |
 | `evolve` | object | see below | Self-improvement settings. |
 
 ### `judgeTiers`
@@ -50,6 +51,29 @@ Off by default. When enabled and the goal is short and has no list structure (nu
 |---|---|---|---|
 | `fastPath.enabled` | boolean | `false` | Turn the fast path on. |
 | `fastPath.maxGoalChars` | number | `400` | Goals longer than this never take the fast path. |
+
+### `contrastive`
+
+Off by default. Without a test command the judge scores a single attempt with no objective check, so scores are noisy. When enabled, a repair attempt runs two workers instead of one, in separate worktrees off the same base: A follows the repair notes as usual, B is told to take a different approach to the same failing criteria. One comparison judge call sees both diffs, the acceptance criteria and the hidden scenarios, scores each attempt per criterion, and picks a winner with reasons. The winner's branch continues to the merge queue, the loser's worktree and branch are deleted, and both attempts are recorded in run events and the task drawer.
+
+**When it applies.** Only on repair attempts (attempt 2 or later); first attempts stay single. By default only when `testCommand` is `null`. Set `onlyWithoutTests` to `false` to apply it in repos with tests too.
+
+**Cost.** A contrastive repair costs two worker sessions (each capped by `budgetUsd.worker`) plus one comparison judge call, instead of one worker session and one judge call.
+
+**Pass bar.** Contrast never lowers `passThreshold`. The preferred attempt must still pass the threshold on its own scores; if neither does, the task is repaired or fails as usual.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `contrastive.enabled` | boolean | `false` | Turn contrastive repair on. |
+| `contrastive.onlyWithoutTests` | boolean | `true` | Apply only when `testCommand` is `null`. `false` applies it whenever enabled. |
+| `contrastive.maxPairs` | number | `1` | Contrastive pairs allowed per task. |
+
+```json
+{
+  "testCommand": null,
+  "contrastive": { "enabled": true, "onlyWithoutTests": true, "maxPairs": 1 }
+}
+```
 
 ### `evolve`
 

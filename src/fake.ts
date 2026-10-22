@@ -8,7 +8,7 @@ import type { AgentRequest, AgentResult, Runner } from './agent.ts';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-export function fakeRunner(opts: { stepMs?: number; failFirstAttemptOf?: string[]; failAlways?: string[]; judgeFailTimes?: number } = {}): Runner {
+export function fakeRunner(opts: { stepMs?: number; failFirstAttemptOf?: string[]; failAlways?: string[]; judgeFailTimes?: number; contrastPick?: 'A' | 'B'; contrastScores?: { a: number; b: number } } = {}): Runner {
   const step = opts.stepMs ?? 0;
   const failFirst = new Set(opts.failFirstAttemptOf ?? ['T2']);
   const failAlways = new Set(opts.failAlways ?? []);
@@ -60,6 +60,8 @@ export function fakeRunner(opts: { stepMs?: number; failFirstAttemptOf?: string[
         // Workers running an evolved prompt that asks for edge cases leave a marker the judge rewards.
         const careful = /edge cases/i.test(req.system);
         writeFileSync(join(dir, `${task}.txt`), `task ${task} attempt ${attempt}${careful ? ' edge-cases-covered' : ''}\n`);
+        // Contrastive worker B leaves a distinguishable artifact.
+        if (req.meta?.variant === 'b') writeFileSync(join(dir, `${task}-b.txt`), `task ${task} alternate approach B\n`);
         execFileSync('git', ['add', '-A'], { cwd: req.cwd });
         execFileSync('git', ['commit', '-qm', `${task}: attempt ${attempt}`], { cwd: req.cwd });
         return done(undefined, `Implemented ${task}`, 0.2);
@@ -71,6 +73,12 @@ export function fakeRunner(opts: { stepMs?: number; failFirstAttemptOf?: string[
         }
         await act('Bash git diff');
         await act('says: checking acceptance');
+        if (/ATTEMPT A DIFF/.test(req.prompt)) {
+          const pick = opts.contrastPick ?? 'B';
+          const sc = opts.contrastScores ?? { a: 0.85, b: 0.9 };
+          const side = (n: number) => ({ pass: n >= 0.7, score: n, summary: n >= 0.7 ? 'Meets criteria' : 'Falls short', issues: n >= 0.7 ? [] : ['Handle empty config file'] });
+          return done({ a: side(sc.a), b: side(sc.b), preferred: pick, reasons: `Attempt ${pick} handled the empty config case more directly.` }, 'compared', 0.08);
+        }
         let careful = false;
         try {
           careful = readFileSync(join(req.cwd, 'fake', `${task}.txt`), 'utf8').includes('edge-cases-covered');

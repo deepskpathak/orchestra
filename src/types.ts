@@ -29,6 +29,14 @@ export interface Verdict {
   judgeError?: string; // set when the judge itself failed; score is meaningless then
 }
 
+export interface ContrastRecord {
+  attempt: number; // the repair attempt number the pair ran on
+  a: { branch: string; verdict?: Verdict };
+  b: { branch: string; verdict?: Verdict };
+  picked: 'A' | 'B' | null;
+  reasons: string;
+}
+
 export interface Task {
   id: string;
   title: string;
@@ -41,6 +49,7 @@ export interface Task {
   worktree?: string;
   verdict?: Verdict;
   notes: string[]; // repair notes fed to the next attempt
+  contrast?: ContrastRecord; // set when a contrastive repair pair ran
   costUsd: number;
   startedAt?: number;
   endedAt?: number;
@@ -93,6 +102,7 @@ export type EventKind =
   | 'task.verdict'
   | 'task.repair'
   | 'task.merged'
+  | 'task.contrast'
   | 'task.failed'
   | 'agent.start'
   | 'agent.action'
@@ -158,6 +168,11 @@ export interface ProjectConfig {
     enabled: boolean; // cheap deterministic checks before any judge call; failures go straight to repair
     lintCommand: string | null;
     requireTests: boolean; // new exports under src/ need a changed test file
+  };
+  contrastive: {
+    enabled: boolean; // repair attempts run two workers and a comparing judge
+    onlyWithoutTests: boolean; // apply only when testCommand is null
+    maxPairs: number; // contrastive pairs allowed per task
   };
   fastPath: {
     enabled: boolean; // small single-concern goals get one task and no hidden-scenario requirement
