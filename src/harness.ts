@@ -13,6 +13,10 @@ export const EVOLVABLE_FILES = ['planner.md', 'worker.md', 'judge.md', 'libraria
 
 export const PACKAGE_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
+export function packageVersion(): string {
+  return JSON.parse(readFileSync(join(PACKAGE_ROOT, 'package.json'), 'utf8')).version;
+}
+
 export interface Harness {
   version: string;
   prompts: Record<Role, string>;
