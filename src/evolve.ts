@@ -217,7 +217,7 @@ export async function evolve(store: Store, runner: Runner, log: (msg: string) =>
     .slice(-5)
     .flatMap((r) => r.tasks.flatMap((t) => [...t.notes, ...(t.status === 'failed' ? [`${t.id} FAILED: ${t.verdict?.summary ?? ''}`] : [])]))
     .slice(-40);
-  const files = EVOLVABLE_FILES.map((f) => `--- ${f} ---\n${readFileSync(store.path('harness', incumbent, f), 'utf8')}`).join('\n\n');
+  const files = EVOLVABLE_FILES.map((f) => `--- ${f} ---\n${existsSync(store.path('harness', incumbent, f)) ? readFileSync(store.path('harness', incumbent, f), 'utf8') : ''}`).join('\n\n');
   const rejected = readArchive(store)
     .filter((a) => a.status === 'rejected')
     .slice(-5)
