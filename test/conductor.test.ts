@@ -338,3 +338,93 @@ test('diffStat throws on a bogus base (repairOrFail guards it) and is empty for 
   assert.throws(() => g.diffStat(store.root, 'no-such-ref'));
   assert.equal(g.diffStat(store.root, 'HEAD'), '');
 });
+
+// ---------- contrastive repair ----------
+
+const countBy = (runner: Runner) => {
+  const seen = { worker: [] as Array<string | undefined>, compare: 0, judge: 0 };
+  const wrapped: Runner = async (req) => {
+    if (req.role === 'worker') seen.worker.push(`${req.meta?.task}:${req.meta?.attempt}:${req.meta?.variant ?? '-'}`);
+    if (req.role === 'judge') {
+      seen.judge += 1;
+      if (/ATTEMPT A DIFF/.test(req.prompt)) seen.compare += 1;
+    }
+    return runner(req);
+  };
+  return { seen, wrapped };
+};
+const contrastive = { enabled: true, onlyWithoutTests: true, maxPairs: 1 };
+
+test('contrastive: attempt 1 single worker, repair runs two workers and one comparison; B wins and merges', async () => {
+  const store = tempRepo({ concurrency: 1, contrastive });
+  const { seen, wrapped } = countBy(fakeRunner({ contrastPick: 'B' }));
+  const run = await runGoal({ store, runner: wrapped, goal: 'g' });
+  const t2 = run.tasks.find((t) => t.id === 'T2')!;
+  assert.equal(t2.status, 'merged');
+  assert.deepEqual(seen.worker.filter((w) => w!.startsWith('T2:')), ['T2:1:-', 'T2:2:a', 'T2:2:b']);
+  assert.equal(seen.compare, 1);
+  assert.equal(t2.contrast?.picked, 'B');
+  assert.match(t2.contrast!.reasons, /empty config/);
+  assert.equal(t2.verdict?.pass, true);
+  const files = execFileSync('git', ['ls-tree', '-r', '--name-only', run.integrationBranch!], { cwd: store.root, encoding: 'utf8' });
+  assert.match(files, /fake\/T2-b\.txt/);
+  // Loser A: worktree dir and branch are gone.
+  assert.ok(!existsSync(store.path('worktrees', run.id, 'T2')));
+  const branches = execFileSync('git', ['branch', '--list', `orchestra/${run.id}/*`], { cwd: store.root, encoding: 'utf8' });
+  assert.doesNotMatch(branches, new RegExp(`${run.id}/T2\\s*$`, 'm'));
+  const ev = store.events(run.id).find((e) => e.kind === 'task.contrast')!;
+  assert.match(ev.msg, /T2 picked B over A because .*empty config/);
+  assert.equal((ev.data as { picked: string }).picked, 'B');
+  const rows = store.ledgerRows().filter((r) => r.role === 'worker' && r.task === 'T2' && r.attempt === 2 && !r.outcome);
+  assert.equal(rows.length, 2);
+});
+
+test('contrastive: A wins, B worktree and branch removed', async () => {
+  const store = tempRepo({ concurrency: 1, contrastive });
+  const run = await runGoal({ store, runner: fakeRunner({ contrastPick: 'A' }), goal: 'g' });
+  const t2 = run.tasks.find((t) => t.id === 'T2')!;
+  assert.equal(t2.contrast?.picked, 'A');
+  assert.equal(t2.status, 'merged');
+  assert.ok(!existsSync(store.path('worktrees', run.id, 'T2-b')));
+  const branches = execFileSync('git', ['branch', '--list', `orchestra/${run.id}/*`], { cwd: store.root, encoding: 'utf8' });
+  assert.doesNotMatch(branches, /T2-b/);
+  const files = execFileSync('git', ['ls-tree', '-r', '--name-only', run.integrationBranch!], { cwd: store.root, encoding: 'utf8' });
+  assert.doesNotMatch(files, /T2-b\.txt/);
+});
+
+test('contrastive: a preferred attempt below passThreshold is not merged on preference alone', async () => {
+  const store = tempRepo({ concurrency: 1, contrastive });
+  const run = await runGoal({ store, runner: fakeRunner({ contrastPick: 'B', contrastScores: { a: 0.3, b: 0.5 }, failFirstAttemptOf: ['T1'] }), goal: 'g' });
+  const t1 = run.tasks.find((t) => t.id === 'T1')!;
+  assert.equal(t1.contrast?.picked, null);
+  // Attempt 2 was not merged; the next (single, pairs exhausted) attempt is what lands.
+  assert.equal(t1.attempts, 3);
+  assert.match(t1.verdict!.summary, /Meets criteria/);
+  const files = execFileSync('git', ['ls-tree', '-r', '--name-only', run.integrationBranch!], { cwd: store.root, encoding: 'utf8' });
+  assert.doesNotMatch(files, /T1-b\.txt/);
+  assert.ok(!existsSync(store.path('worktrees', run.id, 'T1-b')));
+});
+
+test('contrastive: with a testCommand and onlyWithoutTests the repair stays single-worker', async () => {
+  const store = tempRepo({ concurrency: 1, testCommand: 'true', contrastive });
+  const { seen, wrapped } = countBy(fakeRunner());
+  const run = await runGoal({ store, runner: wrapped, goal: 'g' });
+  assert.equal(run.tasks.find((t) => t.id === 'T2')!.contrast, undefined);
+  assert.equal(seen.compare, 0);
+  assert.ok(seen.worker.every((w) => w!.endsWith(':-')));
+});
+
+test('contrastive: librarian prompt carries the judge reasons with run and task id', async () => {
+  const store = tempRepo({ concurrency: 1, contrastive });
+  const inner = fakeRunner({ contrastPick: 'B' });
+  let libPrompt = '';
+  const run = await runGoal({
+    store,
+    goal: 'g',
+    runner: async (req) => {
+      if (req.role === 'librarian') libPrompt = req.prompt;
+      return inner(req);
+    },
+  });
+  assert.match(libPrompt, new RegExp(`contrast \\(run ${run.id}, task T2, attempt 2\\): picked B over A because Attempt B handled`));
+});

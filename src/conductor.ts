@@ -5,6 +5,7 @@
 import { join } from 'node:path';
 import { extractJson, type AgentRequest, type AgentResult, type Runner } from './agent.ts';
 import * as g from './git.ts';
+import { alternateWorkerSection, comparePrompt, COMPARE_SCHEMA, contrastApplies, resolveContrast } from './contrast.ts';
 import { loadHarness, type Harness } from './harness.ts';
 import { formatLearnings, listDomains, normalizeDomain, readAllLearnings, readLearnings, writeLearnings, GLOBAL, type Lesson } from './learnings.ts';
 import { newRunId, type Store } from './store.ts';
@@ -426,6 +427,11 @@ export class Conductor {
     task.status = 'running';
     task.startedAt ??= Date.now();
     const wt = g.createTaskWorktree(store.root, this.wtRoot, this.run.id, task.id, g.head(this.integration.path));
+    // A contrastive winner B leaves task.worktree on the -b path; retire it before reusing the normal one.
+    if (task.worktree && task.worktree !== wt.path) {
+      g.removeWorktree(store.root, task.worktree);
+      if (task.branch && task.branch !== wt.branch) g.deleteBranch(store.root, task.branch);
+    }
     task.branch = wt.branch;
     task.worktree = wt.path;
     const base = g.mergeBase(wt.path, 'HEAD', this.integration.branch);
@@ -444,6 +450,8 @@ export class Conductor {
         progressFile: task.notes.length ? store.path(progressRel(this.run.id, task.id)) : undefined,
       }),
     );
+
+    if (contrastApplies(cfg, task)) return this.attemptContrast(task, wt, base, prompt);
 
     const work = await this.call('worker', task, task.attempts, {
       prompt,
@@ -485,6 +493,132 @@ export class Conductor {
     task.status = 'merging';
     this.save();
     await this.enqueueMerge(task);
+  }
+
+  // Pre-judge outcome for one attempt: a failing verdict when it never reaches the judge, else null.
+  private screen(task: Task, cwd: string, base: string, work: AgentResult): Verdict | null {
+    if (!work.ok && !g.hasChangesSince(cwd, base)) {
+      return { pass: false, score: 0, summary: `Worker failed: ${work.error}`, issues: [`Previous attempt crashed: ${work.error}`], testsPassed: null };
+    }
+    if (!g.hasChangesSince(cwd, base)) return { pass: false, score: 0, summary: 'No changes were committed', issues: ['No code changes were produced. Implement the task.'], testsPassed: null };
+    const issues = this.store.config().preJudge.enabled ? this.preJudge(task, cwd, base) : [];
+    if (!issues.length) return null;
+    this.ledgerOutcome(task, 'prejudge_fail');
+    return { pass: false, score: 0, summary: 'Pre-judge checks failed', issues, testsPassed: null };
+  }
+
+  // Contrastive repair: two workers (A as usual, B told to take a different approach), one comparing judge.
+  private async attemptContrast(task: Task, wtA: g.Worktree, baseA: string, promptA: string): Promise<void> {
+    const { store } = this;
+    const cfg = store.config();
+    const threshold = this.harness.config.passThreshold;
+    const idB = `${task.id}-b`;
+    // Stale leftovers from an earlier pair would make createTaskWorktree reuse them.
+    g.removeWorktree(store.root, join(this.wtRoot, this.run.id, idB));
+    g.deleteBranch(store.root, `orchestra/${this.run.id}/${idB}`);
+    const wtB = g.createTaskWorktree(store.root, this.wtRoot, this.run.id, idB, g.head(this.integration.path));
+    const baseB = g.mergeBase(wtB.path, 'HEAD', this.integration.branch);
+    this.emit('log', `${task.id} contrastive repair: running attempts A and B in parallel`, undefined, task.id);
+    this.save();
+
+    const common = { allowedTools: cfg.allowedTools, disallowedTools: cfg.disallowedTools, permissionMode: cfg.permissionMode };
+    const promptB = `${promptA}\n\n${alternateWorkerSection(task.notes)}`;
+    const [workA, workB] = await Promise.all([
+      this.call('worker', task, task.attempts, { prompt: promptA, cwd: wtA.path, ...common }, undefined, 'a'),
+      this.call('worker', task, task.attempts, { prompt: promptB, cwd: wtB.path, ...common }, undefined, 'b'),
+    ]);
+    g.commitAll(wtA.path, `${task.id}: ${task.title} (orchestra attempt ${task.attempts}, A)`);
+    g.commitAll(wtB.path, `${task.id}: ${task.title} (orchestra attempt ${task.attempts}, B)`);
+
+    task.status = 'judging';
+    this.save();
+    const preA = this.screen(task, wtA.path, baseA, workA);
+    const preB = this.screen(task, wtB.path, baseB, workB);
+    const testsOf = (cwd: string): boolean | null => (cfg.testCommand ? g.runTests(cwd, cfg.testCommand).ok : null);
+
+    let picked: 'A' | 'B' | null = null;
+    let reasons = '';
+    let vA: Verdict | undefined = preA ?? undefined;
+    let vB: Verdict | undefined = preB ?? undefined;
+    if (preA && preB) {
+      reasons = 'Neither attempt reached the judge.';
+    } else if (preA || preB) {
+      // Only one attempt is viable: judge it alone; nothing to compare.
+      const okSide = preA ? 'B' : 'A';
+      const v = okSide === 'A' ? await this.judge(task, wtA.path, baseA, workA) : await this.judge(task, wtB.path, baseB, workB);
+      if (okSide === 'A') vA = v;
+      else vB = v;
+      if (v.judgeError) return this.contrastJudgeError(task, wtB, v.judgeError);
+      if (v.pass) picked = okSide;
+      reasons = `Only ${okSide} produced a judgeable change${v.pass ? '' : ', and it did not pass'}.`;
+    } else {
+      const testsA = testsOf(wtA.path);
+      const testsB = testsOf(wtB.path);
+      const headA = g.head(wtA.path);
+      const headB = g.head(wtB.path);
+      const prompt = joinPrompt(
+        comparePrompt({ task, scenarios: this.scenarios, workerTextA: workA.text, workerTextB: workB.text, diffA: g.diffSince(wtA.path, baseA), diffB: g.diffSince(wtB.path, baseB) }),
+      );
+      let raw: unknown;
+      let error: string | undefined;
+      for (let tryNo = 1; tryNo <= 2 && raw === undefined; tryNo++) {
+        const res = await this.call('judge', task, task.attempts, {
+          prompt,
+          cwd: wtA.path,
+          schema: COMPARE_SCHEMA,
+          tools: ['Read', 'Grep', 'Glob', 'Bash'],
+          allowedTools: ['Read', 'Grep', 'Glob', 'Bash'],
+          disallowedTools: ['Edit', 'Write', 'Bash(git commit:*)', 'Bash(git reset:*)', 'Bash(rm:*)'],
+          permissionMode: 'default',
+        });
+        // Judges never edit. If one did anyway, discard it in both worktrees.
+        g.resetTo(wtA.path, headA);
+        g.resetTo(wtB.path, headB);
+        const out = extractJson(res) as { a?: { score?: unknown }; b?: { score?: unknown } } | undefined;
+        if (res.ok && out && typeof out.a?.score === 'number' && typeof out.b?.score === 'number') raw = out;
+        else {
+          error = res.error ?? 'no verdict';
+          if (tryNo === 1) this.emit('log', `${task.id} comparison judge failed (${error}), retrying once`, undefined, task.id);
+        }
+      }
+      if (raw === undefined) return this.contrastJudgeError(task, wtB, error ?? 'no verdict');
+      const r = resolveContrast(raw, testsA, testsB, threshold);
+      ({ a: vA, b: vB, picked, reasons } = r);
+    }
+
+    task.contrast = { attempt: task.attempts, a: { branch: wtA.branch, verdict: vA }, b: { branch: wtB.branch, verdict: vB }, picked, reasons };
+    const label = picked ? `${task.id} picked ${picked} over ${picked === 'A' ? 'B' : 'A'} because ${reasons}` : `${task.id} contrast: neither A nor B accepted. ${reasons}`;
+    this.emit('task.contrast', label, { a: wtA.branch, b: wtB.branch, picked, reasons }, task.id);
+
+    if (picked === 'B') {
+      // B's worktree becomes the task's; A is the loser.
+      g.removeWorktree(store.root, wtA.path);
+      g.deleteBranch(store.root, wtA.branch);
+      task.branch = wtB.branch;
+      task.worktree = wtB.path;
+    } else {
+      g.removeWorktree(store.root, wtB.path);
+      g.deleteBranch(store.root, wtB.branch);
+    }
+
+    const verdict: Verdict = (picked === 'B' ? vB : vA) ?? vA ?? vB ?? { pass: false, score: 0, summary: reasons, issues: [reasons], testsPassed: null };
+    task.verdict = verdict;
+    const vl = `${verdict.pass ? 'PASS' : 'FAIL'} ${verdict.score.toFixed(2)}`;
+    this.emit('task.verdict', `${task.id} ${vl}: ${verdict.summary}`, { verdict }, task.id);
+    if (!picked) {
+      const issues = (vA?.issues.length ? vA.issues : vA ? [vA.summary] : [reasons]).filter(Boolean);
+      return this.repairOrFail(task, issues);
+    }
+    task.status = 'merging';
+    this.save();
+    await this.enqueueMerge(task);
+  }
+
+  private contrastJudgeError(task: Task, wtB: g.Worktree, error: string): void {
+    g.removeWorktree(this.store.root, wtB.path);
+    g.deleteBranch(this.store.root, wtB.branch);
+    this.ledgerOutcome(task, 'judge_error');
+    this.fail(task, `judge failed twice: ${error}. Raise budgetUsd.judge in the harness config or re-run`);
   }
 
   // Cheap deterministic checks that run before any judge call.
@@ -640,6 +774,7 @@ export class Conductor {
           `${t.id} ${t.title}: ${t.status}, attempts ${t.attempts}, cost $${t.costUsd.toFixed(2)}`,
           t.verdict ? `  final verdict ${t.verdict.score}: ${t.verdict.summary}` : '',
           ...t.notes.map((n) => `  repair note: ${n.split('\n')[0]}`),
+          t.contrast ? `  contrast (run ${run.id}, task ${t.id}, attempt ${t.contrast.attempt}): ${t.contrast.picked ? `picked ${t.contrast.picked} over ${t.contrast.picked === 'A' ? 'B' : 'A'}` : 'no pick'} because ${t.contrast.reasons}` : '',
         ]
           .filter(Boolean)
           .join('\n'),
@@ -675,11 +810,12 @@ export class Conductor {
 
   // ---------- plumbing ----------
 
-  private async call(role: Role, task: Task | undefined, attempt: number, req: Omit<AgentRequest, 'role' | 'system' | 'model' | 'budgetUsd'>, modelOverride?: string): Promise<AgentResult> {
+  private async call(role: Role, task: Task | undefined, attempt: number, req: Omit<AgentRequest, 'role' | 'system' | 'model' | 'budgetUsd'>, modelOverride?: string, variant?: 'a' | 'b'): Promise<AgentResult> {
     const { run, harness } = this;
+    const sfx = variant ? `-${variant}` : '';
     const model = modelOverride ?? harness.config.models[role];
     const agent: ActiveAgent = {
-      key: `${role}:${task?.id ?? '-'}:${attempt}`,
+      key: `${role}:${task?.id ?? '-'}:${attempt}${sfx}`,
       role,
       task: task?.id,
       model,
@@ -699,8 +835,8 @@ export class Conductor {
       system: harness.prompts[role],
       budgetUsd: harness.config.budgetUsd[role],
       timeoutMs: TIMEOUT_MS[role],
-      logFile: this.store.path('runs', run.id, 'logs', `${task?.id ?? 'run'}-${role}-${attempt}.jsonl`),
-      meta: { task: task?.id, attempt, run: run.id },
+      logFile: this.store.path('runs', run.id, 'logs', `${task?.id ?? 'run'}-${role}-${attempt}${sfx}.jsonl`),
+      meta: { task: task?.id, attempt, run: run.id, variant },
       onAction: (action) => {
         agent.lastAction = action;
         if (!action.startsWith('says:')) agent.tools += 1;
