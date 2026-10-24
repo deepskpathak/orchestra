@@ -9,7 +9,24 @@ const kinds = (d: string, paths?: string[]) => analyzeDiff(d, paths).map((f) => 
 test('grading-surface: positive paths', () => {
   for (const p of ['test/a.ts', 'src/x.test.ts', 'src/y.spec.js', 'scenarios/s1.json', '.github/workflows/ci.yml', 'scorer/score.ts']) {
     assert.ok(isGradingSurface(p), p);
-    assert.deepEqual(kinds(mod(p, '-a\n+b')).includes('grading-surface'), true, p);
+    // Editing a test file is normal work (weakening is flagged separately); other grading files flag on any edit.
+    const isTest = /test|spec/.test(p);
+    assert.equal(kinds(mod(p, '-a\n+b')).includes('grading-surface'), !isTest, p);
+  }
+});
+
+test('grading-surface: appending a test to an existing test file is not tampering', () => {
+  assert.deepEqual(analyzeDiff(mod('test/foo.test.ts', " x\n+test('new', () => {\n+  assert.ok(f());\n+});")), []);
+});
+
+test('grading-surface: deleting a test file is still flagged', () => {
+  const d = 'diff --git a/test/a.test.ts b/test/a.test.ts\ndeleted file mode 100644\n--- a/test/a.test.ts\n+++ /dev/null\n@@ -1 +0,0 @@\n-assert.ok(1);\n';
+  assert.ok(kinds(d).includes('grading-surface'));
+});
+
+test('reward-hack: ordinary variables named items/expected/testCount are not helper overwrites', () => {
+  for (const line of ['+items = []', '+const expected = 1;', '+testCount = 0', '+itemCount = 0', '+let iterator = f();']) {
+    assert.deepEqual(kinds(mod('src/a.ts', line)), [], line);
   }
 });
 
