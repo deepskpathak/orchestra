@@ -84,7 +84,7 @@ Set `ORCHESTRA_RUNNER=fake` to use the simulator instead of real Claude sessions
 | `orchestra serve --tui [runId]` | Interactive terminal dashboard, no browser and no port (alias: `orchestra tui`) |
 | `orchestra watch [runId]` | Full-screen live dashboard (q to quit) |
 | `orchestra status [runId]` | One-shot board of the current or given run |
-| `orchestra stats` | Factory health per harness version (self-evaluation) |
+| `orchestra stats` | Factory health per harness version, plus outcome metrics (merge acceptance, edits before landing, revert rate, cost per accepted merge, success by task length) |
 | `orchestra evolve` | Propose, evaluate, and maybe promote a better harness |
 | `orchestra learnings [--domain <slug>]` | Show what the factory has learned in this repo (`--domain` filters to one domain, `global` for cross-domain lessons) |
 | `orchestra evals` | List Factory Eval cases |

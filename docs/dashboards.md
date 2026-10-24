@@ -107,6 +107,18 @@ These describe what `src/web/server.ts` does today.
 
 - **Loopback only.** The server listens on `127.0.0.1` (the default `host` in `serve()`). It is not reachable from other machines. The CLI does not expose a host option.
 - **Host header check.** Requests whose `Host` is not `localhost`, `127.0.0.1` or `[::1]` (port ignored) get `403 forbidden host`. This blocks DNS rebinding from web pages.
-- **Read-only.** Any method other than `GET` gets `405 read-only`. The routes are `/` (the page), `/api/info` (harness version, current run, `maxAttempts`, `passThreshold`), `/api/runs`, `/api/runs/<runId>/stream` (server-sent events) and `/api/runs/<runId>/tasks/<taskId>`. None of them write to disk or run commands. Run and task ids are validated against a strict pattern.
+- **Read-only.** Any method other than `GET` gets `405 read-only`. The routes are `/` (the page), `/api/info` (harness version, current run, `maxAttempts`, `passThreshold`, and `outcomes`, the repo-wide outcome metrics), `/api/runs`, `/api/runs/<runId>/stream` (server-sent events) and `/api/runs/<runId>/tasks/<taskId>`. None of them write to disk or run commands. Run and task ids are validated against a strict pattern.
 - **No dependencies or outbound calls.** It uses only `node:http`, and the page loads no external scripts, styles or fonts (a test enforces this).
 - **No authentication.** Anyone with local access to the machine can read the dashboard, including diffs and agent log tails. Do not forward the port to a shared network.
+
+## Outcome metrics
+
+`orchestra stats` ends with an "Outcome metrics" section, and `/api/info` carries the same numbers under `outcomes` (the web board shows merge acceptance, revert rate and cost per accepted merge). They are computed from run records, the ledger-side run costs and read-only git commands; nothing is written.
+
+- **Merge acceptance:** share of goal runs with merged work whose integration branch reached the main branch (`main`, else `master`, else the current branch). Squash and rebase landings count when every commit has a patch-equivalent on main.
+- **Edits before landing:** lines that differ, in the files the run touched, between the integration branch and main. A proxy: later work on those files is included. Zero means it landed unedited.
+- **Revert rate and breakage proxy:** a later commit on main with `This reverts commit <sha>` for one of the run's commits is a revert. Breakage also counts later fix-like commits (subject matches fix, hotfix, regression, broke) that touch the run's files.
+- **Cost and wall-clock per accepted merge:** total goal-run spend and elapsed time divided by accepted runs.
+- **Success versus task length:** runs bucketed by task count and goal length, plus bench pass rate by `humanMinutes` when `.orchestra/bench/*.jsonl` rows with `humanMinutes` and `pass` exist.
+
+A rate with no denominator (for example nothing accepted yet) shows as n/a. The `outcomes` field is additive, so existing `/api/info` fields are unchanged.
