@@ -17,7 +17,7 @@ export const DEFAULT_PROJECT_CONFIG: ProjectConfig = {
   preJudge: { enabled: false, lintCommand: null, requireTests: true },
   contrastive: { enabled: false, onlyWithoutTests: true, maxPairs: 1 },
   fastPath: { enabled: false, maxGoalChars: 400 },
-  evolve: { every: 3, autoPromote: true, minGain: 0.02, sample: 5, minCases: 5, candidates: 1 },
+  evolve: { every: 3, autoPromote: true, minGain: 0.02, sample: 5, minCases: 5, candidates: 1, promotionRule: 'gain', niMargin: 0.05 },
 };
 
 export class Store {

@@ -194,5 +194,7 @@ export interface ProjectConfig {
     sample: number; // eval cases per evaluation, newest first; bounds cost
     minCases: number; // refuse to promote when fewer eval cases were evaluated
     candidates: number; // variants proposed per cycle; 1 = classic single-variant loop
+    promotionRule: 'gain' | 'paired'; // 'gain' = gain above max(minGain, spread); 'paired' = 95% CI lower bound above zero
+    niMargin: number; // paired rule: a task type whose mean delta is below -niMargin vetoes promotion
   };
 }
