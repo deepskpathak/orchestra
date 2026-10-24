@@ -110,3 +110,19 @@ test('stats cache hit ratio: computed from usage, n/a for legacy rows', () => {
   assert.match(out, /cache hit ratio\s+v1 n\/a/);
   assert.doesNotMatch(out, /NaN/);
 });
+
+// Returns the semver-like versions a README claims as "Version X.Y[.Z]".
+function readmeVersions(text: string): string[] {
+  return [...text.matchAll(/\bVersion\s+v?(\d+\.\d+(?:\.\d+)?)/gi)].map((m) => m[1]);
+}
+
+test('README version claims match package.json', () => {
+  const pkg = JSON.parse(readFileSync(join(import.meta.dirname, '..', 'package.json'), 'utf8'));
+  const readme = readFileSync(join(import.meta.dirname, '..', 'README.md'), 'utf8');
+  for (const v of readmeVersions(readme)) {
+    assert.ok(pkg.version === v || pkg.version.startsWith(`${v}.`), `README says Version ${v}, package.json is ${pkg.version}`);
+  }
+  // The checker must flag a stale claim.
+  assert.deepEqual(readmeVersions('Status\n\nVersion 0.1. Tests.'), ['0.1']);
+  assert.notEqual(readmeVersions('Version 0.1.')[0], pkg.version);
+});
