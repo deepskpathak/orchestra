@@ -4,7 +4,10 @@
 // Boundary model: the OS sandbox is the real control. src/guard.ts is a deny-list hook and stays as a
 // backstop (defence in depth), because a python/node/git-remote command can bypass its regexes.
 
-import { join } from 'node:path';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { DEFAULT_IMAGE, dockerArgs } from './container.ts';
 
 export type SandboxBackend = 'srt' | 'claude' | 'none';
 
@@ -128,4 +131,107 @@ export function scrubWorkerEnv(env: Record<string, string | undefined>): Record<
     out[k] = v;
   }
   return out;
+}
+
+// ---------- pre-flight self-test (W5.2) ----------
+
+export interface ProbeExecResult {
+  status: number | null;
+  stdout: string;
+  stderr: string;
+  error?: string; // set when the wrapper could not be started at all
+}
+export type ProbeExec = (command: string, args: string[], opts: { cwd: string; timeoutMs: number }) => ProbeExecResult;
+
+export interface PreflightOptions {
+  cwd: string; // a worktree the worker could use
+  docker?: { image?: string; gvisor?: boolean };
+  timeoutMs?: number;
+}
+
+export interface PreflightResult {
+  ok: boolean;
+  failures: string[]; // each names the probe: "network probe ..." or "read probe ..."
+}
+
+const OPEN = 'ORCHESTRA_PROBE_OPEN';
+const BLOCKED = 'ORCHESTRA_PROBE_BLOCKED';
+// Markers are split inside the script so a model that echoes the command cannot produce a false match.
+const marker = (m: string): string => `${JSON.stringify(m.slice(0, 16))}+${JSON.stringify(m.slice(16))}`;
+// Not on the allow-list unless the user listed it, in which case the fallback host is used.
+const PROBE_HOSTS = ['example.com', 'example.org'];
+
+// The network probe is a deliberate outbound attempt to a host that is NOT on the allow-list. It is
+// expected to be blocked; if it connects, the sandbox is not confining the worker and the run aborts.
+function networkScript(host: string): string {
+  return `fetch(${JSON.stringify(`https://${host}/`)},{signal:AbortSignal.timeout(4000)}).then(()=>console.log(${marker(OPEN)}),()=>console.log(${marker(BLOCKED)}))`;
+}
+
+function readScript(file: string): string {
+  return `try{require('fs').readFileSync(${JSON.stringify(file)});console.log(${marker(OPEN)})}catch(e){console.log(${marker(BLOCKED)})}`;
+}
+
+// Runs both probes inside the same wrapper workers get. Each must FAIL (be blocked) for ok. A probe
+// that succeeds, a wrapper that cannot start, or output with no marker (inconclusive) all fail closed.
+export function preflightSandbox(policy: SandboxPolicy, backend: 'srt' | 'claude' | 'docker', exec: ProbeExec, opts: PreflightOptions): PreflightResult {
+  const timeoutMs = opts.timeoutMs ?? 60_000;
+  const dir = mkdtempSync(join(tmpdir(), 'orchestra-preflight-'));
+  const failures: string[] = [];
+  try {
+    const canary = join(dir, 'canary.txt');
+    writeFileSync(canary, 'orchestra preflight canary\n');
+    // The canary lives in a dir added to the deny-read list, so a worker-visible tmp path is still denied.
+    const probePolicy: SandboxPolicy = { ...policy, read: { deny: [...policy.read.deny, dir] } };
+    const settings = join(dir, 'settings.json');
+    writeFileSync(settings, JSON.stringify(claudeSandboxSettings(probePolicy), null, 2) + '\n');
+    const host = PROBE_HOSTS.find((h) => !policy.network.allowedHosts.includes(h)) ?? PROBE_HOSTS[0];
+
+    const wrap = (script: string): { command: string; args: string[] } => {
+      const inner = ['node', '-e', script];
+      if (backend === 'srt') {
+        const [command, ...args] = srtArgs(probePolicy, settings, inner[0], inner.slice(1));
+        return { command, args };
+      }
+      if (backend === 'docker') {
+        const gitCommonDir = dirname(policy.write.deny[0] ?? join(opts.cwd, '.git', 'hooks'));
+        const [command, ...args] = dockerArgs({
+          worktree: opts.cwd,
+          tmpDir: policy.write.allow[1] ?? tmpdir(),
+          image: opts.docker?.image ?? DEFAULT_IMAGE,
+          envNames: [],
+          gitCommonDir,
+          gvisor: opts.docker?.gvisor,
+        });
+        return { command, args: [...args, ...inner] };
+      }
+      // Claude Code's sandbox confines its Bash tool, so the probe goes through a Bash call.
+      const prompt = `Run exactly this one shell command with the Bash tool and reply with its stdout only, nothing else:\nnode -e ${shellQuote(script)}`;
+      return { command: 'claude', args: ['-p', prompt, '--settings', settings, '--allowedTools', 'Bash', '--output-format', 'text'] };
+    };
+
+    const probe = (name: string, script: string) => {
+      const { command, args } = wrap(script);
+      let r: ProbeExecResult;
+      try {
+        r = exec(command, args, { cwd: opts.cwd, timeoutMs });
+      } catch (e) {
+        failures.push(`${name} probe: sandbox wrapper could not start (${(e as Error).message})`);
+        return;
+      }
+      if (r.error) return void failures.push(`${name} probe: sandbox wrapper could not start (${r.error})`);
+      const out = `${r.stdout}\n${r.stderr}`;
+      if (out.includes(OPEN)) failures.push(`${name} probe succeeded inside the sandbox (expected it to be blocked)`);
+      else if (!out.includes(BLOCKED)) failures.push(`${name} probe inconclusive: wrapper exited ${r.status} with no result, treating the sandbox as not working`);
+    };
+
+    probe('network', networkScript(host));
+    probe('read', readScript(canary));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  return { ok: failures.length === 0, failures };
+}
+
+function shellQuote(s: string): string {
+  return `'${s.replace(/'/g, `'\\''`)}'`;
 }
