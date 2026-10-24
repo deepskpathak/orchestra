@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { claudeRunner, preflight, type Runner } from './agent.ts';
 import { runGoal } from './conductor.ts';
+import { explorationMetrics, renderExploration } from './exploration.ts';
 import { collectOutcomes, renderOutcomes } from './outcomes.ts';
 import { evolutionDue, evolve, harvest, listEvals, metrics } from './evolve.ts';
 import { fakeRunner } from './fake.ts';
@@ -279,6 +280,7 @@ function cmdStats(args: string[]): void {
   const rates = readArchive(store).filter((a) => a.evalInfraRate !== undefined);
   if (rates.length) console.log(`Eval infra failure rate: ${rates.map((a) => `${a.version} ${(a.evalInfraRate! * 100).toFixed(0)}%`).join('   ')}`);
   console.log(`\n${renderOutcomes(collectOutcomes(store))}`);
+  console.log(`\n${renderExploration(explorationMetrics(store.ledgerRows()))}`);
 }
 
 async function cmdEvolve(): Promise<void> {

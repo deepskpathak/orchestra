@@ -17,7 +17,10 @@ export function fakeRunner(opts: { stepMs?: number; failFirstAttemptOf?: string[
   let judgeFailsLeft = opts.judgeFailTimes ?? 0;
 
   return async (req: AgentRequest): Promise<AgentResult> => {
+    const toolCounts: Record<string, number> = {};
     const act = async (a: string) => {
+      const tool = a.split(' ')[0];
+      if (tool !== 'says:') toolCounts[tool] = (toolCounts[tool] ?? 0) + 1;
       req.onAction?.(a);
       if (step) await sleep(step);
     };
@@ -28,6 +31,7 @@ export function fakeRunner(opts: { stepMs?: number; failFirstAttemptOf?: string[
       costUsd,
       turns: 3,
       durationMs: step * 3,
+      toolCounts: { ...toolCounts },
       usage: { inputTokens: 1200, outputTokens: 400, cacheReadTokens: 3000, cacheWriteTokens: 800 },
     });
     const task = req.meta?.task ?? '';
