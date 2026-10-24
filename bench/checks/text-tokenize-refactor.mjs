@@ -1,0 +1,10 @@
+import assert from 'node:assert/strict';
+import { pathToFileURL } from 'node:url';
+const m = await import(pathToFileURL(`${process.cwd()}/src/words.js`).href);
+import { readFileSync } from 'node:fs';
+assert.deepEqual(m.tokenize('  a  bb c '), ['a', 'bb', 'c']);
+assert.deepEqual(m.tokenize(''), []);
+assert.equal(m.countWords('one two three'), 3);
+assert.equal(m.longestWord('a bbb cc'), 'bbb');
+const src = readFileSync(`${process.cwd()}/src/words.js`, 'utf8');
+assert.ok((src.match(/tokenize\(/g) ?? []).length >= 3, 'countWords and longestWord must call tokenize');

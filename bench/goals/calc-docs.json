@@ -1,0 +1,9 @@
+{
+  "id": "calc-docs",
+  "fixture": "calc",
+  "goal": "Create README.md for the calc module with an \"## API\" heading that describes `add` and `divide`, one bullet each, naming the function in backticks.",
+  "taskType": "docs",
+  "humanMinutes": 7,
+  "check": "checks/calc-docs.mjs",
+  "oracle": "oracles/calc-docs"
+}

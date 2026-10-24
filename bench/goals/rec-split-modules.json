@@ -1,0 +1,9 @@
+{
+  "id": "rec-split-modules",
+  "fixture": "records",
+  "goal": "Refactor src/records.js into src/group.js (exporting groupBy) and src/sort.js (exporting sortBy). src/records.js must re-export both so existing imports keep working, and keep chunk. Behaviour must not change.",
+  "taskType": "refactor",
+  "humanMinutes": 20,
+  "check": "checks/rec-split-modules.mjs",
+  "oracle": "oracles/rec-split-modules"
+}

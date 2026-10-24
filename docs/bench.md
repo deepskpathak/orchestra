@@ -15,6 +15,37 @@ bench/
 
 `check` and `oracle` are paths relative to the suite directory. `.mjs` and `.js` checks run with node, anything else with `sh`.
 
+## The shipped suite
+
+32 goals over four dependency-free fixtures, each a few plain ES module files with no `package.json` dependencies.
+
+| Fixture | What it is | Goals |
+| --- | --- | --- |
+| `calc` | arithmetic helpers | 7 |
+| `text` | string and word helpers | 8 |
+| `args` | a CLI argument parser | 8 |
+| `records` | array and data-transform helpers, CSV | 9 |
+
+Task types: bugfix, feature, test, docs and refactor, with at least four goals in each of the first four. `humanMinutes` runs from 5 to 60, so short fixes and long features are both represented. Every check is a node script that uses only `node:` modules and makes no network calls.
+
+Two kinds of check need more than an import and an assert:
+
+- **test goals** (`taskType: test`) call `checkTests` from `checks/_lib.mjs`. The worker's test file must pass on the real source and fail on each listed mutant of it, so a test file that asserts nothing does not pass.
+- **docs goals** call `checkReadme`: `README.md` must have an `## API` heading and describe each named export on one line.
+
+`checks/_lib.mjs` is a helper, not a check. `npm test` loads the whole suite, validates the schema, and proves for every goal that its check fails on the untouched base and passes after its oracle is applied.
+
+## Adding a goal
+
+1. Pick a fixture under `fixtures/` (or add a small one: plain files, `"type": "module"`, no dependencies). Keep the base free of the behaviour the goal asks for.
+2. Write `goals/<id>.json` with `id`, `fixture`, `goal` (the exact text the worker sees, specific enough that the check is fair), `taskType`, `humanMinutes` (5 to 60), `check` (`checks/<id>.mjs`) and `oracle`.
+3. Write `checks/<id>.mjs`. It runs with the repo as cwd, exits 0 on pass, and must not be guessable from the goal text alone: test edge cases the goal states. Use only `node:` modules, no network.
+4. Write the oracle: a directory overlaying whole files onto the fixture (`oracles/<id>/src/...`) or a `.patch` file for `git apply`.
+5. Run `orchestra bench --verify-oracles --goals <id>`. It must report the oracle passing, and it fails if the check already passes on the base.
+6. Run `npm test`.
+
+Checks, oracles and `_lib.mjs` live only in the suite directory. They are never copied into a worker or judge worktree.
+
 ## How a run works
 
 For each arm, goal and repeat the engine materialises the fixture into a fresh temporary git repo and commits it as the base. It calls `runGoal` with `kind: 'eval'` and `baseRef` set to that base, in that repo's own store, so bench runs are never harvested as goal runs and never count toward evolution in your project. After the run it checks out the integration branch in a scratch worktree and runs the hidden check there. Checks and oracles live only in the suite directory, so they never appear in the worker or judge worktrees, the prompts or the integration branch.

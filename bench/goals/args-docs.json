@@ -1,0 +1,9 @@
+{
+  "id": "args-docs",
+  "fixture": "args",
+  "goal": "Create README.md for the args module with an \"## API\" heading that describes `parseArgs`, naming it in backticks, and what it returns.",
+  "taskType": "docs",
+  "humanMinutes": 10,
+  "check": "checks/args-docs.mjs",
+  "oracle": "oracles/args-docs"
+}

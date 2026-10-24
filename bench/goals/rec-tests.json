@@ -1,0 +1,9 @@
+{
+  "id": "rec-tests",
+  "fixture": "records",
+  "goal": "Write test/records.test.js using node:test and node:assert covering groupBy, sortBy and chunk (at least five tests). The tests must pass and must catch a wrong implementation.",
+  "taskType": "test",
+  "humanMinutes": 25,
+  "check": "checks/rec-tests.mjs",
+  "oracle": "oracles/rec-tests"
+}

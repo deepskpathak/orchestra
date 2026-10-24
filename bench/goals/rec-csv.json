@@ -1,0 +1,9 @@
+{
+  "id": "rec-csv",
+  "fixture": "records",
+  "goal": "Add src/csv.js exporting parseCsv(text) and stringifyCsv(rows, columns). parseCsv reads RFC 4180 style CSV with a header row into an array of objects of strings: quoted fields may contain commas, doubled quotes (\"\") and newlines, and both LF and CRLF line ends and a missing final newline are accepted; empty input gives []. stringifyCsv writes a header (columns default to the keys of the first row) and one line per row, quoting fields that contain a comma, quote or newline, with LF line ends and a trailing newline; no rows and no columns gives \"\". parseCsv(stringifyCsv(rows)) must round-trip.",
+  "taskType": "feature",
+  "humanMinutes": 60,
+  "check": "checks/rec-csv.mjs",
+  "oracle": "oracles/rec-csv"
+}

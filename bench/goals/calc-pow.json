@@ -1,0 +1,9 @@
+{
+  "id": "calc-pow",
+  "fixture": "calc",
+  "goal": "Add and export pow(base, exp) to src/calc.js for non-negative integer exponents. It must throw a RangeError when exp is negative or not an integer.",
+  "taskType": "feature",
+  "humanMinutes": 10,
+  "check": "checks/calc-pow.mjs",
+  "oracle": "oracles/calc-pow"
+}

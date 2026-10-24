@@ -1,0 +1,9 @@
+{
+  "id": "text-truncate",
+  "fixture": "text",
+  "goal": "Add and export truncate(s, n) to src/text.js. If s is at most n characters return it unchanged, otherwise return its first n-3 characters followed by \"...\" so the result is exactly n characters. Assume n is at least 3.",
+  "taskType": "feature",
+  "humanMinutes": 8,
+  "check": "checks/text-truncate.mjs",
+  "oracle": "oracles/text-truncate"
+}

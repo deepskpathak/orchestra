@@ -1,0 +1,13 @@
+import assert from 'node:assert/strict';
+import { pathToFileURL } from 'node:url';
+const m = await import(pathToFileURL(`${process.cwd()}/src/records.js`).href);
+import { readFileSync } from 'node:fs';
+const g = await import(pathToFileURL(`${process.cwd()}/src/group.js`).href);
+const s = await import(pathToFileURL(`${process.cwd()}/src/sort.js`).href);
+assert.deepEqual(g.groupBy([1, 2, 3], (n) => n % 2), { 1: [1, 3], 0: [2] });
+assert.deepEqual(s.sortBy([{ n: 2 }, { n: 1 }], 'n'), [{ n: 1 }, { n: 2 }]);
+assert.deepEqual(m.groupBy([1, 2, 3], (n) => n % 2), { 1: [1, 3], 0: [2] });
+assert.deepEqual(m.sortBy([{ n: 2 }, { n: 1 }], 'n'), [{ n: 1 }, { n: 2 }]);
+assert.deepEqual(m.chunk([1, 2, 3], 2), [[1, 2], [3]]);
+const src = readFileSync(`${process.cwd()}/src/records.js`, 'utf8');
+assert.ok(!/function\s+(groupBy|sortBy)\b/.test(src), 'records.js must not define groupBy or sortBy any more');

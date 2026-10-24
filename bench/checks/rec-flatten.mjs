@@ -1,0 +1,10 @@
+import assert from 'node:assert/strict';
+import { pathToFileURL } from 'node:url';
+const m = await import(pathToFileURL(`${process.cwd()}/src/records.js`).href);
+assert.deepEqual(m.flatten([1, [2, [3]]]), [1, 2, [3]]);
+assert.deepEqual(m.flatten([1, [2, [3]]], 2), [1, 2, 3]);
+assert.deepEqual(m.flatten([1, [2, [3, [4]]]], Infinity), [1, 2, 3, 4]);
+const a = [1, [2]];
+const z = m.flatten(a, 0);
+assert.deepEqual(z, [1, [2]]);
+assert.notEqual(z, a);

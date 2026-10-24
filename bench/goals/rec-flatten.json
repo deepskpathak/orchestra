@@ -1,0 +1,9 @@
+{
+  "id": "rec-flatten",
+  "fixture": "records",
+  "goal": "Add and export flatten(items, depth = 1) to src/records.js: flatten nested arrays up to depth levels (Infinity flattens fully), returning a new array. depth 0 returns a shallow copy.",
+  "taskType": "feature",
+  "humanMinutes": 10,
+  "check": "checks/rec-flatten.mjs",
+  "oracle": "oracles/rec-flatten"
+}

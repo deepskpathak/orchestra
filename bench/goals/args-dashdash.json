@@ -1,0 +1,9 @@
+{
+  "id": "args-dashdash",
+  "fixture": "args",
+  "goal": "parseArgs in src/args.js must treat a bare \"--\" as the end of options: every later argument is positional, even if it starts with a dash. The \"--\" itself is dropped.",
+  "taskType": "bugfix",
+  "humanMinutes": 8,
+  "check": "checks/args-dashdash.mjs",
+  "oracle": "oracles/args-dashdash"
+}

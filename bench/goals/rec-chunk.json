@@ -1,0 +1,9 @@
+{
+  "id": "rec-chunk",
+  "fixture": "records",
+  "goal": "chunk in src/records.js adds a trailing empty chunk when the length is a multiple of size, and returns [[]] for an empty array. chunk([1,2,3,4], 2) must be [[1,2],[3,4]] and chunk([], 3) must be [].",
+  "taskType": "bugfix",
+  "humanMinutes": 7,
+  "check": "checks/rec-chunk.mjs",
+  "oracle": "oracles/rec-chunk"
+}

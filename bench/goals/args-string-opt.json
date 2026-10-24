@@ -1,0 +1,9 @@
+{
+  "id": "args-string-opt",
+  "fixture": "args",
+  "goal": "Let parseArgs(argv, opts) in src/args.js take opts.string, an array of option names that consume the next argument as their value: [\"--out\", \"a.txt\"] gives out: \"a.txt\", and the same for the short form \"-o\". If such an option is last with no value, throw an Error. Without opts the behaviour must not change.",
+  "taskType": "feature",
+  "humanMinutes": 20,
+  "check": "checks/args-string-opt.mjs",
+  "oracle": "oracles/args-string-opt"
+}

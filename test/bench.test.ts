@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
-import { cpSync, existsSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { test } from 'node:test';
 import type { AgentRequest, Runner } from '../src/agent.ts';
-import { DEFAULT_SUITE, loadArms, loadGoals, runBench, summarize, verifyOracles, type BenchRow } from '../src/bench.ts';
+import { DEFAULT_SUITE, applyOracle, loadArms, loadGoals, materialiseFixture, runBench, runCheck, summarize, verifyOracles, type BenchRow } from '../src/bench.ts';
 import { fakeRunner } from '../src/fake.ts';
 import { git } from '../src/git.ts';
 import { PACKAGE_ROOT } from '../src/harness.ts';
@@ -190,4 +190,53 @@ test('ablationTable: rows per arm with paired gain, CI clustered by goal, and th
   for (const n of names) assert.ok(text.includes(n), n);
   assert.match(text, /95% CI/);
   assert.match(text, /budget \$0\.500 matched/);
+});
+
+test('shipped suite: size, spread, schema, and every check fails on the base but passes with its oracle', () => {
+  const goals = loadGoals();
+  assert.ok(goals.length >= 20, `only ${goals.length} goals`);
+  assert.equal(new Set(goals.map((g) => g.id)).size, goals.length, 'duplicate goal ids');
+  const fixtures = new Set(goals.map((g) => g.fixture));
+  assert.ok(fixtures.size >= 2 && fixtures.size <= 4, `${fixtures.size} fixtures`);
+  const types = new Map<string, number>();
+  for (const g of goals) {
+    assert.equal(typeof g.id, 'string');
+    assert.equal(g.goal.trim().length > 20, true, `${g.id}: goal text too short`);
+    assert.ok(Number.isFinite(g.humanMinutes) && g.humanMinutes >= 5 && g.humanMinutes <= 60, `${g.id}: humanMinutes ${g.humanMinutes}`);
+    assert.ok(existsSync(join(DEFAULT_SUITE, g.check)) && existsSync(join(DEFAULT_SUITE, g.oracle)), `${g.id}: check or oracle missing`);
+    assert.ok(g.id.startsWith(g.check.replace(/^checks\//, '').replace(/\.mjs$/, '')), `${g.id}: check name`);
+    types.set(g.taskType, (types.get(g.taskType) ?? 0) + 1);
+  }
+  assert.ok([...types.values()].filter((n) => n >= 4).length >= 3, `task types: ${JSON.stringify([...types])}`);
+  const minutes = goals.map((g) => g.humanMinutes);
+  assert.ok(Math.min(...minutes) <= 8 && Math.max(...minutes) >= 45, 'task lengths should span short and long');
+
+  // verifyOracles fails a goal whose check passes on the untouched base, and one whose oracle fails its check.
+  const res = verifyOracles();
+  assert.equal(res.length, goals.length);
+  assert.deepEqual(res.filter((r) => !r.ok), []);
+  for (const g of goals) {
+    const base = materialiseFixture(DEFAULT_SUITE, g.fixture);
+    try {
+      assert.equal(runCheck(DEFAULT_SUITE, g, base.dir).pass, false, `${g.id}: check passes on the unmodified base`);
+      applyOracle(DEFAULT_SUITE, g, base.dir);
+      assert.equal(runCheck(DEFAULT_SUITE, g, base.dir).pass, true, `${g.id}: oracle fails its check`);
+    } finally {
+      rmSync(base.dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test('shipped suite is dependency-free and offline', () => {
+  const walk = (dir: string): string[] => readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(join(dir, e.name)) : [join(dir, e.name)]));
+  for (const f of walk(DEFAULT_SUITE)) {
+    if (f.endsWith('package.json')) {
+      const pkg = JSON.parse(readFileSync(f, 'utf8'));
+      assert.ok(!pkg.dependencies && !pkg.devDependencies && !pkg.scripts, `${f} declares dependencies or scripts`);
+    }
+    if (!/\.(m?js|ts)$/.test(f)) continue;
+    const text = readFileSync(f, 'utf8');
+    assert.ok(!/\b(fetch|XMLHttpRequest|WebSocket)\(/.test(text) && !/node:(http|https|net|dgram|dns|tls)\b/.test(text), `${f} uses the network`);
+    for (const m of text.matchAll(/from\s+'([^']+)'/g)) assert.ok(m[1].startsWith('.') || m[1].startsWith('node:'), `${f} imports ${m[1]}`);
+  }
 });
