@@ -6,7 +6,7 @@
 
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import { DEFAULT_IMAGE, dockerArgs } from './container.ts';
 
 export type SandboxBackend = 'srt' | 'claude' | 'none';
@@ -45,6 +45,7 @@ export interface SandboxPolicy {
   write: { allow: string[]; deny: string[] };
   read: { deny: string[] };
   network: { allowedHosts: string[] };
+  gitCommonDir: string; // shared by every worktree; the docker backend mounts it and workers commit into it
 }
 
 export interface PolicyInput {
@@ -64,13 +65,16 @@ export function buildSandboxPolicy(i: PolicyInput): SandboxPolicy {
   const hosts = [MODEL_API_HOST, ...(i.allowedHosts ?? [])];
   return {
     write: {
-      allow: [i.worktree, i.tmpDir],
-      // Worktrees share the common git dir; hooks and config there are code-execution vectors
-      // for the orchestrator, so workers get read-only access.
+      // `git commit` in a worktree writes objects, refs/heads and worktrees/<id> under the common git
+      // dir, so it must be writable (the docker backend mounts it rw for the same reason).
+      allow: [i.worktree, i.tmpDir, i.gitCommonDir],
+      // Hooks and config inside it are code-execution vectors for the orchestrator, so workers get
+      // read-only access. The deny is nested in the allow and takes precedence.
       deny: [join(i.gitCommonDir, 'hooks'), join(i.gitCommonDir, 'config')],
     },
     read: { deny: [...HOME_SECRETS.map((p) => join(i.home, p)), ...ENV_GLOBS, i.hiddenScenarioDir] },
     network: { allowedHosts: [...new Set(hosts)] },
+    gitCommonDir: i.gitCommonDir,
   };
 }
 
@@ -193,13 +197,12 @@ export function preflightSandbox(policy: SandboxPolicy, backend: 'srt' | 'claude
         return { command, args };
       }
       if (backend === 'docker') {
-        const gitCommonDir = dirname(policy.write.deny[0] ?? join(opts.cwd, '.git', 'hooks'));
-        const [command, ...args] = dockerArgs({
+                const [command, ...args] = dockerArgs({
           worktree: opts.cwd,
           tmpDir: policy.write.allow[1] ?? tmpdir(),
           image: opts.docker?.image ?? DEFAULT_IMAGE,
           envNames: [],
-          gitCommonDir,
+          gitCommonDir: policy.gitCommonDir,
           gvisor: opts.docker?.gvisor,
         });
         return { command, args: [...args, ...inner] };

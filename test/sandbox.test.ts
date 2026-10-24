@@ -33,7 +33,10 @@ const policy = () =>
 
 test('policy confines writes, denies secret reads and git hooks/config, limits network', () => {
   const p = policy();
-  assert.deepEqual(p.write.allow, ['/w/t1', '/tmp/o']);
+  assert.deepEqual(p.write.allow, ['/w/t1', '/tmp/o', '/r/.git']);
+  assert.equal(p.gitCommonDir, '/r/.git');
+  // hooks and config are denied inside the writable common dir
+  assert.ok(p.write.deny.every((d) => d.startsWith('/r/.git/')));
   for (const d of ['.ssh', '.aws', '.gnupg', '.config/gh', '.docker', '.npmrc', '.netrc']) {
     assert.ok(p.read.deny.includes(`/home/u/${d}`), d);
   }

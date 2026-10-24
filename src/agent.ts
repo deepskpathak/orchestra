@@ -157,7 +157,7 @@ export function buildCommand(req: AgentRequest): { command: string; args: string
       tmpDir: policy.write.allow[1],
       image: docker?.image ?? DEFAULT_IMAGE,
       envNames: containerEnvNames(req.env ?? {}),
-      gitCommonDir: dirname(policy.write.deny[0]),
+      gitCommonDir: policy.gitCommonDir,
       gvisor: docker?.gvisor,
     });
     return { command, args: [...rest, 'claude', ...args] };

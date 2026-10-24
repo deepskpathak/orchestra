@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- Sandbox: the srt and claude write policy now includes the shared git common dir (hooks and config stay read-only inside it), so a worker's `git commit` in a worktree can write objects, refs and worktree metadata. Matches the docker backend.
+
 ### Added
 
 - W5.5 boundary model docs: README, docs/architecture.md, docs/configuration.md and the whitepaper limitations now state that OS-level confinement (`srt`, Claude Code sandbox via `bwrap`/`socat` or `sandbox-exec`, optional docker/gVisor) is the isolation boundary and the `src/guard.ts` hook is a deny-list backstop. Covers M5 as a whole: W5.1 OS sandbox per worker, W5.2 pre-flight self-test, W5.3 credential scrubbing, read-only git hooks and config and orchestrator-only commit, push and PR, W5.4 docker backend, W5.5 hook as backstop. Notes `srt` research-preview status, OS variance (Linux unprivileged user namespaces), the `--unattended` refusal and detect-and-degrade. Header comment of `src/guard.ts` updated; no logic change.
