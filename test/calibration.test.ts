@@ -111,3 +111,15 @@ test('evolve refuses to run, without calling the evolver, when agreement is belo
 test('old config resolves minJudgeAgreement to null', () => {
   assert.equal(tempRepo().config().evolve.minJudgeAgreement, null);
 });
+
+test('rows with no judge (single-session baseline) are excluded from agreement and the sample', () => {
+  const judged = mk(10, (i) => ({ harness: 'v1', judgeSatisfaction: i < 5 ? 0.9 : 0.2, checkPass: i < 5 }));
+  // Baseline rows run the incumbent harness but never see a judge; all pass their hidden check.
+  const baseline = mk(10, (i) => ({ harness: 'v1', arm: 'single-session', goal: `s${i}`, judgeSatisfaction: null, taskVerdicts: {}, singleSession: true, checkPass: true }));
+  const [v1] = calibrate([...judged, ...baseline], 0.8);
+  assert.equal(v1.n, 10);
+  assert.equal(v1.agreement, 1);
+  assert.equal(v1.kappa, 1);
+  assert.equal(stratifiedSample([...judged, ...baseline], 0.8, 20).filter((s) => s.arm === 'single-session').length, 0);
+  assert.equal(agreementBlock(calibrate([...judged, ...baseline], 0.8), 'v1', 0.9), null);
+});

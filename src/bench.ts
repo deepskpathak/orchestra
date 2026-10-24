@@ -60,6 +60,7 @@ export interface BenchRow {
   taskVerdicts: Record<string, boolean | null>;
   split?: boolean; // a contrastive pair's two judge verdicts disagreed; written only when true
   budgetUsd?: number; // single-session rows: the matched-cost budget
+  singleSession?: boolean; // written only when true: the row has no judge, so calibration skips it
   costUsd: number;
   wallMs: number;
 }
@@ -255,7 +256,7 @@ export async function runBench(o: BenchOptions): Promise<{ benchId: string; dir:
               meta: { attempt: 1 },
             });
             const checkPass = runCheck(suite, goal, repo).pass;
-            row = { arm: arm.name, goal: goal.id, taskType: goal.taskType, humanMinutes: goal.humanMinutes, repeat, runId: `single-${goal.id}-${repeat}`, harness: harness.version, checkPass, judgeSatisfaction: null, taskVerdicts: {}, budgetUsd, costUsd: res.costUsd, wallMs: Date.now() - t0 };
+            row = { arm: arm.name, goal: goal.id, taskType: goal.taskType, humanMinutes: goal.humanMinutes, repeat, runId: `single-${goal.id}-${repeat}`, harness: harness.version, checkPass, judgeSatisfaction: null, taskVerdicts: {}, singleSession: true, budgetUsd, costUsd: res.costUsd, wallMs: Date.now() - t0 };
           } else {
             const run = await runGoal({ store, runner: o.runner, goal: goal.goal, harnessVersion: version, baseRef: base, kind: 'eval', ablate: arm.ablate });
             let checkPass = false;

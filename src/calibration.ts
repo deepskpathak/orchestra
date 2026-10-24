@@ -45,6 +45,12 @@ export function judgePass(r: BenchRow, passThreshold: number): boolean {
   return v.length > 0 && v.every((x) => x === true);
 }
 
+// Rows with no judge at all (the single-session baseline: no satisfaction, no task verdicts) say nothing about
+// judge calibration, so they are excluded rather than counted as a judge "fail".
+export function hasJudge(r: BenchRow): boolean {
+  return !r.singleSession && ((r.judgeSatisfaction !== null && r.judgeSatisfaction !== undefined) || Object.keys(r.taskVerdicts ?? {}).length > 0);
+}
+
 export function isNearThreshold(r: BenchRow, passThreshold: number, margin = DEFAULT_NEAR_MARGIN): boolean {
   return r.judgeSatisfaction !== null && r.judgeSatisfaction !== undefined && Math.abs(r.judgeSatisfaction - passThreshold) <= margin;
 }
@@ -53,7 +59,8 @@ export function isSplit(r: BenchRow, passThreshold: number): boolean {
   return judgePass(r, passThreshold) !== r.checkPass || r.split === true;
 }
 
-export function calibrate(rows: BenchRow[], passThreshold: number, grades: Map<string, boolean> = new Map()): HarnessCalibration[] {
+export function calibrate(allRows: BenchRow[], passThreshold: number, grades: Map<string, boolean> = new Map()): HarnessCalibration[] {
+  const rows = allRows.filter(hasJudge);
   const versions = [...new Set(rows.map((r) => r.harness))].sort();
   return versions.map((harness) => {
     const mine = rows.filter((r) => r.harness === harness);
@@ -97,7 +104,7 @@ function shuffle<T>(xs: T[], rnd: () => number): T[] {
 // reserving about 70% of the sample for them; the rest is random. Never exceeds `size`.
 export function stratifiedSample(rows: CalRow[], passThreshold: number, size: number, seed = 1, margin = DEFAULT_NEAR_MARGIN): SampleItem[] {
   const rnd = mulberry32(seed);
-  const ordered = [...rows].sort((a, b) => (rowId(a) < rowId(b) ? -1 : 1)); // input order must not change the sample
+  const ordered = rows.filter(hasJudge).sort((a, b) => (rowId(a) < rowId(b) ? -1 : 1)); // input order must not change the sample
   const dis = shuffle(ordered.filter((r) => isSplit(r, passThreshold)), rnd);
   const near = shuffle(ordered.filter((r) => !isSplit(r, passThreshold) && isNearThreshold(r, passThreshold, margin)), rnd);
   const rest = shuffle(ordered.filter((r) => !isSplit(r, passThreshold) && !isNearThreshold(r, passThreshold, margin)), rnd);
