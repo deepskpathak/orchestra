@@ -2,9 +2,10 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { Runner } from '../src/agent.ts';
 import { runGoal } from '../src/conductor.ts';
-import { evolutionDue, evolve, harvest, listEvals, metrics, promotionDecision } from '../src/evolve.ts';
+import { evaluate, evolutionDue, evolve, harvest, listEvals, metrics, promotionDecision } from '../src/evolve.ts';
 import { fakeRunner } from '../src/fake.ts';
-import { createVariant, currentVersion, loadHarness, readArchive } from '../src/harness.ts';
+import { EVOLVABLE_FILES, createVariant, currentVersion, loadHarness, readArchive } from '../src/harness.ts';
+import { loadScorer } from '../src/scorer.ts';
 import { tempRepo } from './helpers.ts';
 import { DEFAULT_PROJECT_CONFIG } from '../src/store.ts';
 
@@ -301,4 +302,69 @@ test('too few cases with candidates:3 keeps every candidate and spends no eval r
   const entries = readArchive(store).filter((a) => a.version !== 'v1');
   assert.equal(entries.length, 3);
   assert.ok(entries.every((a) => a.status === 'candidate'));
+});
+
+// ---- Frozen promotion scorer ----
+
+test('eval score comes from the frozen scorer, not the candidate run satisfaction', async () => {
+  const store = tempRepo();
+  const base = fakeRunner();
+  const run = await runGoal({ store, runner: base, goal: 'build it' });
+  const c = harvest(store, run)!;
+  assert.ok((run.satisfaction ?? 0) > 0.7, 'the run itself reports high satisfaction');
+  const scorerCalls: string[] = [];
+  const failing: Runner = async (req) => {
+    if (req.prompt.startsWith('FROZEN SCORER REPLAY')) {
+      scorerCalls.push(req.prompt);
+      return { ok: true, text: '', costUsd: 0, turns: 1, durationMs: 1, structured: { pass: false, score: 0.99, summary: 'reward hacked' } };
+    }
+    return base(req);
+  };
+  const res = await evaluate(store, failing, 'v1', [c]);
+  assert.equal(res.detail[c.id], 0);
+  assert.equal(res.passed[c.id], false);
+  assert.equal(res.score, 0);
+  assert.equal(scorerCalls.length, 1);
+  assert.ok(!/satisfaction/i.test(scorerCalls[0]), 'self-reported satisfaction is withheld from the scorer');
+
+  const ok = await evaluate(store, base, 'v1', [c]);
+  assert.equal(ok.passed[c.id], true);
+  assert.ok(ok.detail[c.id] > 0.8);
+});
+
+test('a scorer call that fails closes to zero, an infra failure is inconclusive', async () => {
+  const store = tempRepo();
+  const base = fakeRunner();
+  const c = harvest(store, await runGoal({ store, runner: base, goal: 'build it' }))!;
+  const broken = (error: string): Runner => async (req) => (req.prompt.startsWith('FROZEN SCORER REPLAY') ? { ok: false, text: '', error, costUsd: 0, turns: 1, durationMs: 1 } : base(req));
+  const crash = await evaluate(store, broken('boom'), 'v1', [c]);
+  assert.equal(crash.score, 0);
+  assert.equal(crash.inconclusive, undefined);
+  const infra = await evaluate(store, broken('rate limit hit'), 'v1', [c]);
+  assert.match(infra.inconclusive ?? '', /rate limit/);
+});
+
+test('scorer is pinned outside the evolvable harness and loads with model and version', () => {
+  assert.ok(!EVOLVABLE_FILES.some((f) => f.includes('scorer')));
+  const s = loadScorer();
+  assert.ok(s.model && s.version);
+  assert.ok(s.judge.length > 0 && s.checklist.length > 0);
+  assert.throws(() => createVariant(tempRepo(), 'v1', { 'scorer/judge.md': 'x' }, 'hack'), /may not edit/);
+});
+
+test('evolver prompt never contains scorer file contents', async () => {
+  const store = tempRepo({ evolve: { every: 1, autoPromote: true, minGain: 0.02, sample: 1, minCases: 1 } });
+  const base = fakeRunner();
+  harvest(store, await runGoal({ store, runner: base, goal: 'build it' }));
+  const prompts: string[] = [];
+  const spy: Runner = async (req) => {
+    if (req.role === 'evolver') prompts.push(`${req.system}\n${req.prompt}`);
+    return base(req);
+  };
+  await evolve(store, spy, quiet);
+  assert.ok(prompts.length > 0);
+  const s = loadScorer();
+  for (const text of [s.judge, ...s.checklist.split('\n')].map((t) => t.trim()).filter(Boolean)) {
+    for (const p of prompts) assert.ok(!p.includes(text), `evolver saw scorer text: ${text.slice(0, 40)}`);
+  }
 });

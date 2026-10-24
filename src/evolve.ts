@@ -19,6 +19,7 @@ import {
   updateArchive,
 } from './harness.ts';
 import { summarizeLearnings } from './learnings.ts';
+import { loadScorer, scoreReplay, type Scorer } from './scorer.ts';
 import type { Store } from './store.ts';
 import type { Run } from './types.ts';
 
@@ -99,6 +100,7 @@ export interface EvalResult {
   detail: Record<string, number>;
   passed: Record<string, boolean>;
   cost: number;
+  inconclusive?: string;
 }
 
 const INFRA_ERROR = /usage limit|session limit|rate limit|overloaded|quota|credit|not logged in|\/login|authentication|ECONN|ETIMEDOUT|ENOTFOUND|network/i;
@@ -108,7 +110,7 @@ export function isInfraFailure(run: Run): boolean {
   return run.status === 'failed' && INFRA_ERROR.test(run.error ?? '');
 }
 
-export async function evaluate(store: Store, runner: Runner, version: string, cases: EvalCase[], onRun?: (r: Run) => void): Promise<EvalResult> {
+export async function evaluate(store: Store, runner: Runner, version: string, cases: EvalCase[], onRun?: (r: Run) => void, scorer: Scorer = loadScorer()): Promise<EvalResult> {
   const detail: Record<string, number> = {};
   const passed: Record<string, boolean> = {};
   let cost = 0;
@@ -119,10 +121,29 @@ export async function evaluate(store: Store, runner: Runner, version: string, ca
       deleteRunBranches(store, run);
       return { score: 0, detail, passed, cost: round(cost), inconclusive: run.error };
     }
+    // Promotion scores come from the frozen scorer. run.satisfaction is the candidate's own
+    // judge and stays advisory (repair notes), so a harness cannot grade itself into promotion.
     let ok = run.status === 'done';
-    if (ok && c.check && run.integrationBranch) ok = checkBranch(store, run.integrationBranch, c.check);
+    let checkPassed: boolean | null = null;
+    if (ok && c.check && run.integrationBranch) {
+      checkPassed = checkBranch(store, run.integrationBranch, c.check);
+      ok = checkPassed;
+    }
+    let score = 0;
+    if (ok && run.integrationBranch) {
+      const diff = c.base ? git(store.root, 'diff', `${c.base}...${run.integrationBranch}`) : '';
+      const scored = await scoreReplay(scorer, runner, { goal: c.goal, diff, checkPassed, cwd: store.root, runId: run.id });
+      cost += scored.cost;
+      store.ledger({ t: Date.now(), run: run.id, kind: 'eval', harness: version, role: 'judge', model: scorer.model, ok: scored.ok, costUsd: scored.cost, durationMs: 0, turns: 0 });
+      if (!scored.ok && INFRA_ERROR.test(scored.error ?? '')) {
+        deleteRunBranches(store, run);
+        return { score: 0, detail, passed, cost: round(cost), inconclusive: scored.error };
+      }
+      ok = scored.ok && !!scored.verdict?.pass;
+      score = scored.score;
+    }
     passed[c.id] = ok;
-    detail[c.id] = ok ? run.satisfaction ?? 0 : 0;
+    detail[c.id] = ok ? score : 0;
     deleteRunBranches(store, run);
   }
   const vals = Object.values(detail);

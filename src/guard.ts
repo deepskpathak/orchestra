@@ -7,6 +7,7 @@ export interface GuardDecision {
 }
 
 const NETWORK = /\b(curl|wget|ssh|scp|rsync|nc|telnet|ftp)\b|\bgit\s+push\b|\bnpm\s+publish\b|\bgh\s+(pr|release|repo)\s+create\b/;
+const READ_ONLY = new Set(['Read', 'Grep', 'Glob']);
 const SECRET_PATH = /(^|\/)(\.env(\..*)?|id_rsa|id_ed25519|\.npmrc|\.netrc|credentials(\.json)?|.*\.pem|.*\.key)$/;
 
 export function decide(toolName: string, input: Record<string, unknown>): GuardDecision {
@@ -14,6 +15,9 @@ export function decide(toolName: string, input: Record<string, unknown>): GuardD
   if (/\.orchestra\/holdout|\.orchestra\\\\holdout/.test(blob)) return { allow: false, reason: 'Holdout scenarios are visible to the judge only.' };
   if (/\.orchestra\/(harness|evals|archive\.json)/.test(blob) && toolName !== 'Read' && toolName !== 'Grep' && toolName !== 'Glob') {
     return { allow: false, reason: 'Agents may not modify the harness, evals, or archive.' };
+  }
+  if (/(^|[\/"'\s])scorer(\/|\\|["'\s]|$)/.test(blob.replace(/\\\\/g, '/')) && !READ_ONLY.has(toolName)) {
+    return { allow: false, reason: 'Agents may not modify the frozen scorer.' };
   }
   if (toolName === 'Bash') {
     const cmd = String(input?.command ?? '');

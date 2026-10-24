@@ -16,6 +16,11 @@ test('guard blocks holdout access, network, harness edits, secrets', () => {
   assert.equal(decide('Bash', { command: 'git push origin main' }).allow, false);
   assert.equal(decide('Edit', { file_path: '/r/.orchestra/harness/v1/judge.md' }).allow, false);
   assert.equal(decide('Read', { file_path: '/r/.env' }).allow, false);
+  assert.equal(decide('Edit', { file_path: '/r/scorer/judge.md' }).allow, false);
+  assert.equal(decide('Write', { file_path: 'scorer/config.json', content: '{}' }).allow, false);
+  assert.equal(decide('Bash', { command: 'echo pass > scorer/checklist.md' }).allow, false);
+  assert.equal(decide('Read', { file_path: '/r/scorer/judge.md' }).allow, true);
+  assert.equal(decide('Edit', { file_path: '/r/src/scorer.ts' }).allow, true);
   assert.equal(decide('Bash', { command: 'npm test' }).allow, true);
   assert.equal(decide('Edit', { file_path: '/r/src/app.ts' }).allow, true);
 });
