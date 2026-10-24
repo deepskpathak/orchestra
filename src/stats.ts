@@ -87,7 +87,7 @@ export function pairedDecision(i: PairedInput): PairedDecision {
   for (const [t, v] of types) perType[t] = { n: v.length, gain: mean(v) };
   const regressed = Object.entries(perType).filter(([, v]) => v.gain < -i.niMargin).map(([t]) => t);
   const unproven = s.n < PROVEN_CASES;
-  const ci = `95% CI [${f3(s.ci[0])}, ${f3(s.ci[1])}]`;
+  const ci = Number.isFinite(s.se) ? `95% CI [${f3(s.ci[0])}, ${f3(s.ci[1])}]` : '95% CI not estimable (needs 2+ source goals)';
   const done = (verdict: PairedVerdict, reason: string): PairedDecision => ({
     ...s,
     verdict,

@@ -346,13 +346,15 @@ export function promotionDecision(i: PromotionInput): PromotionDecision {
   const p1 = meanDefined([...perGoal.values()].map((g) => passAt1(g.n, g.c)));
   const p3 = meanDefined([...perGoal.values()].map((g) => passHatK(g.n, g.c, 3)));
   const f = (x?: number) => (x === undefined ? 'n/a' : x.toFixed(3));
-  const stats = `95% CI [${paired.ci[0].toFixed(3)}, ${paired.ci[1].toFixed(3)}], pass@1 ${f(p1)}, pass^3 ${f(p3)}`;
+  // With fewer than 2 source goals the interval is unbounded; report it as absent rather than as Infinity (JSON turns that into null).
+  const ciKnown = Number.isFinite(paired.ci[0]) && Number.isFinite(paired.ci[1]);
+  const stats = `${ciKnown ? `95% CI [${paired.ci[0].toFixed(3)}, ${paired.ci[1].toFixed(3)}]` : '95% CI n/a (needs 2+ source goals)'}, pass@1 ${f(p1)}, pass^3 ${f(p3)}`;
   const out = (promote: boolean, reason: string): PromotionDecision => ({
     promote,
     reason: `${reason} (${stats})`,
     gain: round(gain),
     spread: round(spread),
-    ci: [round(paired.ci[0]), round(paired.ci[1])],
+    ...(ciKnown ? { ci: [round(paired.ci[0]), round(paired.ci[1])] as [number, number] } : {}),
     ...(p1 !== undefined ? { passAt1: round(p1) } : {}),
     ...(p3 !== undefined ? { passHat3: round(p3) } : {}),
   });
