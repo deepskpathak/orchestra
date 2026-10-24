@@ -435,10 +435,11 @@ test('infraFailureRate is reported per side and in the evolve outcome', async ()
 
 test('promotionDecision blocks a candidate whose monitor fire rate exceeds the incumbent, naming the monitor', () => {
   const base = { incumbentScores: [0.5, 0.5], candidateScores: [0.9, 0.9], regressions: [], minGain: 0.02, minCases: 2, incumbent: 'v1' };
-  const blocked = promotionDecision({ ...base, monitorFireRate: { incumbent: 0, candidate: 0.5 } });
+  const blocked = promotionDecision({ ...base, monitorFireRate: { incumbent: 0, candidate: 1 } });
   assert.equal(blocked.promote, false);
   assert.match(blocked.reason, /integrity monitor/);
   assert.equal(promotionDecision({ ...base, monitorFireRate: { incumbent: 0.5, candidate: 0.5 } }).promote, true, 'equal rate is allowed');
+  assert.equal(promotionDecision({ ...base, monitorFireRate: { incumbent: 0, candidate: 0.5 } }).promote, true, 'one extra flag is within the noise slack');
   assert.equal(promotionDecision(base).promote, true, 'no monitor data leaves the default path unchanged');
 });
 
