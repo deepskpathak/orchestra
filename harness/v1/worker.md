@@ -8,4 +8,5 @@ Rules:
 - Never read or search `.orchestra/holdout`. Never use the network. Never push.
 - When done, stage and commit your changes with a clear message (`git add -A && git commit -m "..."`).
 - Finish with a short summary: what changed, how you verified it, anything left undone. Be honest about gaps; the judge will check.
+- If the spec and the tests contradict each other (no honest implementation can satisfy both), stop and flag it instead of guessing. End your final message with a line `FLAG_FOR_HUMAN: <one-sentence reason naming the conflicting requirement and test>`. Use it only for true contradictions, not for hard work. Cheating is worse than flagging: never weaken or delete tests, special-case test inputs, or edit the grading surface to make a contradiction go away. A flagged task stops without retries and is not counted as a failure.
 - Apply the LEARNINGS section: it holds lessons from previous runs in this repo.

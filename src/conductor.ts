@@ -3,7 +3,7 @@
 // Planners never code, workers never judge, judges never edit (role separation).
 
 import { join } from 'node:path';
-import { extractJson, type AgentRequest, type AgentResult, type Runner } from './agent.ts';
+import { extractJson, parseWorkerOutcome, type AgentRequest, type AgentResult, type Runner } from './agent.ts';
 import * as g from './git.ts';
 import { alternateWorkerSection, comparePrompt, COMPARE_SCHEMA, contrastApplies, resolveContrast } from './contrast.ts';
 import { loadHarness, type Harness } from './harness.ts';
@@ -350,7 +350,11 @@ export class Conductor {
         await this.learn();
       }
       run.status = merged.length === run.tasks.length ? 'done' : 'failed';
-      if (run.status === 'failed' && !run.error) run.error = `${run.tasks.length - merged.length} of ${run.tasks.length} tasks did not land`;
+      if (run.status === 'failed' && !run.error) {
+        const human = run.tasks.filter((t) => t.status === 'needs_human').length;
+        const failed = run.tasks.length - merged.length - human;
+        run.error = `${run.tasks.length - merged.length} of ${run.tasks.length} tasks did not land (${failed} failed, ${human} need a human)`;
+      }
     } catch (err) {
       run.status = 'failed';
       run.error = (err as Error).message;
@@ -483,6 +487,10 @@ export class Conductor {
     });
     g.commitAll(wt.path, `${task.id}: ${task.title} (orchestra attempt ${task.attempts})`);
 
+    // A flagged contradiction stops the loop: no judge, no repair, not counted as a failure.
+    const flag = work.ok ? parseWorkerOutcome(work) : undefined;
+    if (flag?.outcome === 'flag_for_human') return this.flagForHuman(task, flag.reason);
+
     // ---- self-evaluation ----
     task.status = 'judging';
     this.save();
@@ -550,6 +558,12 @@ export class Conductor {
     ]);
     g.commitAll(wtA.path, `${task.id}: ${task.title} (orchestra attempt ${task.attempts}, A)`);
     g.commitAll(wtB.path, `${task.id}: ${task.title} (orchestra attempt ${task.attempts}, B)`);
+
+    // Either contrastive worker flagging a contradiction stops the task for a human.
+    for (const w of [workA, workB]) {
+      const flag = w.ok ? parseWorkerOutcome(w) : undefined;
+      if (flag?.outcome === 'flag_for_human') return this.flagForHuman(task, flag.reason);
+    }
 
     task.status = 'judging';
     this.save();
@@ -774,6 +788,16 @@ export class Conductor {
     this.store.writeJson(progressRel(this.run.id, task.id), buildProgress({ task, verdict: task.verdict, issues, diffSummary }));
   }
 
+  private flagForHuman(task: Task, reason: string): void {
+    task.status = 'needs_human';
+    task.humanReason = reason;
+    task.endedAt = Date.now();
+    this.ledgerOutcome(task, 'needs_human');
+    this.emit('task.needs_human', `${task.id} needs a human: ${reason}`, { reason }, task.id);
+    for (const t of this.run.tasks) if (t.deps.includes(task.id) && (t.status === 'pending' || t.status === 'repair')) this.block(t, `${task.id} needs a human`);
+    this.save();
+  }
+
   private fail(task: Task, reason: string): void {
     task.status = 'failed';
     task.endedAt = Date.now();
@@ -795,6 +819,7 @@ export class Conductor {
       .map((t) =>
         [
           `${t.id} ${t.title}: ${t.status}, attempts ${t.attempts}, cost $${t.costUsd.toFixed(2)}`,
+          t.humanReason ? `  flagged for human: ${t.humanReason}` : '',
           t.verdict ? `  final verdict ${t.verdict.score}: ${t.verdict.summary}` : '',
           ...t.notes.map((n) => `  repair note: ${n.split('\n')[0]}`),
           t.contrast ? `  contrast (run ${run.id}, task ${t.id}, attempt ${t.contrast.attempt}): ${t.contrast.picked ? `picked ${t.contrast.picked} over ${t.contrast.picked === 'A' ? 'B' : 'A'}` : 'no pick'} because ${t.contrast.reasons}` : '',
@@ -805,7 +830,7 @@ export class Conductor {
       .join('\n');
     const events = store
       .events(run.id)
-      .filter((e) => e.kind === 'task.repair' || e.kind === 'task.failed')
+      .filter((e) => e.kind === 'task.repair' || e.kind === 'task.failed' || e.kind === 'task.needs_human')
       .map((e) => `- ${e.msg}`)
       .join('\n');
     const existing = { domain: run.domain ?? GLOBAL, lessons: readLearnings(store, run.domain), global: run.domain ? readLearnings(store) : [] };

@@ -48,6 +48,7 @@ const COLUMNS: { title: string; statuses: Task['status'][]; style: Style }[] = [
   { title: 'Verifying', statuses: ['judging'], style: 'magenta' },
   { title: 'Merging', statuses: ['merging'], style: 'blue' },
   { title: 'Done', statuses: ['merged'], style: 'green' },
+  { title: 'Needs human', statuses: ['needs_human'], style: 'yellow' },
   { title: 'Failed', statuses: ['failed', 'blocked'], style: 'red' },
 ];
 const CARD_H = 3;
@@ -89,7 +90,7 @@ function header(run: Run | null, data: FrameData, width: number, o: FrameOpts, c
   const k = counts(run);
   const l3 =
     ` ${bar(k.total ? k.merged / k.total : 0, Math.min(24, Math.max(6, Math.floor(width / 5))), c)} ${k.merged}/${k.total}  ` +
-    `${c('green', `✓${k.merged}`)} ${c('cyan', `●${k.active}`)} ${c('yellow', `⟳${k.repair}`)} ${c('red', `✗${k.failed}`)}  ${c('dim', run.goal)}`;
+    `${c('green', `✓${k.merged}`)} ${c('cyan', `●${k.active}`)} ${c('yellow', `⟳${k.repair}`)} ${c('red', `✗${k.failed}`)}${k.needsHuman ? ` ${c('yellow', `?${k.needsHuman}`)}` : ''}  ${c('dim', run.goal)}`;
   void data;
   return [l1, ' ' + phases(run, c), l3];
 }

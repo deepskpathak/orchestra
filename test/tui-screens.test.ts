@@ -127,3 +127,10 @@ test('empty planning run says the planner is drafting', () => {
   assert.match(out, /planner is drafting/);
   assertBounds(out, 120, 40);
 });
+
+test('needs_human tasks render within bounds and are not unknown', () => {
+  const r: Run = { ...run, tasks: [...run.tasks, task('T7', 'needs_human', [], { humanReason: 'spec vs test' })] };
+  for (const [w, rows] of [[120, 40], [100, 16], [50, 3], [60, 20]] as const)
+    assertBounds(renderFrame(board(), { ...data, run: r }, opts(w, rows)), w, rows);
+  assert.match(renderFrame(board(), { ...data, run: r }, opts(160, 40)), /Needs human/);
+});
