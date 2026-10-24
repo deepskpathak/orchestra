@@ -6,7 +6,7 @@
   "keywords": ["multi-agent", "software-factory", "orchestration", "self-improving"],
   "type": "module",
   "bin": { "orchestra": "bin/orchestra.ts" },
-  "files": ["bin", "src", "harness", "scorer", "skills", ".claude-plugin", "README.md", "LICENSE", "docs"],
+  "files": ["bin", "src", "harness", "scorer", "bench", "skills", ".claude-plugin", "README.md", "LICENSE", "docs"],
   "engines": { "node": ">=23.6" },
   "scripts": {
     "test": "node --test test/*.test.ts",

@@ -5,6 +5,7 @@ import { existsSync, mkdtempSync, openSync, readFileSync, writeFileSync } from '
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { claudeRunner, preflight, type Runner } from './agent.ts';
+import { loadArms, renderSummary, runBench, verifyOracles } from './bench.ts';
 import { runGoal } from './conductor.ts';
 import { explorationMetrics, renderExploration } from './exploration.ts';
 import { collectOutcomes, renderOutcomes } from './outcomes.ts';
@@ -37,6 +38,10 @@ Usage:
                                  prints the infra failure rate of the eval replays
   orchestra learnings [--domain <slug>]
                                  Show what the factory has learned (all, or one domain; "global" for cross-domain lessons)
+  orchestra bench                Run the fixed benchmark suite: arms x goals x repeats, hidden checks, JSONL + summary
+      --arms a,b --goals g1,g2 --repeats N   Choose arms (default bench/arms.json), goals and repeats per goal
+      --suite <dir>              Use another suite directory (default: the bundled bench/)
+      --verify-oracles           Check that every goal's oracle passes its own hidden check (exit 1 otherwise)
   orchestra evals                List Factory Eval cases
   orchestra --version            Print the installed Orchestra version
   orchestra promote <vN>         Promote a harness version (also used for rollback)
@@ -380,6 +385,32 @@ async function cmdDemo(): Promise<void> {
   await cmdRun(['Build a tiny CLI with config loading and docs']);
 }
 
+function flag(args: string[], name: string): string | undefined {
+  const i = args.indexOf(name);
+  return i >= 0 ? args[i + 1] : undefined;
+}
+
+async function cmdBench(args: string[]): Promise<void> {
+  const suite = flag(args, '--suite');
+  const goals = flag(args, '--goals')?.split(',').filter(Boolean);
+  if (args.includes('--verify-oracles')) {
+    const results = verifyOracles(suite, goals);
+    for (const r of results) console.log(`${r.ok ? 'ok  ' : 'FAIL'} ${r.goal}: ${r.detail}`);
+    const bad = results.filter((r) => !r.ok);
+    if (bad.length) die(`oracle check failed for ${bad.map((r) => r.goal).join(', ')}`);
+    if (!results.length) die('no bench goals found');
+    console.log(`\n${results.length} oracle(s) pass their hidden checks.`);
+    return;
+  }
+  const store = storeOrDie();
+  const repeats = Number(flag(args, '--repeats') ?? 1);
+  if (!Number.isInteger(repeats) || repeats < 1) die('--repeats must be a positive integer');
+  const arms = loadArms(suite, flag(args, '--arms')?.split(',').filter(Boolean));
+  const res = await runBench({ store, runner: runner(), suite, arms, goals, repeats, onRow: (r) => console.log(`${r.arm} ${r.goal} #${r.repeat}: ${r.checkPass ? 'pass' : 'fail'} ($${r.costUsd.toFixed(3)})`) });
+  console.log(`\n${renderSummary(res.summary)}`);
+  console.log(`\nresults: ${join(res.dir, 'results.jsonl')}\nsummary: ${join(res.dir, 'summary.json')}`);
+}
+
 // ---------- entry ----------
 
 export async function main(argv: string[]): Promise<void> {
@@ -411,6 +442,9 @@ export async function main(argv: string[]): Promise<void> {
       break;
     case 'learnings':
       cmdLearnings(args);
+      break;
+    case 'bench':
+      await cmdBench(args);
       break;
     case 'evals':
       cmdEvals();

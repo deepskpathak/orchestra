@@ -125,6 +125,7 @@ ORCHESTRA_RUNNER=fake orchestra run "Add a health endpoint"
 | `orchestra watch [runId]` | Full-screen live dashboard |
 | `orchestra status [runId]` | One-shot board |
 | `orchestra serve [--port N]` | Read-only web dashboard (default port 4317) |
+| `orchestra bench` | Benchmark suite against hidden checks (see [bench.md](bench.md)) |
 | `orchestra stats` | Factory health per harness version |
 | `orchestra evolve` | Propose, evaluate and maybe promote a better harness |
 | `orchestra learnings [--domain <slug>]` | Show what the factory has learned in this repo (`--domain` filters to one domain, `global` for cross-domain lessons) |
