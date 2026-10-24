@@ -153,5 +153,5 @@ test('CLI: --unattended without a sandbox exits 1 and makes no agent calls; bad 
 
   const bad = run('--sandbox', 'bogus');
   assert.equal(bad.status, 1);
-  assert.match(bad.stderr, /auto, srt, claude, off/);
+  assert.match(bad.stderr, /auto, srt, claude, docker, off/);
 });

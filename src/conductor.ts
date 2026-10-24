@@ -33,7 +33,7 @@ export interface ConductorOptions {
   ablate?: Ablation;
   onUpdate?: (run: Run) => void;
   // Opt-in OS sandbox for write-capable roles (worker). Unset keeps spawning exactly as before.
-  sandbox?: { backend: 'srt' | 'claude'; allowedHosts?: string[] };
+  sandbox?: { backend: 'srt' | 'claude' | 'docker'; allowedHosts?: string[]; image?: string; gvisor?: boolean };
   // Unattended: strip push and publish credentials from every agent env, even without a sandbox object.
   unattended?: boolean;
 }
@@ -955,7 +955,7 @@ export class Conductor {
       });
       // The generated settings must not be committed into the task branch.
       g.excludePath(root, '.claude/settings.local.json');
-      out.sandbox = { policy, backend: this.sandboxOpt.backend };
+      out.sandbox = { policy, backend: this.sandboxOpt.backend, ...(this.sandboxOpt.backend === 'docker' ? { docker: { image: this.sandboxOpt.image, gvisor: this.sandboxOpt.gvisor } } : {}) };
     }
     return out;
   }
