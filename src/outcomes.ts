@@ -151,8 +151,10 @@ export function gitFactsForRun(root: string, run: Run, main: string): RunGitFact
   }
 
   const runCommits = new Set((tryOut(root, 'rev-list', `${run.baseRef}..${branch}`) ?? '').split('\n').filter(Boolean));
-  const later = ancestor ? `${branch}..${main}` : `${run.baseRef}..${main}`;
-  const bodies = tryOut(root, 'log', later, '--format=%H%x1f%s%x1f%b%x1e') ?? '';
+  // Rebase or cherry-pick landings put patch-equivalent copies of the run's commits on main. Those copies are the
+  // landing itself, not later work, so --cherry-pick drops them from the right-hand (main-only) side.
+  const later = ancestor ? [`${branch}..${main}`] : ['--right-only', '--cherry-pick', `${branch}...${main}`];
+  const bodies = tryOut(root, 'log', ...later, '--format=%H%x1f%s%x1f%b%x1e') ?? '';
   let reverted = false;
   let fixups = 0;
   for (const rec of bodies.split('\x1e').map((s) => s.trim()).filter(Boolean)) {

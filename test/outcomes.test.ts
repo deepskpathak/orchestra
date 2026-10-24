@@ -159,3 +159,27 @@ test('dashboard info reuses outcomes while nothing changed and recomputes when a
   execFileSync('git', ['branch', 'extra'], { cwd: store.root });
   assert.notEqual(infoSnapshot(store).outcomes, b);
 });
+
+test('a rebase landing is not counted as its own fixup, but a real later fix still is', () => {
+  const store = tempRepo();
+  const root = store.root;
+  const g = (...a: string[]) => execFileSync('git', a, { cwd: root, encoding: 'utf8' }).trim();
+  const base = g('rev-parse', 'HEAD');
+  g('checkout', '-q', '-b', 'orchestra/r1/integration');
+  writeFileSync(join(root, 'f.txt'), 'one\n');
+  g('add', '-A');
+  g('commit', '-qm', 'fix: handle empty input'); // fix-like subject on the run's own commit
+  const tip = g('rev-parse', 'HEAD');
+  g('checkout', '-q', 'main');
+  writeFileSync(join(root, 'other.txt'), 'x\n'); // main moved, so the landing is a cherry-pick, not a fast-forward
+  g('add', '-A');
+  g('commit', '-qm', 'chore: other');
+  g('cherry-pick', tip);
+  store.saveRun(mkRun('r1', { integrationBranch: 'orchestra/r1/integration', baseRef: base }));
+  const clean = collectOutcomes(store);
+  assert.equal(clean.accepted, 1);
+  assert.equal(clean.breakageRate, 0);
+  writeFileSync(join(root, 'f.txt'), 'one\ntwo\n');
+  g('commit', '-qam', 'fix: f broke on two');
+  assert.equal(collectOutcomes(store).breakageRate, 1);
+});
