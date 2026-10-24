@@ -161,11 +161,11 @@ function armConfig(arm: BenchArm): ProjectConfig {
 
 // Mean cost per goal of the compared arm (cost per row, so repeats average out). Falls back to the worker budget
 // when the compared arm has no recorded cost.
-export function matchedBudget(rows: BenchRow[], arm: BenchArm, arms: BenchArm[], fallback: number): number {
+export function matchedBudget(rows: BenchRow[], arm: BenchArm, arms: BenchArm[], fallback: number | (() => number)): number {
   const target = arm.compareTo ?? (arms.some((a) => a.name === 'full') ? 'full' : arms.find((a) => !a.singleSession)?.name);
   const mine = rows.filter((r) => r.arm === target);
   const mean = mine.length ? mine.reduce((a, r) => a + r.costUsd, 0) / mine.length : 0;
-  return mean > 0 ? mean : fallback;
+  return mean > 0 ? mean : typeof fallback === 'function' ? fallback() : fallback; // the fallback may read the harness, so only pay for it when needed
 }
 
 export function summarize(rows: BenchRow[]): ArmSummary[] {
@@ -224,7 +224,8 @@ export async function runBench(o: BenchOptions): Promise<{ benchId: string; dir:
   // Single-session baselines run last: their budget is the mean cost per goal of the arm they are compared with.
   const ordered = [...arms.filter((a) => !a.singleSession), ...arms.filter((a) => a.singleSession)];
   for (const arm of ordered) {
-    const budgetUsd = arm.singleSession ? matchedBudget(rows, arm, arms, loadHarness(o.store, arm.harness === 'incumbent' ? undefined : arm.harness).config.budgetUsd.worker) : undefined;
+    const fallbackBudget = () => loadHarness(o.store, arm.harness === 'incumbent' ? undefined : arm.harness).config.budgetUsd.worker;
+    let budgetUsd: number | undefined; // single-session arms only; resolved on first use, inside the per-row try
     for (const goal of goals) {
       for (let repeat = 1; repeat <= repeats; repeat++) {
         const { dir: repo, base } = materialiseFixture(suite, goal.fixture);
@@ -243,6 +244,7 @@ export async function runBench(o: BenchOptions): Promise<{ benchId: string; dir:
           }
           let row: BenchRow;
           if (arm.singleSession) {
+            budgetUsd ??= matchedBudget(rows, arm, arms, fallbackBudget);
             const harness = loadHarness(store, version);
             const res = await o.runner({
               role: 'worker',

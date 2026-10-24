@@ -240,3 +240,12 @@ test('shipped suite is dependency-free and offline', () => {
     for (const m of text.matchAll(/from\s+'([^']+)'/g)) assert.ok(m[1].startsWith('.') || m[1].startsWith('node:'), `${f} imports ${m[1]}`);
   }
 });
+
+test('single-session budget does not read the source store harness when the compared arm has a cost', async () => {
+  const store = tempRepo();
+  rmSync(store.path('harness'), { recursive: true, force: true }); // the eager fallback used to throw here, after the full arm was paid for
+  const arms = [ABLATION_ARMS[0], SINGLE_SESSION_ARM];
+  const { rows } = await runBench({ store, runner: fakeRunner(), goals: ['calc-sub'], repeats: 1, arms, benchId: 'bl' });
+  const single = rows.find((r) => r.arm === 'single-session')!;
+  assert.ok(single.budgetUsd! > 0);
+});
