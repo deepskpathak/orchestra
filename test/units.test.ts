@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { buildArgs, extractJson, parseUsage, summarizeTool } from '../src/agent.ts';
-import { detectTestCommand } from '../src/cli.ts';
+import { detectTestCommand, summary } from '../src/cli.ts';
 import { decide } from '../src/guard.ts';
 import { metrics } from '../src/evolve.ts';
 import { fit, renderDashboard, renderStats, renderStatusLine, sparkline, visible } from '../src/tui/render.ts';
@@ -165,4 +165,10 @@ test('staleReadmeVersions flags mismatched README versions', () => {
   assert.deepEqual(staleReadmeVersions('Version 0.6', '0.6.1'), ['0.6']);
   assert.deepEqual(staleReadmeVersions('Version 0.6.1', '0.6.1'), []);
   assert.deepEqual(staleReadmeVersions('No version stated', '0.6.1'), []);
+});
+
+test('run summary separates failed, blocked and needs-human tasks', () => {
+  const t = (id: string, status: string, extra: object = {}) => ({ id, title: id, status, ...extra });
+  const run = { id: 'r1', status: 'failed', satisfaction: 0.5, costUsd: 1, tasks: [t('T1', 'needs_human', { humanReason: 'spec vs test' }), t('T2', 'blocked'), t('T3', 'blocked'), t('T4', 'failed'), t('T5', 'merged')] } as unknown as Run;
+  assert.match(summary(run), /1 failed, 2 blocked, 1 need a human/);
 });

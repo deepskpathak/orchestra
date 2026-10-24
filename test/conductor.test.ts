@@ -454,7 +454,7 @@ test('flag_for_human stops after one attempt: needs_human, reason stored, event 
   assert.equal(evs.filter((e) => e.kind === 'task.failed' && e.task === 'T1' && !/blocked/.test(e.msg)).length, 0);
   assert.equal(run.status, 'failed');
   assert.match(run.error ?? '', /1 need a human/);
-  assert.match(run.error ?? '', /\(2 failed|\(\d+ failed/);
+  assert.match(run.error ?? '', /\(0 failed, 2 blocked, 1 need a human\)/, 'a task blocked behind a flagged one is not counted as failed');
 });
 
 test('parseWorkerOutcome reads structured and text flags', async () => {

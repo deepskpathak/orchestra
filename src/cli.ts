@@ -157,14 +157,15 @@ async function cmdRun(args: string[]): Promise<void> {
   process.exitCode = run.status === 'done' ? 0 : 1;
 }
 
-function summary(run: Run): string {
+export function summary(run: Run): string {
   const merged = run.tasks.filter((t) => t.status === 'merged').length;
   const lines = [
     `♫ run ${run.id} ${run.status.toUpperCase()}: ${merged}/${run.tasks.length} tasks merged, satisfaction ${(run.satisfaction ?? 0).toFixed(2)}, cost $${run.costUsd.toFixed(2)}`,
   ];
   const human = run.tasks.filter((t) => t.status === 'needs_human');
-  const failed = run.tasks.filter((t) => t.status === 'failed' || t.status === 'blocked').length;
-  if (human.length || failed) lines.push(`  ${failed} failed, ${human.length} need a human`);
+  const failed = run.tasks.filter((t) => t.status === 'failed').length;
+  const blocked = run.tasks.filter((t) => t.status === 'blocked').length;
+  if (human.length || failed || blocked) lines.push(`  ${failed} failed, ${blocked} blocked, ${human.length} need a human`);
   for (const t of human) lines.push(`  ? ${t.id} needs a human: ${t.humanReason ?? 'no reason recorded'}`);
   if (run.error) lines.push(`  ${run.error}`);
   if (merged && run.integrationBranch) lines.push(`  review: git log --oneline ${run.baseRef?.slice(0, 8)}..${run.integrationBranch}`, `  land:   git merge ${run.integrationBranch}`);

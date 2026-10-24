@@ -353,8 +353,9 @@ export class Conductor {
       run.status = merged.length === run.tasks.length ? 'done' : 'failed';
       if (run.status === 'failed' && !run.error) {
         const human = run.tasks.filter((t) => t.status === 'needs_human').length;
-        const failed = run.tasks.length - merged.length - human;
-        run.error = `${run.tasks.length - merged.length} of ${run.tasks.length} tasks did not land (${failed} failed, ${human} need a human)`;
+        const blocked = run.tasks.filter((t) => t.status === 'blocked').length;
+        const failed = run.tasks.length - merged.length - human - blocked;
+        run.error = `${run.tasks.length - merged.length} of ${run.tasks.length} tasks did not land (${failed} failed, ${blocked} blocked, ${human} need a human)`;
       }
     } catch (err) {
       run.status = 'failed';
