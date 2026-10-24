@@ -139,6 +139,26 @@ test('conductor sandboxes workers only and scrubs env; off leaves requests untou
   }
 });
 
+test('sandboxed run leaves no settings in any session cwd, so judges are not sandboxed by the worker config', async () => {
+  const { runGoal } = await import('../src/conductor.ts');
+  const { fakeRunner } = await import('../src/fake.ts');
+  for (const backend of ['claude', 'srt'] as const) {
+    const store = tempRepo();
+    const inner = fakeRunner({ stepMs: 0 });
+    const seen: { role: string; sandboxed: boolean; localSettings: boolean }[] = [];
+    await runGoal({
+      store,
+      goal: 'Add a thing',
+      runner: (req) => (seen.push({ role: req.role, sandboxed: Boolean(req.sandbox), localSettings: existsSync(join(req.cwd, '.claude', 'settings.local.json')) }), inner(req)),
+      sandbox: { backend },
+      preflightExec: () => ({ status: 0, stdout: 'ORCHESTRA_PROBE_BLOCKED', stderr: '' }),
+    });
+    assert.ok(seen.some((r) => r.role === 'judge'), 'a judge ran');
+    assert.ok(seen.every((r) => !r.localSettings), 'no .claude/settings.local.json in any cwd');
+    assert.ok(seen.filter((r) => r.role !== 'worker').every((r) => !r.sandboxed));
+  }
+});
+
 test('resolveSandbox: modes and defaults', () => {
   const none = { backend: 'none' as const, srt: false, claude: false, reason: 'no sandbox' };
   const srt = { backend: 'srt' as const, srt: true, claude: false, reason: 'srt found' };
