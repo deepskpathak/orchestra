@@ -54,8 +54,13 @@ test('claudeSandboxSettings is fail-closed and serialisable', () => {
   assert.equal(s.sandbox.allowUnsandboxedCommands, false);
   assert.equal(s.sandbox.failIfUnavailable, true);
   assert.deepEqual(s.sandbox.network.allowedDomains, ['api.anthropic.com', 'registry.npmjs.org']);
-  assert.ok(s.permissions.deny.includes('Read(/home/u/.ssh)'));
-  assert.ok(s.permissions.deny.includes('Edit(/r/.git/hooks)'));
+  // absolute paths use the "//" prefix, directories also get "/**", globs pass through
+  assert.ok(s.permissions.deny.includes('Read(//home/u/.ssh)'));
+  assert.ok(s.permissions.deny.includes('Read(//home/u/.ssh/**)'));
+  assert.ok(s.permissions.deny.includes('Edit(//r/.git/hooks)'));
+  assert.ok(s.permissions.deny.includes('Edit(//r/.git/hooks/**)'));
+  assert.ok(s.permissions.deny.includes('Read(**/.env)'));
+  assert.ok(!s.permissions.deny.some((d: string) => /^(Read|Edit)\(\/[^/]/.test(d)), 'no single-slash absolute rule');
   assert.deepEqual(JSON.parse(JSON.stringify(s)), s);
 });
 

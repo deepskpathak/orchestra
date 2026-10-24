@@ -57,7 +57,7 @@ test('sandbox claude writes fail-closed settings and preserves existing keys', (
   assert.equal(s.model, 'x');
   assert.deepEqual(s.permissions.allow, ['Bash(ls)']);
   assert.ok(s.permissions.deny.includes('Read(zzz)'));
-  assert.ok(s.permissions.deny.some((d: string) => d.startsWith('Read(/home/u/.ssh')));
+  assert.ok(s.permissions.deny.some((d: string) => d.startsWith('Read(//home/u/.ssh')));
   assert.equal(s.sandbox.enabled, true);
   assert.equal(s.sandbox.allowUnsandboxedCommands, false);
   assert.equal(s.sandbox.failIfUnavailable, true);

@@ -83,6 +83,19 @@ export function buildSandboxPolicy(i: PolicyInput): SandboxPolicy {
 // Read(...)/Edit(...) rules. Inferred (not confirmed in docs): sandbox.failIfUnavailable as the
 // fail-closed switch, and sandbox.filesystem.{allowWrite,denyWrite,denyRead}. Unknown keys are
 // ignored by older versions, so the permissions.deny rules provide the enforced fallback.
+// Claude Code permission rules read a single leading "/" as relative to the settings file; an
+// absolute filesystem path needs "//". A directory needs "/**" to cover its contents. Unverified
+// against a live Claude Code (as recalled from its permissions docs), so absolute entries emit both
+// the bare path (a file, or the directory itself) and the "/**" form. Globs and relative entries
+// (for example "**/.env") pass through unchanged.
+export function permissionRules(tool: 'Read' | 'Edit', paths: string[]): string[] {
+  return paths.flatMap((p) => {
+    if (!p.startsWith('/')) return [`${tool}(${p})`];
+    const abs = `/${p}`;
+    return [`${tool}(${abs})`, `${tool}(${abs.replace(/\/+$/, '')}/**)`];
+  });
+}
+
 export function claudeSandboxSettings(policy: SandboxPolicy): Record<string, unknown> {
   return {
     sandbox: {
@@ -98,7 +111,7 @@ export function claudeSandboxSettings(policy: SandboxPolicy): Record<string, unk
       },
     },
     permissions: {
-      deny: [...policy.read.deny.map((p) => `Read(${p})`), ...policy.write.deny.map((p) => `Edit(${p})`)],
+      deny: [...permissionRules('Read', policy.read.deny), ...permissionRules('Edit', policy.write.deny)],
     },
   };
 }

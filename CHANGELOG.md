@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Fixed
 
 - Sandbox: the srt and claude write policy now includes the shared git common dir (hooks and config stay read-only inside it), so a worker's `git commit` in a worktree can write objects, refs and worktree metadata. Matches the docker backend.
+- Sandbox: `permissions.deny` rules now use Claude Code's absolute-path form (`Read(//home/u/.ssh)`, not `Read(/home/u/.ssh)`, which means settings-relative) and add a `/**` variant so directories cover their contents. Globs such as `**/.env` are unchanged. Unverified against a live Claude Code, so both the bare and `/**` forms are emitted.
 
 ### Added
 
