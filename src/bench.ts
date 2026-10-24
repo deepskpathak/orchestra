@@ -157,11 +157,13 @@ export function verifyOracles(suite = DEFAULT_SUITE, only?: string[]): OracleRes
   });
 }
 
-function armConfig(arm: BenchArm): ProjectConfig {
+export function armConfig(arm: BenchArm): ProjectConfig {
   const cfg: Record<string, any> = { ...DEFAULT_PROJECT_CONFIG, testCommand: null };
   for (const [k, v] of Object.entries(arm.config ?? {})) {
     cfg[k] = v && typeof v === 'object' && !Array.isArray(v) && cfg[k] && typeof cfg[k] === 'object' ? { ...cfg[k], ...v } : v;
   }
+  // context.atlas is nested two levels deep: keep the defaults (mapTokens, packTokens) when an arm sets only some keys.
+  if (arm.config?.context?.atlas) cfg.context = { ...DEFAULT_PROJECT_CONFIG.context, ...arm.config.context, atlas: { ...DEFAULT_PROJECT_CONFIG.context.atlas, ...arm.config.context.atlas } };
   return cfg as ProjectConfig;
 }
 

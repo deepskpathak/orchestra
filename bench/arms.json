@@ -1,3 +1,6 @@
 [
-  { "name": "default" }
+  { "name": "default" },
+  { "name": "atlas-off", "config": { "context": { "atlas": { "enabled": false, "packs": false } } } },
+  { "name": "atlas-l0", "config": { "context": { "atlas": { "enabled": true, "packs": false } } } },
+  { "name": "atlas-l0-l1", "config": { "context": { "atlas": { "enabled": true, "packs": true } } } }
 ]
