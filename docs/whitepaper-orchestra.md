@@ -196,6 +196,7 @@ We propose, but have not run, the following protocol. Each step uses existing co
 ## 8 Limitations
 
 - **No empirical results.** There is no benchmark of Orchestra against a baseline in the repo. Claims here are about design, not performance.
+- **Candidate judge scores its own eval: addressed (M1).** Eval replays are now scored by a frozen scorer in `scorer/` plus the case `check`, never by the candidate harness's own judge. An integrity monitor and clean-room, interleaved trials back this up (`docs/self-improvement.md`). The scorer is still an LLM and shares a model family with the judge by default.
 - **Judge is an LLM.** Verdicts can be wrong, and the quality of hidden scenarios depends on the planner. The fast path removes the hidden-scenario requirement for small goals (`docs/configuration.md`).
 - **Small eval sets.** The gate refuses to promote below `evolve.minCases` and requires a gain above the observed spread, but the repo's own notes say small sets are noisy (`docs/research/cost-accuracy-speed.md`).
 - **Cost.** Evolution reruns past goals and costs roughly `sample x 2` runs plus the evolver call (`README.md`, Status). Multi-candidate adds `k x screen` each cycle. The research notes report that the Opus-tier planner and judge dominated cost in one measured run (`docs/research/cost-accuracy-speed.md`).

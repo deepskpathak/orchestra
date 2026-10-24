@@ -17,6 +17,8 @@ planner --> task graph + hidden scenarios (holdout/<run>.json)
 librarian --> learnings.json (read by the next run)
 ```
 
+The frozen scorer (`scorer/`, loaded by `src/scorer.ts`) and the integrity monitor (`src/integrity.ts`) sit outside the evolvable harness. The scorer grades eval replays for promotion, and the monitor inspects worker diffs for grading-surface edits, weakened tests and reward hacks. The evolver cannot edit or see either.
+
 The evolver sits outside the run loop. It proposes changes to the factory itself (see [self-improvement](self-improvement.md)).
 
 ## The five roles
@@ -59,6 +61,8 @@ For each task (`attempt()` in `src/conductor.ts`):
 5. On failure the verdict issues become repair notes and the task goes back to `repair` for another worker attempt. After `maxAttempts` (3 by default) it is marked `failed`, and tasks that depend on it become `blocked`.
 
 If a worker finds that the spec and the tests contradict each other, it ends with `FLAG_FOR_HUMAN: <reason>`. That is a stop condition: no judge, no repair attempts, the task becomes `needs_human` with the reason stored on `humanReason` and a `task.needs_human` event, and dependents are `blocked`. It does not count toward repair exhaustion, and the run summary reports `needs_human` tasks separately from `failed` ones.
+
+The integrity monitor runs on each worker diff before the judge. If a grading file that existed at the base was edited, tests are re-run with the originals restored and the attempt goes to repair with an automatic `[integrity-monitor]` note. Flags are kept on `task.integrityFlags`.
 
 Task states are `pending`, `running`, `judging`, `repair`, `merging`, `merged`, `failed`, `needs_human` and `blocked`. Tasks start in dependency order, up to `concurrency` at a time, until `runBudgetUsd` is spent.
 
