@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- W2.2 paired statistics (`src/stats.ts`): cluster-robust paired gain and 95% CI, pass@1, pass^k and Cohen's kappa. Opt-in `evolve.promotionRule: "paired"` (with `evolve.niMargin`) promotes only when the CI lower bound is above zero with no task type regressing; the default `gain` rule is unchanged. Promotion reasons now include the CI, pass@1 and pass^3.
 - W2.6 outcome metrics beyond satisfaction (`src/outcomes.ts`): merge acceptance, edits before landing, revert rate and breakage proxy, cost and wall-clock per accepted merge, and success versus task length. Shown in `orchestra stats` and added to `/api/info` as `outcomes` (existing fields unchanged); see docs/dashboards.md.
 - M1 Integrity (W0.1, W1.1 to W1.5), which closes the self-graded eval gap:
   - W0.1: the README Status section matches `package.json`, with a guard test.
