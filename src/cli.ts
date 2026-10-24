@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { claudeRunner, preflight, type Runner } from './agent.ts';
 import { importGrades, readBenchRows, renderCalibration, storeCalibration, writeSample } from './calibration.ts';
 import { ABLATION_ARMS, SINGLE_SESSION_ARM, ablationTable, loadArms, renderAblationTable, summarize, renderSummary, runBench, verifyOracles } from './bench.ts';
+import { atlasStats, loadOrBuildAtlas } from './atlas.ts';
 import { runGoal } from './conductor.ts';
 import { explorationMetrics, renderExploration } from './exploration.ts';
 import { collectOutcomes, renderOutcomes } from './outcomes.ts';
@@ -51,6 +52,9 @@ Usage:
                                  prints the infra failure rate of the eval replays
   orchestra learnings [--domain <slug>]
                                  Show what the factory has learned (all, or one domain; "global" for cross-domain lessons)
+  orchestra atlas build          Build or incrementally refresh the Repo Atlas code graph for HEAD (.orchestra/atlas/<sha>.json)
+  orchestra atlas stats          Show file, symbol and edge counts of the atlas for HEAD (builds it if missing)
+                                 Both work regardless of context.atlas.enabled; the atlas never indexes .orchestra/, .env* or secrets
   orchestra bench                Run the fixed benchmark suite: arms x goals x repeats, hidden checks, JSONL + summary
       --arms a,b --goals g1,g2 --repeats N   Choose arms (default bench/arms.json), goals and repeats per goal
       --suite <dir>              Use another suite directory (default: the bundled bench/)
@@ -420,6 +424,36 @@ function cmdLearnings(args: string[]): void {
   }
 }
 
+const ATLAS_USAGE = 'Usage: orchestra atlas build | orchestra atlas stats';
+
+function cmdAtlas(args: string[]): void {
+  const sub = args[0];
+  if (sub !== 'build' && sub !== 'stats') die(sub ? `unknown atlas subcommand "${sub}". ${ATLAS_USAGE}` : ATLAS_USAGE);
+  const root = findRepoRoot(process.cwd());
+  if (!root) die('Not inside a git repository.');
+  let sha: string;
+  try {
+    sha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+  } catch {
+    die('No commits yet. Commit something first; the atlas is keyed by commit.');
+  }
+  const atlas = loadOrBuildAtlas(root, sha);
+  const st = atlasStats(atlas);
+  const edges = Object.entries(st.edges).map(([k, n]) => `${k} ${n}`).join(', ');
+  if (sub === 'build') {
+    console.log(`♫ atlas ${join(root, '.orchestra', 'atlas', `${atlas.sha}.json`)}`);
+    console.log(`  ${st.files} files, ${st.symbols} symbols, ${edges}`);
+    return;
+  }
+  console.log(`atlas for ${atlas.sha.slice(0, 8)}`);
+  console.log(`  files    ${st.files}`);
+  console.log(`  symbols  ${st.symbols}`);
+  console.log(`  dirs     ${st.dirs}`);
+  console.log(`  edges    ${edges}`);
+  const langs = Object.entries(st.languages).sort((a, b) => b[1] - a[1]).map(([l, n]) => `${l} ${n}`).join(', ');
+  console.log(`  languages ${langs || '(none)'}`);
+}
+
 function cmdEvals(): void {
   const store = storeOrDie();
   const cases = listEvals(store);
@@ -581,6 +615,9 @@ export async function main(argv: string[]): Promise<void> {
       break;
     case 'learnings':
       cmdLearnings(args);
+      break;
+    case 'atlas':
+      cmdAtlas(args);
       break;
     case 'bench':
       await cmdBench(args);

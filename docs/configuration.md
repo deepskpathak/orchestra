@@ -21,6 +21,7 @@ Defaults come from `DEFAULT_PROJECT_CONFIG` in `src/store.ts`. Missing keys fall
 | `preJudge` | object | see below | Deterministic checks before any judge call. |
 | `fastPath` | object | see below | Single-task planning for small goals. |
 | `contrastive` | object | see below | Two-worker contrastive repair. |
+| `context` | object | see below | Repo context settings (`context.atlas`). |
 | `evolve` | object | see below | Self-improvement settings. |
 
 ### `sandbox`
@@ -61,6 +62,17 @@ Off by default. When enabled and the goal is short and has no list structure (nu
 |---|---|---|---|
 | `fastPath.enabled` | boolean | `false` | Turn the fast path on. |
 | `fastPath.maxGoalChars` | number | `400` | Goals longer than this never take the fast path. |
+
+### `context.atlas`
+
+Off by default. The Repo Atlas is a deterministic, commit-keyed code graph (files, symbols, imports, references, tests) built with regex extractors, no LLM and no dependencies. It is stored at `.orchestra/atlas/<sha>.json` and refreshed incrementally from the nearest cached commit. Build or inspect it by hand with `orchestra atlas build` and `orchestra atlas stats`; those commands work even when the atlas is disabled.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `context.atlas.enabled` | boolean | `false` | Use the atlas in runs: a ranked repo map for the planner and the shared worker prefix. |
+| `context.atlas.mapTokens` | number | `1024` | Token budget of the ranked repo map (L0). |
+| `context.atlas.packs` | boolean | `false` | Add a per-task pack (L1: footprint signatures, callers, importers, related tests) to the worker prompt body. |
+| `context.atlas.packTokens` | number | `1500` | Token budget of each task pack. |
 
 ### `contrastive`
 
