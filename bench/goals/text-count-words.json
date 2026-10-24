@@ -1,0 +1,9 @@
+{
+  "id": "text-count-words",
+  "fixture": "text",
+  "goal": "countWords in src/words.js is wrong for empty strings and for repeated or surrounding whitespace. It must count whitespace-separated words, so \"\" gives 0 and \"  a   b \" gives 2.",
+  "taskType": "bugfix",
+  "humanMinutes": 6,
+  "check": "checks/text-count-words.mjs",
+  "oracle": "oracles/text-count-words"
+}

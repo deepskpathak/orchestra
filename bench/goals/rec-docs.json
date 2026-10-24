@@ -1,0 +1,9 @@
+{
+  "id": "rec-docs",
+  "fixture": "records",
+  "goal": "Create README.md for the records module with an \"## API\" heading that describes `groupBy`, `sortBy` and `chunk`, one bullet each, naming the function in backticks.",
+  "taskType": "docs",
+  "humanMinutes": 12,
+  "check": "checks/rec-docs.mjs",
+  "oracle": "oracles/rec-docs"
+}

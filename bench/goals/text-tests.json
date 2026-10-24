@@ -1,0 +1,9 @@
+{
+  "id": "text-tests",
+  "fixture": "text",
+  "goal": "Write test/text.test.js using node:test and node:assert covering capitalize (at least three tests, including the empty string). The tests must pass and must catch a wrong implementation.",
+  "taskType": "test",
+  "humanMinutes": 10,
+  "check": "checks/text-tests.mjs",
+  "oracle": "oracles/text-tests"
+}

@@ -1,0 +1,9 @@
+{
+  "id": "rec-sort-mutates",
+  "fixture": "records",
+  "goal": "sortBy in src/records.js sorts the caller's array in place. It must return a new sorted array and leave the input untouched.",
+  "taskType": "bugfix",
+  "humanMinutes": 6,
+  "check": "checks/rec-sort-mutates.mjs",
+  "oracle": "oracles/rec-sort-mutates"
+}

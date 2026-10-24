@@ -1,0 +1,9 @@
+{
+  "id": "args-usage",
+  "fixture": "args",
+  "goal": "Add src/usage.js exporting formatUsage({ name, description, options }) where options is a list of { flag, desc, default? }. It returns a string (no trailing newline) of these lines: \"Usage: NAME [options]\"; the description line if description is given; an empty line; \"Options:\"; then one line per option, \"  --FLAG\" padded with spaces to the width of the longest \"--FLAG\", then two spaces, then desc, then \" (default: X)\" when default is not undefined.",
+  "taskType": "feature",
+  "humanMinutes": 30,
+  "check": "checks/args-usage.mjs",
+  "oracle": "oracles/args-usage"
+}

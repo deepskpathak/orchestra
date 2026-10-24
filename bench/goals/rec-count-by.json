@@ -1,0 +1,9 @@
+{
+  "id": "rec-count-by",
+  "fixture": "records",
+  "goal": "Add and export countBy(items, keyFn) to src/records.js returning an object that maps each key to how many items produced it.",
+  "taskType": "feature",
+  "humanMinutes": 6,
+  "check": "checks/rec-count-by.mjs",
+  "oracle": "oracles/rec-count-by"
+}

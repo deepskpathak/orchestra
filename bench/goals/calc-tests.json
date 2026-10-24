@@ -1,0 +1,9 @@
+{
+  "id": "calc-tests",
+  "fixture": "calc",
+  "goal": "Write test/calc.test.js using node:test and node:assert covering add and divide (at least three tests). The tests must pass and must catch a wrong implementation.",
+  "taskType": "test",
+  "humanMinutes": 12,
+  "check": "checks/calc-tests.mjs",
+  "oracle": "oracles/calc-tests"
+}
