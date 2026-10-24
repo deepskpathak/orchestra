@@ -3,6 +3,8 @@
 // Factory Eval against the incumbent, keep every variant in the archive, promote only on
 // a measured gain with no regressions.
 
+import { agreementBlock, storeCalibration } from './calibration.ts';
+import { meanDefined, pairedDecision, passAt1, passHatK } from './stats.ts';
 import { spawnSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -42,6 +44,8 @@ export interface EvalCase {
   base: string; // commit to start from
   check?: string | null; // shell command that must pass on the result
   harvestedFrom?: string;
+  source?: string; // source goal id; cases sharing it form one cluster in paired statistics
+  taskType?: string;
 }
 
 export function goalRuns(store: Store, kind: 'goal' | 'eval' = 'goal'): Run[] {
@@ -91,7 +95,9 @@ export function listEvals(store: Store): EvalCase[] {
 // Harvest: a clean, high-satisfaction run becomes a regression case for future harnesses.
 export function harvest(store: Store, run: Run, minSatisfaction = 0.8): EvalCase | null {
   if (run.kind !== 'goal' || run.status !== 'done' || (run.satisfaction ?? 0) < minSatisfaction || !run.baseRef) return null;
-  const c: EvalCase = { id: run.id, goal: run.goal, base: run.baseRef, check: store.config().testCommand, harvestedFrom: run.id };
+  // Cluster by goal text (re-runs of the same goal are correlated) and type by the planner's domain slug, the only
+  // task metadata a goal run carries; without these every case is its own cluster of type 'unknown'.
+  const c: EvalCase = { id: run.id, goal: run.goal, base: run.baseRef, check: store.config().testCommand, harvestedFrom: run.id, source: run.goal.trim().replace(/\s+/g, ' ').toLowerCase(), taskType: run.domain || 'unknown' };
   store.writeJson(`evals/${run.id}.json`, c);
   return c;
 }
@@ -299,6 +305,11 @@ export interface PromotionInput {
   minCases: number;
   incumbent?: string;
   monitorFireRate?: { incumbent: number; candidate: number }; // integrity-monitor flags per run
+  rule?: 'gain' | 'paired'; // default 'gain'
+  niMargin?: number; // paired rule: per task type non-inferiority margin, default 0.05
+  sources?: string[]; // per-case source goal (cluster), same order as the scores; default one cluster per case
+  taskTypes?: string[]; // per-case task type; default 'unknown'
+  candidatePassed?: boolean[]; // per-case pass flags for pass@1 and pass^3; default score >= 0.5
 }
 
 export interface PromotionDecision {
@@ -306,6 +317,9 @@ export interface PromotionDecision {
   reason: string;
   gain: number;
   spread: number;
+  ci?: [number, number]; // 95% CI on the mean gain (cluster-robust), always reported
+  passAt1?: number; // candidate pass rate per source goal, averaged
+  passHat3?: number; // candidate pass^3, undefined when no goal has 3 repeats
 }
 
 // One stray monitor flag (a heuristic false positive) must not veto a clearly better harness, so the
@@ -319,13 +333,40 @@ export function promotionDecision(i: PromotionInput): PromotionDecision {
   const deltas = Array.from({ length: n }, (_, k) => i.candidateScores[k] - i.incumbentScores[k]);
   const gain = n ? deltas.reduce((a, b) => a + b, 0) / n : 0;
   const spread = n ? Math.sqrt(deltas.reduce((a, d) => a + (d - gain) ** 2, 0) / n) : 0;
-  const out = (promote: boolean, reason: string): PromotionDecision => ({ promote, reason, gain: round(gain), spread: round(spread) });
+  const sources = Array.from({ length: n }, (_, k) => i.sources?.[k] ?? `case-${k}`);
+  const pcases = Array.from({ length: n }, (_, k) => ({ goal: sources[k], taskType: i.taskTypes?.[k], incumbent: i.incumbentScores[k], candidate: i.candidateScores[k] }));
+  const paired = pairedDecision({ cases: pcases, niMargin: i.niMargin ?? 0.05, minCases: i.minCases });
+  const perGoal = new Map<string, { n: number; c: number }>();
+  for (let k = 0; k < n; k++) {
+    const g = perGoal.get(sources[k]) ?? { n: 0, c: 0 };
+    g.n++;
+    if (i.candidatePassed ? i.candidatePassed[k] : i.candidateScores[k] >= 0.5) g.c++;
+    perGoal.set(sources[k], g);
+  }
+  const p1 = meanDefined([...perGoal.values()].map((g) => passAt1(g.n, g.c)));
+  const p3 = meanDefined([...perGoal.values()].map((g) => passHatK(g.n, g.c, 3)));
+  const f = (x?: number) => (x === undefined ? 'n/a' : x.toFixed(3));
+  // With fewer than 2 source goals the interval is unbounded; report it as absent rather than as Infinity (JSON turns that into null).
+  const ciKnown = Number.isFinite(paired.ci[0]) && Number.isFinite(paired.ci[1]);
+  const stats = `${ciKnown ? `95% CI [${paired.ci[0].toFixed(3)}, ${paired.ci[1].toFixed(3)}]` : '95% CI n/a (needs 2+ source goals)'}, pass@1 ${f(p1)}, pass^3 ${f(p3)}`;
+  const out = (promote: boolean, reason: string): PromotionDecision => ({
+    promote,
+    reason: `${reason} (${stats})`,
+    gain: round(gain),
+    spread: round(spread),
+    ...(ciKnown ? { ci: [round(paired.ci[0]), round(paired.ci[1])] as [number, number] } : {}),
+    ...(p1 !== undefined ? { passAt1: round(p1) } : {}),
+    ...(p3 !== undefined ? { passHat3: round(p3) } : {}),
+  });
   if (n < i.minCases) return out(false, `only ${n} eval cases, need at least ${i.minCases}`);
   if (i.regressions.length) return out(false, `regressed on ${i.regressions.join(', ')}`);
   const mon = i.monitorFireRate;
   // Rates are flags per replayed run, so scale the difference back to a flag count (one run per case).
   if (mon && (mon.candidate - mon.incumbent) * n > MONITOR_SLACK_FLAGS + 1e-9) {
     return out(false, `integrity monitor fire rate ${mon.candidate.toFixed(3)} per run exceeds incumbent ${mon.incumbent.toFixed(3)} by more than ${MONITOR_SLACK_FLAGS} flag: candidate edits grading files or weakens tests more often`);
+  }
+  if (i.rule === 'paired') {
+    return out(paired.verdict === 'promote', `paired ${paired.verdict}: ${paired.reason}${paired.verdict === 'promote' ? ` over ${i.incumbent ?? 'incumbent'}` : ''}`);
   }
   const bar = Math.max(i.minGain, spread);
   if (!(gain > bar)) return out(false, `gain ${gain.toFixed(3)} not above ${spread > i.minGain ? 'spread' : 'minGain'} ${bar.toFixed(3)}`);
@@ -337,6 +378,8 @@ export async function evolve(store: Store, runner: Runner, log: (msg: string) =>
   const h = loadHarness(store, incumbent);
   const cfg = store.config();
   const m = metrics(store);
+  const blocked = agreementBlock(storeCalibration(store), incumbent, cfg.evolve.minJudgeAgreement);
+  if (blocked) return { candidate: null, incumbent, candidateScore: null, incumbentScore: null, promoted: false, reason: blocked };
   const recentIssues = goalRuns(store)
     .slice(-5)
     // Monitor output must never reach the evolver, or it could learn to evade the monitor.
@@ -479,6 +522,11 @@ export async function evolve(store: Store, runner: Runner, log: (msg: string) =>
     minCases: cfg.evolve.minCases,
     incumbent,
     monitorFireRate: monitor,
+    rule: cfg.evolve.promotionRule ?? 'gain',
+    niMargin: cfg.evolve.niMargin ?? 0.05,
+    sources: cases.map((c) => c.source ?? c.id),
+    taskTypes: cases.map((c) => c.taskType ?? 'unknown'),
+    candidatePassed: cases.map((c) => !!cand.passed[c.id]),
   });
   const better = decision.promote;
   const reason = decision.reason;

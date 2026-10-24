@@ -1,0 +1,9 @@
+{
+  "id": "text-docs",
+  "fixture": "text",
+  "goal": "Create README.md for the text module with an \"## API\" heading that describes `capitalize`, `countWords` and `longestWord`, one bullet each, naming the function in backticks.",
+  "taskType": "docs",
+  "humanMinutes": 8,
+  "check": "checks/text-docs.mjs",
+  "oracle": "oracles/text-docs"
+}

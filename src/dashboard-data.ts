@@ -3,6 +3,7 @@
 
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { git } from './git.ts';
+import { collectOutcomes, type OutcomeMetrics } from './outcomes.ts';
 import { currentVersion, loadHarness } from './harness.ts';
 import type { Store } from './store.ts';
 import type { Run } from './types.ts';
@@ -44,8 +45,30 @@ export function harnessLimits(store: Store): { maxAttempts?: number; passThresho
   }
 }
 
+// collectOutcomes shells out to git several times per run, and /api/info is polled every few seconds per tab.
+// Reuse the last result while the runs look the same and no branch has moved; the TTL bounds staleness for
+// changes this key cannot see (new bench results).
+const OUTCOMES_TTL_MS = 30_000;
+const outcomesCache = new Map<string, { key: string; at: number; value: OutcomeMetrics }>();
+
+function cachedOutcomes(store: Store): OutcomeMetrics {
+  const runs = store.listRuns().map((id) => store.loadRun(id)).filter((r): r is Run => Boolean(r));
+  let head = '';
+  try {
+    head = git(store.root, 'for-each-ref', '--format=%(refname) %(objectname)', 'refs/heads'); // one cheap call; any branch move or prune changes the key
+  } catch {
+    head = ''; // not a repo: the key falls back to runs alone
+  }
+  const key = JSON.stringify([head, runs.map((r) => [r.id, r.status, r.endedAt ?? null, r.costUsd, r.integrationBranch ?? null, r.tasks.map((t) => t.status)])]);
+  const hit = outcomesCache.get(store.root);
+  if (hit && hit.key === key && Date.now() - hit.at < OUTCOMES_TTL_MS) return hit.value;
+  const value = collectOutcomes(store);
+  outcomesCache.set(store.root, { key, at: Date.now(), value });
+  return value;
+}
+
 export function infoSnapshot(store: Store) {
-  return { harness: currentVersion(store), current: store.currentRunId(), repo: store.root, ...harnessLimits(store) };
+  return { harness: currentVersion(store), current: store.currentRunId(), repo: store.root, ...harnessLimits(store), outcomes: cachedOutcomes(store) };
 }
 
 // Task detail: verdict is already in run.json; add the branch diff and the tail of each agent log.

@@ -1,0 +1,9 @@
+{
+  "id": "args-repeat",
+  "fixture": "args",
+  "goal": "In src/args.js, when parseArgs sees the same flag more than once, collect the values into an array in order ([\"--tag=a\", \"--tag=b\"] gives tag: [\"a\", \"b\"]). A flag seen once keeps its plain value.",
+  "taskType": "feature",
+  "humanMinutes": 15,
+  "check": "checks/args-repeat.mjs",
+  "oracle": "oracles/args-repeat"
+}

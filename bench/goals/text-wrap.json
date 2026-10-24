@@ -1,0 +1,9 @@
+{
+  "id": "text-wrap",
+  "fixture": "text",
+  "goal": "Add and export wrap(s, width) to src/text.js: greedy word wrap on whitespace, returning an array of lines each at most width characters. A word longer than width gets its own line unbroken. Return [] for a string with no words.",
+  "taskType": "feature",
+  "humanMinutes": 30,
+  "check": "checks/text-wrap.mjs",
+  "oracle": "oracles/text-wrap"
+}

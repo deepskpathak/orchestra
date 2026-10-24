@@ -455,6 +455,14 @@ pre { margin: 0; padding: 10px 12px; max-height: 420px; overflow: auto; font: 12
       return;
     }
     $('ringwrap').style.display = '';
+    // Repo-wide outcome metrics from /api/info; a null rate shows as n/a.
+    function outcomeStats(o) {
+      if (!o) return '';
+      var p = function (x) { return x == null ? 'n/a' : Math.round(x * 100) + '%'; };
+      return '<div class="stat"><span>Merge acceptance</span><b class="num">' + p(o.acceptanceRate) + '</b></div>' +
+        '<div class="stat"><span>Revert rate</span><b class="num">' + p(o.revertRate) + '</b></div>' +
+        '<div class="stat"><span>Cost / accepted</span><b class="num">' + (o.costPerAcceptedUsd == null ? 'n/a' : usd(o.costPerAcceptedUsd)) + '</b></div>';
+    }
     var total = run.tasks.length, merged = count(run, ['merged']);
     var flight = run.tasks.reduce(function (s, t) { return s + (WEIGHT[t.status] || 0); }, 0);
     var live = !run.endedAt && run.status !== 'done' && run.status !== 'failed';
@@ -467,7 +475,8 @@ pre { margin: 0; padding: 10px 12px; max-height: 420px; overflow: auto; font: 12
       '<div class="stat"><span>Cost</span><b class="num">' + usd(run.costUsd) + '</b></div>' +
       '<div class="stat"><span>Agents</span><b class="num">' + run.active.length + '</b></div>' +
       '<div class="stat"><span>Merged</span><b class="num">' + merged + ' / ' + total + '</b></div>' +
-      (run.satisfaction != null ? '<div class="stat"><span>Satisfaction</span><b class="num">' + run.satisfaction.toFixed(2) + '</b></div>' : '');
+      (run.satisfaction != null ? '<div class="stat"><span>Satisfaction</span><b class="num">' + run.satisfaction.toFixed(2) + '</b></div>' : '') +
+      outcomeStats((state.info || {}).outcomes);
 
     var pct = total ? merged / total : 0;
     $('ring-fg').setAttribute('stroke-dasharray', RING.toFixed(2));
@@ -989,6 +998,10 @@ pre { margin: 0; padding: 10px 12px; max-height: 420px; overflow: auto; font: 12
       // New runs appear while the page is open; refresh the picker and follow a newer current run.
       setInterval(function () {
         get('/api/info').then(function (i) {
+          // Keep info fresh so outcome stats (and limits) follow the repo, and repaint the hero when they change.
+          var outcomesChanged = JSON.stringify(i.outcomes) !== JSON.stringify((state.info || {}).outcomes);
+          state.info = i;
+          if (outcomesChanged && state.run) renderHero();
           var sel = $('runs');
           if (i.current && i.current !== sel.value && !sel.querySelector('option[value="' + i.current + '"]')) {
             loadRuns(i.current).then(function () { connect(i.current); });

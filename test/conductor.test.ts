@@ -4,12 +4,12 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import type { Runner } from '../src/agent.ts';
+import type { AgentRequest, Runner } from '../src/agent.ts';
 import * as g from '../src/git.ts';
 import { runGoal, normalizeTasks, shouldEscalate, missingTestIssues, preJudgeIssues, fastPathDecision, FAST_PLAN_SCHEMA } from '../src/conductor.ts';
 import { DEFAULT_PROJECT_CONFIG } from '../src/store.ts';
 import { fakeRunner } from '../src/fake.ts';
-import { readLearnings } from '../src/learnings.ts';
+import { readLearnings, writeLearnings } from '../src/learnings.ts';
 import { tempRepo } from './helpers.ts';
 
 test('happy path: plans, repairs a rejected task, merges all, learns', async () => {
@@ -520,4 +520,66 @@ test('integrity monitor: restored originals that still fail the tests are report
   const repair = store.events(run.id).find((e) => e.kind === 'task.repair' && e.task === 'T1')!;
   assert.ok(store.events(run.id).some((e) => e.task === 'T1' && /restored FAILED/.test(e.msg)));
   assert.match((repair.data as { issues: string[] }).issues[0], /Tests on the original files failed/);
+});
+
+// ---------- ablations (W2.4) ----------
+
+function recording(inner: Runner, seen: AgentRequest[]): Runner {
+  return async (req) => {
+    seen.push(req);
+    return inner(req);
+  };
+}
+
+test('ablate none: default behaviour keeps scenarios, repair and learnings', async () => {
+  const store = tempRepo({ concurrency: 1 });
+  writeLearnings(store, [{ role: 'worker', lesson: 'ABLLESSON', evidence: [{ run: 'r1' }], hits: 1 }, { role: 'planner', lesson: 'ABLPLAN', evidence: [{ run: 'r1' }], hits: 1 }], 'r1');
+  const seen: AgentRequest[] = [];
+  const run = await runGoal({ store, runner: recording(fakeRunner(), seen), goal: 'demo goal', ablate: {} });
+  assert.equal(run.tasks.find((t) => t.id === 'T2')!.attempts, 2);
+  assert.ok(seen.some((r) => r.role === 'judge' && !r.prompt.includes('(none)')));
+  assert.ok(seen.some((r) => r.role === 'planner' && r.prompt.includes('ABLPLAN')));
+  assert.ok(seen.some((r) => r.role === 'worker' && r.prompt.includes('ABLLESSON')));
+});
+
+test('ablate repair: exactly one worker attempt per task', async () => {
+  const store = tempRepo({ concurrency: 1 });
+  const seen: AgentRequest[] = [];
+  const run = await runGoal({ store, runner: recording(fakeRunner(), seen), goal: 'demo goal', ablate: { repair: true } });
+  const t2 = run.tasks.find((t) => t.id === 'T2')!;
+  assert.equal(t2.attempts, 1);
+  assert.equal(t2.status, 'failed');
+  assert.equal(seen.filter((r) => r.role === 'worker' && r.meta?.task === 'T2').length, 1);
+});
+
+test('ablate scenarios: the judge prompt carries no scenarios', async () => {
+  const store = tempRepo({ concurrency: 1 });
+  const seen: AgentRequest[] = [];
+  await runGoal({ store, runner: recording(fakeRunner(), seen), goal: 'demo goal', ablate: { scenarios: true } });
+  const judges = seen.filter((r) => r.role === 'judge');
+  assert.ok(judges.length > 0);
+  for (const j of judges) {
+    assert.match(j.prompt, /HIDDEN SCENARIOS[^\n]*\n\(none\)/);
+    assert.doesNotMatch(j.prompt, /GIVEN .* WHEN .* THEN/);
+  }
+});
+
+test('ablate learnings: planner and worker prompts carry no learnings, goal runs included', async () => {
+  const store = tempRepo({ concurrency: 1 });
+  writeLearnings(store, [{ role: 'worker', lesson: 'ABLLESSON', evidence: [{ run: 'r1' }], hits: 1 }, { role: 'planner', lesson: 'ABLPLAN', evidence: [{ run: 'r1' }], hits: 1 }], 'r1');
+  const seen: AgentRequest[] = [];
+  await runGoal({ store, runner: recording(fakeRunner(), seen), goal: 'demo goal', ablate: { learnings: true } });
+  for (const r of seen.filter((r) => r.role === 'planner' || r.role === 'worker')) assert.doesNotMatch(r.prompt, /ABLLESSON|ABLPLAN/);
+});
+
+test('ablate contrastive: repair stays single-worker even with contrastive enabled', async () => {
+  const on = tempRepo({ concurrency: 1, contrastive: { enabled: true, onlyWithoutTests: true, maxPairs: 1 } });
+  const seenOn: AgentRequest[] = [];
+  await runGoal({ store: on, runner: recording(fakeRunner(), seenOn), goal: 'demo goal' });
+  assert.ok(seenOn.some((r) => r.meta?.variant === 'a'), 'sanity: contrastive runs by default when enabled');
+  const off = tempRepo({ concurrency: 1, contrastive: { enabled: true, onlyWithoutTests: true, maxPairs: 1 } });
+  const seenOff: AgentRequest[] = [];
+  const run = await runGoal({ store: off, runner: recording(fakeRunner(), seenOff), goal: 'demo goal', ablate: { contrastive: true } });
+  assert.ok(!seenOff.some((r) => r.meta?.variant));
+  assert.equal(run.tasks.find((t) => t.id === 'T2')!.attempts, 2);
 });

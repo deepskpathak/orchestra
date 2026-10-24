@@ -1,0 +1,9 @@
+{
+  "id": "args-no-flag",
+  "fixture": "args",
+  "goal": "parseArgs in src/args.js must treat \"--no-NAME\" as NAME set to false, while \"--NAME\" stays true.",
+  "taskType": "feature",
+  "humanMinutes": 10,
+  "check": "checks/args-no-flag.mjs",
+  "oracle": "oracles/args-no-flag"
+}

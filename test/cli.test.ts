@@ -73,3 +73,21 @@ test('learnings --domain filters by domain, supports global, and rejects unknown
   assert.match(all.stdout, /CLILESSON/);
   assert.match(all.stdout, /GLOBALLESSON/);
 });
+
+test('bench flags reject a missing value or a flag-like value, and non-numeric --seed/--repeats', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const { tempRepo } = await import('./helpers.ts');
+  const cwd = tempRepo().root;
+  const cli = join(PACKAGE_ROOT, 'bin', 'orchestra.ts');
+  const cases: [string[], RegExp][] = [
+    [['bench', '--arms', '--repeats', '3'], /--arms needs a value/],
+    [['bench', '--repeats'], /--repeats needs a value/],
+    [['bench', 'calibrate', '--seed', 'abc'], /--seed must be an integer/],
+    [['bench', '--repeats', 'two'], /--repeats must be an integer/],
+  ];
+  for (const [args, msg] of cases) {
+    const r = spawnSync(process.execPath, [cli, ...args], { cwd, encoding: 'utf8', timeout: 15000 });
+    assert.notEqual(r.status, 0, args.join(' '));
+    assert.match(r.stderr, msg, args.join(' '));
+  }
+});

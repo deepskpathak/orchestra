@@ -1,0 +1,9 @@
+{
+  "id": "text-slug",
+  "fixture": "text",
+  "goal": "Add and export slugify(s) to src/text.js: lowercase, collapse runs of non-alphanumerics into a single hyphen, and trim leading and trailing hyphens.",
+  "taskType": "feature",
+  "humanMinutes": 10,
+  "check": "checks/text-slug.mjs",
+  "oracle": "oracles/text-slug.patch"
+}

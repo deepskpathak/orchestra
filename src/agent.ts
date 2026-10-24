@@ -6,6 +6,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { PACKAGE_ROOT } from './harness.ts';
+import { countToolUse } from './exploration.ts';
 import type { Role, WorkerOutcome } from './types.ts';
 
 export interface AgentRequest {
@@ -56,6 +57,7 @@ export interface AgentResult {
   durationMs: number;
   error?: string;
   usage?: Usage;
+  toolCounts?: Record<string, number>; // tool_use blocks by tool name
 }
 
 export type Runner = (req: AgentRequest) => Promise<AgentResult>;
@@ -118,6 +120,7 @@ export const claudeRunner: Runner = (req) =>
     let stderr = '';
     let lastText = '';
     let result: AgentResult | null = null;
+    const toolCounts: Record<string, number> = {};
 
     const timer = req.timeoutMs
       ? setTimeout(() => {
@@ -134,6 +137,7 @@ export const claudeRunner: Runner = (req) =>
       } catch {
         return;
       }
+      countToolUse(msg, toolCounts);
       if (msg.type === 'assistant' && Array.isArray(msg.message?.content)) {
         for (const block of msg.message.content) {
           if (block.type === 'tool_use') req.onAction?.(summarizeTool(block.name, block.input));
@@ -152,6 +156,7 @@ export const claudeRunner: Runner = (req) =>
           turns: Number(msg.num_turns ?? 0),
           durationMs: Number(msg.duration_ms ?? Date.now() - started),
           usage: parseUsage(msg),
+          toolCounts,
           error: isError ? (msg.errors?.join('; ') || msg.result || msg.subtype) : undefined,
         };
       }

@@ -5,7 +5,11 @@ import { existsSync, mkdtempSync, openSync, readFileSync, writeFileSync } from '
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { claudeRunner, preflight, type Runner } from './agent.ts';
+import { importGrades, readBenchRows, renderCalibration, storeCalibration, writeSample } from './calibration.ts';
+import { ABLATION_ARMS, SINGLE_SESSION_ARM, ablationTable, loadArms, renderAblationTable, summarize, renderSummary, runBench, verifyOracles } from './bench.ts';
 import { runGoal } from './conductor.ts';
+import { explorationMetrics, renderExploration } from './exploration.ts';
+import { collectOutcomes, renderOutcomes } from './outcomes.ts';
 import { evolutionDue, evolve, harvest, listEvals, metrics } from './evolve.ts';
 import { fakeRunner } from './fake.ts';
 import { excludeOrchestra } from './git.ts';
@@ -35,6 +39,17 @@ Usage:
                                  prints the infra failure rate of the eval replays
   orchestra learnings [--domain <slug>]
                                  Show what the factory has learned (all, or one domain; "global" for cross-domain lessons)
+  orchestra bench                Run the fixed benchmark suite: arms x goals x repeats, hidden checks, JSONL + summary
+      --arms a,b --goals g1,g2 --repeats N   Choose arms (default bench/arms.json), goals and repeats per goal
+      --suite <dir>              Use another suite directory (default: the bundled bench/)
+      --ablations                Run the built-in arms full, -scenarios, -repair, -learnings, -contrastive, -evolver plus a matched-cost single-session baseline
+      --report                   Summarise all stored bench results, with judge agreement and kappa per harness version
+      --verify-oracles           Check that every goal's oracle passes its own hidden check (exit 1 otherwise)
+  orchestra bench calibrate --sample N [--seed S]
+                                 Write a stratified sample of verdicts (near-threshold and split votes oversampled) to
+                                 .orchestra/bench/calibration/sample.jsonl for human grading
+  orchestra bench calibrate --import <file>
+                                 Import human grades (id + humanPass) and report human-judge kappa
   orchestra evals                List Factory Eval cases
   orchestra --version            Print the installed Orchestra version
   orchestra promote <vN>         Promote a harness version (also used for rollback)
@@ -277,6 +292,9 @@ function cmdStats(args: string[]): void {
   console.log(`\nFactory Eval cases: ${listEvals(store).length}   versions: ${listVersions(store).join(', ')}`);
   const rates = readArchive(store).filter((a) => a.evalInfraRate !== undefined);
   if (rates.length) console.log(`Eval infra failure rate: ${rates.map((a) => `${a.version} ${(a.evalInfraRate! * 100).toFixed(0)}%`).join('   ')}`);
+  console.log(`\n${renderOutcomes(collectOutcomes(store))}`);
+  console.log(`\n${renderExploration(explorationMetrics(store.ledgerRows()))}`);
+  console.log(`\n${renderCalibration(storeCalibration(store))}`);
 }
 
 async function cmdEvolve(): Promise<void> {
@@ -376,6 +394,73 @@ async function cmdDemo(): Promise<void> {
   await cmdRun(['Build a tiny CLI with config loading and docs']);
 }
 
+// Value of `--name value`. A present flag must be followed by a value, not by another flag or the end of argv.
+function flag(args: string[], name: string): string | undefined {
+  const i = args.indexOf(name);
+  if (i < 0) return undefined;
+  const v = args[i + 1];
+  if (v === undefined || v.startsWith('--')) die(`${name} needs a value`);
+  return v;
+}
+
+// Integer flag with a default; rejects anything that is not a whole number (Number('abc') would be NaN).
+function intFlag(args: string[], name: string, fallback: number): number {
+  const v = flag(args, name);
+  if (v === undefined) return fallback;
+  if (!/^-?\d+$/.test(v.trim())) die(`${name} must be an integer, got "${v}"`);
+  return Number(v);
+}
+
+async function cmdBench(args: string[]): Promise<void> {
+  const suite = flag(args, '--suite');
+  const goals = flag(args, '--goals')?.split(',').filter(Boolean);
+  if (args.includes('--verify-oracles')) {
+    const results = verifyOracles(suite, goals);
+    for (const r of results) console.log(`${r.ok ? 'ok  ' : 'FAIL'} ${r.goal}: ${r.detail}`);
+    const bad = results.filter((r) => !r.ok);
+    if (bad.length) die(`oracle check failed for ${bad.map((r) => r.goal).join(', ')}`);
+    if (!results.length) die('no bench goals found');
+    console.log(`\n${results.length} oracle(s) pass their hidden checks.`);
+    return;
+  }
+  if (args[0] === 'calibrate') {
+    const store = storeOrDie();
+    const imp = flag(args, '--import');
+    if (imp) {
+      if (!existsSync(imp)) die(`grades file not found: ${imp}`);
+      const r = importGrades(store, imp);
+      console.log(`imported ${r.imported} human grade(s) (${r.total} total)\n\n${renderCalibration(storeCalibration(store))}`);
+      return;
+    }
+    const size = intFlag(args, '--sample', 50);
+    if (!Number.isInteger(size) || size < 1) die('--sample must be a positive integer');
+    const seed = intFlag(args, '--seed', 1);
+    const { file, items } = writeSample(store, size, seed);
+    if (!items.length) die('no bench results yet; run `orchestra bench` first');
+    console.log(`wrote ${items.length} verdict(s) to ${file}\nSet humanPass to true or false on each line, then run: orchestra bench calibrate --import <file>`);
+    return;
+  }
+  if (args.includes('--report')) {
+    const store = storeOrDie();
+    const rows = readBenchRows(store);
+    if (rows.length) console.log(`${renderSummary(summarize(rows))}\n`);
+    // Pairs are (goal, repeat), so only the latest bench that ran a "full" arm is compared.
+    const latest = rows.filter((r) => r.arm === 'full').map((r) => r.bench).sort().pop();
+    if (latest) console.log(`Ablations in ${latest} (paired versus full, 95% CI clustered by goal)\n${renderAblationTable(ablationTable(rows.filter((r) => r.bench === latest)))}\n`);
+    console.log(renderCalibration(storeCalibration(store)));
+    return;
+  }
+  const store = storeOrDie();
+  const repeats = intFlag(args, '--repeats', 1);
+  if (!Number.isInteger(repeats) || repeats < 1) die('--repeats must be a positive integer');
+  const named = flag(args, '--arms')?.split(',').filter(Boolean);
+  const arms = args.includes('--ablations') ? [...ABLATION_ARMS, SINGLE_SESSION_ARM] : loadArms(suite, named);
+  const res = await runBench({ store, runner: runner(), suite, arms, goals, repeats, onRow: (r) => console.log(`${r.arm} ${r.goal} #${r.repeat}: ${r.checkPass ? 'pass' : 'fail'} ($${r.costUsd.toFixed(3)})`) });
+  console.log(`\n${renderSummary(res.summary)}`);
+  if (args.includes('--ablations')) console.log(`\n${renderAblationTable(ablationTable(res.rows))}`);
+  console.log(`\nresults: ${join(res.dir, 'results.jsonl')}\nsummary: ${join(res.dir, 'summary.json')}`);
+}
+
 // ---------- entry ----------
 
 export async function main(argv: string[]): Promise<void> {
@@ -407,6 +492,9 @@ export async function main(argv: string[]): Promise<void> {
       break;
     case 'learnings':
       cmdLearnings(args);
+      break;
+    case 'bench':
+      await cmdBench(args);
       break;
     case 'evals':
       cmdEvals();

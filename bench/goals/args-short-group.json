@@ -1,0 +1,9 @@
+{
+  "id": "args-short-group",
+  "fixture": "args",
+  "goal": "parseArgs in src/args.js must expand grouped short flags: \"-abc\" sets flags a, b and c to true. A lone \"-\" stays positional.",
+  "taskType": "bugfix",
+  "humanMinutes": 10,
+  "check": "checks/args-short-group.mjs",
+  "oracle": "oracles/args-short-group"
+}

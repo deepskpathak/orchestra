@@ -1,0 +1,9 @@
+{
+  "id": "calc-mul",
+  "fixture": "calc",
+  "goal": "Add and export a mul(a, b) function to src/calc.js that returns a times b.",
+  "taskType": "feature",
+  "humanMinutes": 5,
+  "check": "checks/calc-mul.mjs",
+  "oracle": "oracles/calc-mul"
+}

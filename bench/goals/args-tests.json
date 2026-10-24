@@ -1,0 +1,9 @@
+{
+  "id": "args-tests",
+  "fixture": "args",
+  "goal": "Write test/args.test.js using node:test and node:assert covering parseArgs: long flags, --name=value, short flags and positionals (at least four tests). The tests must pass and must catch a wrong implementation.",
+  "taskType": "test",
+  "humanMinutes": 20,
+  "check": "checks/args-tests.mjs",
+  "oracle": "oracles/args-tests"
+}

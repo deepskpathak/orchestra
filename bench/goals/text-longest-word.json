@@ -1,0 +1,9 @@
+{
+  "id": "text-longest-word",
+  "fixture": "text",
+  "goal": "longestWord in src/words.js returns the last of several equally long words. It must return the earliest one, and must ignore extra whitespace.",
+  "taskType": "bugfix",
+  "humanMinutes": 8,
+  "check": "checks/text-longest-word.mjs",
+  "oracle": "oracles/text-longest-word"
+}

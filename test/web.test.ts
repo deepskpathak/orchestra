@@ -107,3 +107,9 @@ test('info exposes harness retry and pass limits', async () => {
     await web.close();
   }
 });
+
+test('page poll refreshes state.info so outcome stats follow the repo, and tolerates missing info', async () => {
+  const { PAGE } = await import('../src/web/page.ts');
+  assert.match(PAGE, /get\('\/api\/info'\)\.then\(function \(i\) \{[\s\S]*?state\.info = i;/);
+  assert.match(PAGE, /outcomeStats\(\(state\.info \|\| \{\}\)\.outcomes\)/);
+});

@@ -1,0 +1,9 @@
+{
+  "id": "calc-mean",
+  "fixture": "calc",
+  "goal": "Add and export mean(xs) to src/calc.js returning the arithmetic mean of an array of numbers. It must throw a RangeError for an empty array.",
+  "taskType": "feature",
+  "humanMinutes": 8,
+  "check": "checks/calc-mean.mjs",
+  "oracle": "oracles/calc-mean"
+}

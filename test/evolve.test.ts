@@ -483,3 +483,33 @@ test('scorer prompt keeps test-file diffs when a large src diff would exhaust th
   const p = scorerPrompt(loadScorer(), { goal: 'g', diff: 'd', checkPassed: null, integrityFlags: ['weakened-test in test/a.test.ts (1 assertion line(s) removed)'], cwd: '.' });
   assert.match(p, /INTEGRITY MONITOR FLAGS[\s\S]*weakened-test/);
 });
+
+test('harvest fills source and taskType so paired statistics can cluster and group', async () => {
+  const store = tempRepo();
+  const runner = fakeRunner();
+  const a = harvest(store, await runGoal({ store, runner, goal: 'Build it' }))!;
+  const b = harvest(store, await runGoal({ store, runner, goal: '  build   IT ' }))!;
+  assert.ok(a.source && a.source === b.source, 'same goal text shares a cluster');
+  assert.notEqual(a.id, b.id);
+  assert.ok(a.taskType && a.taskType.length > 0);
+  const run = await runGoal({ store, runner, goal: 'other thing' });
+  const c = harvest(store, { ...run, domain: 'cli' })!;
+  assert.equal(c.taskType, 'cli');
+  assert.notEqual(c.source, a.source);
+  assert.equal(listEvals(store).find((x) => x.id === c.id)?.source, c.source); // persisted
+});
+
+test('a single source goal gives no CI instead of Infinity, in the decision and its JSON', () => {
+  const one = (rule: 'gain' | 'paired') => promotionDecision({
+    incumbentScores: [0, 0, 0], candidateScores: [1, 1, 1], sources: ['g', 'g', 'g'], regressions: [], minGain: 0.02, minCases: 1, rule,
+  });
+  for (const rule of ['gain', 'paired'] as const) {
+    const d = one(rule);
+    assert.equal(d.ci, undefined);
+    assert.doesNotMatch(d.reason, /Infinity/);
+    assert.match(d.reason, /CI n\/a|not estimable/);
+    assert.ok(!JSON.stringify(d).includes('null'));
+  }
+  const two = promotionDecision({ incumbentScores: [0, 0.5], candidateScores: [1, 1], sources: ['a', 'b'], regressions: [], minGain: 0.02, minCases: 1 });
+  assert.ok(two.ci && Number.isFinite(two.ci[0]) && Number.isFinite(two.ci[1]));
+});

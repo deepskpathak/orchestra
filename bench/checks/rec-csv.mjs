@@ -1,0 +1,14 @@
+import assert from 'node:assert/strict';
+import { pathToFileURL } from 'node:url';
+const m = await import(pathToFileURL(`${process.cwd()}/src/csv.js`).href);
+assert.deepEqual(m.parseCsv('name,age\nAda,36\nBob,41\n'), [{ name: 'Ada', age: '36' }, { name: 'Bob', age: '41' }]);
+assert.deepEqual(m.parseCsv('a,b\n"x, y","say ""hi"""\n'), [{ a: 'x, y', b: 'say "hi"' }]);
+assert.deepEqual(m.parseCsv('a,b\r\n"l1\nl2",z\r\n'), [{ a: 'l1\nl2', b: 'z' }]);
+assert.deepEqual(m.parseCsv('a,b\n1,2'), [{ a: '1', b: '2' }]);
+assert.deepEqual(m.parseCsv(''), []);
+assert.equal(m.stringifyCsv([{ a: 'x, y', b: 'say "hi"' }]), 'a,b\n"x, y","say ""hi"""\n');
+assert.equal(m.stringifyCsv([{ a: 1, b: 2 }, { a: 3, b: 4 }]), 'a,b\n1,2\n3,4\n');
+assert.equal(m.stringifyCsv([{ a: 1, b: 2 }], ['b']), 'b\n2\n');
+assert.equal(m.stringifyCsv([]), '');
+const rows = [{ a: 'l1\nl2', b: 'q"' }, { a: '', b: 'plain' }];
+assert.deepEqual(m.parseCsv(m.stringifyCsv(rows)), rows);

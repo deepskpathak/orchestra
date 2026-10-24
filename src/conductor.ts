@@ -6,11 +6,19 @@ import { join } from 'node:path';
 import { extractJson, parseWorkerOutcome, type AgentRequest, type AgentResult, type Runner } from './agent.ts';
 import * as g from './git.ts';
 import { alternateWorkerSection, comparePrompt, COMPARE_SCHEMA, contrastApplies, resolveContrast } from './contrast.ts';
+import { plannedFiles } from './exploration.ts';
 import { analyzeDiff, MONITOR_MARK, type IntegrityFlag } from './integrity.ts';
 import { loadHarness, type Harness } from './harness.ts';
 import { formatLearnings, listDomains, normalizeDomain, readAllLearnings, readLearnings, writeLearnings, GLOBAL, type Lesson } from './learnings.ts';
 import { newRunId, type Store } from './store.ts';
 import type { ActiveAgent, CriterionResult, OrchestraEvent, Role, Run, Scenario, Task, Verdict } from './types.ts';
+
+export interface Ablation {
+  scenarios?: boolean; // the judge and contrast comparer see no hidden scenarios
+  repair?: boolean; // one attempt per task, no repair loop
+  learnings?: boolean; // planner and workers get no learnings
+  contrastive?: boolean; // never run contrastive repair
+}
 
 export interface ConductorOptions {
   store: Store;
@@ -19,6 +27,8 @@ export interface ConductorOptions {
   harnessVersion?: string;
   baseRef?: string; // eval runs pin the starting commit
   kind?: 'goal' | 'eval';
+  // Opt-in ablation: turn one component off. Unset keeps the normal behaviour.
+  ablate?: Ablation;
   onUpdate?: (run: Run) => void;
 }
 
@@ -298,6 +308,7 @@ export class Conductor {
   private readonly harness: Harness;
   private readonly onUpdate?: (run: Run) => void;
   private scenarios: Scenario[] = [];
+  private ablate: Ablation;
   private integration!: { path: string; branch: string; base: string };
   private mergeChain: Promise<unknown> = Promise.resolve();
   private readonly wtRoot: string;
@@ -307,6 +318,7 @@ export class Conductor {
     this.runner = opts.runner;
     this.harness = loadHarness(opts.store, opts.harnessVersion);
     this.onUpdate = opts.onUpdate;
+    this.ablate = opts.ablate ?? {};
     this.wtRoot = opts.store.path('worktrees');
     const id = (opts.kind === 'eval' ? 'e' : '') + newRunId();
     this.run = {
@@ -381,7 +393,7 @@ export class Conductor {
     // Eval replays are clean-room: they never read the learnings store, so the lessons a harness
     // accumulated on past goals cannot leak into the comparison.
     const isEval = run.kind === 'eval';
-    const learnings = isEval ? {} : readAllLearnings(store);
+    const learnings = isEval || this.ablate.learnings ? {} : readAllLearnings(store);
     const cfg = store.config();
     const files = g.trackedFiles(this.integration.path);
     const fp = fastPathDecision(run.goal, cfg.fastPath);
@@ -409,7 +421,7 @@ export class Conductor {
     const domain = normalizeDomain(out.domain);
     if (domain && domain !== GLOBAL) run.domain = domain;
     else if (out.domain !== undefined && out.domain !== '') this.emit('log', `Ignoring invalid planner domain: ${JSON.stringify(out.domain)}`);
-    this.scenarios = out.scenarios ?? [];
+    this.scenarios = this.ablate.scenarios ? [] : (out.scenarios ?? []);
     // Holdout: only the judge ever receives these. .orchestra is outside every worktree.
     store.writeJson(`holdout/${run.id}.json`, this.scenarios);
     if (fp.fast) this.emit('log', `Fast path: ${fp.reason}`);
@@ -466,7 +478,7 @@ export class Conductor {
     this.emit('task.start', `${task.id} attempt ${task.attempts}: ${task.title}`, undefined, task.id);
     this.save();
 
-    const learnings = this.run.kind === 'eval' ? {} : readAllLearnings(store);
+    const learnings = this.run.kind === 'eval' || this.ablate.learnings ? {} : readAllLearnings(store);
     const others = this.run.tasks.filter((t) => t.id !== task.id).map((t) => `- ${t.id} ${t.title} [${t.status}]`);
     const prompt = joinPrompt(
       workerPrompt({
@@ -481,7 +493,7 @@ export class Conductor {
       }),
     );
 
-    if (contrastApplies(cfg, task)) return this.attemptContrast(task, wt, base, prompt);
+    if (!this.ablate.contrastive && contrastApplies(cfg, task)) return this.attemptContrast(task, wt, base, prompt);
 
     const work = await this.call('worker', task, task.attempts, {
       prompt,
@@ -786,6 +798,7 @@ export class Conductor {
     const cfg = this.store.config();
     const ip = this.integration.path;
     const before = g.head(ip);
+    const footprint = this.footprint(task);
     const m = g.merge(ip, task.branch!, `Merge ${task.id}: ${task.title}`);
     if (!m.ok) {
       this.ledgerOutcome(task, 'conflict');
@@ -802,13 +815,25 @@ export class Conductor {
     }
     task.status = 'merged';
     task.endedAt = Date.now();
-    this.ledgerOutcome(task, 'merged');
+    this.ledgerOutcome(task, 'merged', footprint);
     this.emit('task.merged', `${task.id} merged (attempt ${task.attempts})`, undefined, task.id);
     this.save();
   }
 
+  // Passive: planned files are repo paths named in the task text; changed files come from the task branch diff.
+  private footprint(task: Task): { planned: string[]; changed: string[] } | undefined {
+    try {
+      const planned = plannedFiles([task.title, task.description, ...task.acceptance].join('\n'), g.trackedFiles(this.integration.path, 100_000));
+      const changed = g.changedFiles(task.worktree!, g.mergeBase(task.worktree!, 'HEAD', this.integration.branch));
+      return { planned, changed };
+    } catch (e) {
+      this.emit('log', `${task.id} footprint unavailable: ${(e as Error).message.split('\n')[0]}`, undefined, task.id);
+      return undefined;
+    }
+  }
+
   private repairOrFail(task: Task, issues: string[]): void {
-    if (task.attempts >= this.harness.config.maxAttempts) {
+    if (task.attempts >= (this.ablate.repair ? 1 : this.harness.config.maxAttempts)) {
       this.fail(task, `out of attempts (${task.attempts}). Last issues: ${issues.join(' | ').slice(0, 300)}`);
       return;
     }
@@ -961,13 +986,14 @@ export class Conductor {
       outputTokens: res.usage?.outputTokens,
       cacheReadTokens: res.usage?.cacheReadTokens,
       cacheWriteTokens: res.usage?.cacheWriteTokens,
+      toolCounts: res.toolCounts,
     });
     this.emit('agent.end', `${role}${task ? ` ${task.id}` : ''} ${res.ok ? 'finished' : `error: ${res.error}`} ($${res.costUsd.toFixed(2)}, ${Math.round(res.durationMs / 1000)}s)`, undefined, task?.id, role);
     this.save();
     return res;
   }
 
-  private ledgerOutcome(task: Task, outcome: string): void {
+  private ledgerOutcome(task: Task, outcome: string, footprint?: { planned: string[]; changed: string[] }): void {
     this.store.ledger({
       t: Date.now(),
       run: this.run.id,
@@ -983,6 +1009,7 @@ export class Conductor {
       turns: 0,
       outcome,
       score: task.verdict?.judgeError ? undefined : task.verdict?.score,
+      ...(footprint ? { footprint } : {}),
     });
   }
 

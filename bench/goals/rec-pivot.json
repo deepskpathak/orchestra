@@ -1,0 +1,9 @@
+{
+  "id": "rec-pivot",
+  "fixture": "records",
+  "goal": "Add and export pivot(rows, rowKey, colKey, valueKey) to src/records.js. It returns an object keyed by each row's rowKey value, whose value is an object mapping each colKey value to the valueKey value. If a cell appears twice the later row wins.",
+  "taskType": "feature",
+  "humanMinutes": 25,
+  "check": "checks/rec-pivot.mjs",
+  "oracle": "oracles/rec-pivot"
+}

@@ -1,0 +1,9 @@
+{
+  "id": "text-tokenize-refactor",
+  "fixture": "text",
+  "goal": "Refactor src/words.js: extract the splitting logic that countWords and longestWord both do into an exported tokenize(s) that returns the non-empty whitespace-separated words, and make both functions use it. Their results for ordinary input must not change.",
+  "taskType": "refactor",
+  "humanMinutes": 15,
+  "check": "checks/text-tokenize-refactor.mjs",
+  "oracle": "oracles/text-tokenize-refactor"
+}

@@ -148,6 +148,8 @@ export interface LedgerRow {
   outputTokens?: number;
   cacheReadTokens?: number;
   cacheWriteTokens?: number;
+  toolCounts?: Record<string, number>; // tool_use blocks by tool name; absent on legacy rows
+  footprint?: { planned: string[]; changed: string[] }; // on merged outcome rows: planned vs changed files
   outcome?: string; // e.g. "pass", "fail", "merged", "conflict"
   score?: number;
 }
@@ -194,5 +196,8 @@ export interface ProjectConfig {
     sample: number; // eval cases per evaluation, newest first; bounds cost
     minCases: number; // refuse to promote when fewer eval cases were evaluated
     candidates: number; // variants proposed per cycle; 1 = classic single-variant loop
+    promotionRule: 'gain' | 'paired'; // 'gain' = gain above max(minGain, spread); 'paired' = 95% CI lower bound above zero
+    niMargin: number; // paired rule: a task type whose mean delta is below -niMargin vetoes promotion
+    minJudgeAgreement?: number | null; // refuse to evolve when the incumbent's judge/hidden-check agreement is below this; null = off
   };
 }
