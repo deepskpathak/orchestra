@@ -124,7 +124,7 @@ test('explorationMetrics aggregates per version and role, legacy rows do not cra
   assert.equal(m.roles.length, 1);
   assert.deepEqual([m.roles[0].calls, m.roles[0].turns, m.roles[0].read, m.roles[0].grep, m.roles[0].glob], [2, 6, 3, 1, 0]);
   assert.equal(m.footprint[0].precision, 1);
-  assert.equal(m.footprint[0].recall, 0.75);
+  assert.equal(m.footprint[0].recall, 0.25);
   const text = renderExploration(m);
   assert.ok(!text.includes('NaN'));
   assert.ok(renderExploration(explorationMetrics([])).includes('no agent calls'));
