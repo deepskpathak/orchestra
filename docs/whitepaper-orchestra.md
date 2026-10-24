@@ -204,7 +204,6 @@ We propose, but have not run, the following protocol. Each step uses existing co
 - **Eval is local.** Factory Eval cases come from the user's own successful goals, so they cover only past work types.
 - **Contrastive repair is narrow.** It applies only on repair attempts, by default only without a test command, and one pair per task by default.
 - **Platform coupling.** Real runs need Claude Code with headless auth. Model tiers map through a capability table (`src/models.ts`), but the only provider shipped is Anthropic (`DEFAULT_PROVIDER`).
-- **Release metadata.** `README.md` Status says "Version 0.1" while `package.json` and `CHANGELOG.md` describe 0.6.0. We follow the latter.
 
 ## 9 Threats to validity
 

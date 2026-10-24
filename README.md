@@ -116,4 +116,4 @@ Inside Claude Code, the plugin adds `/orchestra:setup`, `/orchestra:run`, `/orch
 
 ## Status
 
-Version 0.1. The test suite runs against the simulator (`npm test`). Workers share one machine, with no containers yet. Evolution reruns past goals, so it costs roughly `sample × 2` runs; tune `evolve.sample`, `evolve.every` and `evolve.candidates` in the config.
+The current version is in `package.json`. The test suite runs against the simulator (`npm test`). Workers share one machine, with no containers yet. Evolution reruns past goals, so it costs roughly `sample × 2` runs; tune `evolve.sample`, `evolve.every` and `evolve.candidates` in the config.

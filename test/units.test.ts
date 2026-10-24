@@ -125,3 +125,28 @@ test('stats cache hit ratio: computed from usage, n/a for legacy rows', () => {
   assert.match(out, /cache hit ratio\s+v1 n\/a/);
   assert.doesNotMatch(out, /NaN/);
 });
+
+// Returns the semver-like versions a README claims as "Version X.Y[.Z]".
+function readmeVersions(text: string): string[] {
+  return [...text.matchAll(/\bVersion\s+v?(\d+\.\d+(?:\.\d+)?)/gi)].map((m) => m[1]);
+}
+
+// Claimed versions that differ from the package version (exact match required).
+function staleReadmeVersions(readme: string, pkgVersion: string): string[] {
+  return readmeVersions(readme).filter((v) => v !== pkgVersion);
+}
+
+test('README version claims match package.json', () => {
+  const pkg = JSON.parse(readFileSync(join(import.meta.dirname, '..', 'package.json'), 'utf8'));
+  const readme = readFileSync(join(import.meta.dirname, '..', 'README.md'), 'utf8');
+  assert.deepEqual(staleReadmeVersions(readme, pkg.version), []);
+});
+
+test('staleReadmeVersions flags mismatched README versions', () => {
+  assert.deepEqual(staleReadmeVersions('Status\n\nVersion 0.1. Tests.', '0.6.1'), ['0.1']);
+  assert.deepEqual(staleReadmeVersions('Version 0.6.0', '0.6.1'), ['0.6.0']);
+  // A partial X.Y claim is not accepted as equal to X.Y.Z.
+  assert.deepEqual(staleReadmeVersions('Version 0.6', '0.6.1'), ['0.6']);
+  assert.deepEqual(staleReadmeVersions('Version 0.6.1', '0.6.1'), []);
+  assert.deepEqual(staleReadmeVersions('No version stated', '0.6.1'), []);
+});
