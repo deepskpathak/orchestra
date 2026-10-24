@@ -67,6 +67,13 @@ export function fakeRunner(opts: { stepMs?: number; failFirstAttemptOf?: string[
         return done(undefined, `Implemented ${task}`, 0.2);
       }
       case 'judge': {
+        if (req.prompt.startsWith('FROZEN SCORER REPLAY')) {
+          // Frozen scorer: judges the diff, never the replay's self-reported satisfaction.
+          await act('says: scoring replay');
+          const careful = /edge-cases-covered/.test(req.prompt);
+          const empty = /DIFF:\n\(empty\)/.test(req.prompt);
+          return done(empty ? { pass: false, score: 0.2, summary: 'No change' } : { pass: true, score: careful ? 0.95 : 0.85, summary: 'Meets goal' }, 'scored', 0.04);
+        }
         if (judgeFailsLeft > 0) {
           judgeFailsLeft -= 1;
           return { ok: false, text: '', error: 'simulated judge crash', costUsd: 0.01, turns: 1, durationMs: step, usage: { inputTokens: 300, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 } };
