@@ -138,3 +138,49 @@ export function trackedFiles(root: string, limit = 300): string[] {
   const all = git(root, 'ls-files').split('\n').filter(Boolean);
   return all.slice(0, limit);
 }
+
+// Blob paths at `ref` (the committed tree, not the working copy), unlimited. Submodules and
+// symlinks are skipped.
+export function filesAtRef(root: string, ref: string): string[] {
+  const out = execFileSync('git', ['ls-tree', '-r', '-z', ref], { cwd: root, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
+  const files: string[] = [];
+  for (const rec of out.split('\0')) {
+    const tab = rec.indexOf('\t');
+    if (tab < 0) continue;
+    const [mode, type] = rec.slice(0, tab).split(' ');
+    if (type === 'blob' && mode !== '120000') files.push(rec.slice(tab + 1));
+  }
+  return files;
+}
+
+// Paths that differ between two commits (added, modified and deleted; renames reported as both sides).
+export function diffNamesBetween(root: string, a: string, b: string): string[] {
+  const out = execFileSync('git', ['diff', '--name-only', '--no-renames', '-z', a, b], { cwd: root, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
+  return out.split('\0').filter(Boolean);
+}
+
+export function commitExists(root: string, ref: string): boolean {
+  return tryGit(root, 'cat-file', '-e', `${ref}^{commit}`).ok;
+}
+
+// Reads many blobs at `ref` in one `git cat-file --batch` process. Missing paths map to null.
+export function readBlobsAtRef(root: string, ref: string, paths: string[]): Map<string, Buffer | null> {
+  const res = new Map<string, Buffer | null>();
+  if (!paths.length) return res;
+  const buf = execFileSync('git', ['cat-file', '--batch'], { cwd: root, input: paths.map((p) => `${ref}:${p}\n`).join(''), maxBuffer: 1024 * 1024 * 1024 });
+  let pos = 0;
+  for (const p of paths) {
+    const nl = buf.indexOf(10, pos);
+    const header = buf.subarray(pos, nl).toString('utf8');
+    pos = nl + 1;
+    const m = /^\S+ blob (\d+)$/.exec(header);
+    if (!m) {
+      res.set(p, null);
+      continue;
+    }
+    const size = Number(m[1]);
+    res.set(p, buf.subarray(pos, pos + size));
+    pos += size + 1;
+  }
+  return res;
+}
