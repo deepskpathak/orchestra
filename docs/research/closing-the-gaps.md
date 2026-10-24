@@ -288,7 +288,7 @@ Each workstream lists its items and the evidence for each. Code locations are cu
 
 | Whitepaper limitation or threat | Workstream |
 |---|---|
-| Candidate judge scores its own eval (new) | W1 |
+| Candidate judge scores its own eval (new) | W1 (addressed in M1) |
 | No empirical results | W2 |
 | Judge is an LLM; judge and evolver share a model family | W1, W4 |
 | Small, noisy eval sets; single replays | W2, W3 |
@@ -303,31 +303,35 @@ Each workstream lists its items and the evidence for each. Code locations are cu
 
 ### W0. Hygiene
 
-- **W0.1:** Make README's Status section match `package.json` and drop the matching bullet from whitepaper section 8. Add a test that the README does not state a version that differs from `package.json`.
+Status: done (M1).
+
+- **W0.1 (done):** Make README's Status section match `package.json` and drop the matching bullet from whitepaper section 8. Add a test that the README does not state a version that differs from `package.json`.
 
 ### W1. Integrity of grading (P1)
 
-- **W1.1 Frozen promotion scorer.**
+Status: W1.1 to W1.5 done (M1).
+
+- **W1.1 Frozen promotion scorer.** (done)
   - Add a pinned `scorer/` directory outside `EVOLVABLE_FILES`, with its own judge prompt, checklist, model and version.
   - `evaluate()` in `src/evolve.ts` scores eval runs with this scorer plus the case's `check`, not with run satisfaction.
   - The candidate's own judge still runs and its text can feed repair, but it has no say in promotion.
   - The guard already blocks writes to the harness. Extend it to the scorer, and leave the scorer out of the evolver's prompt.
   - Evidence: [37][34][27][28].
-- **W1.2 Lock the grading surface for workers.**
+- **W1.2 Lock the grading surface for workers.** (done)
   - Flag any diff that edits test files, scenario files, CI config or the scorer.
   - Re-run grading with the original tests restored.
   - Treat a weakened test (deleted assertions, skipped tests) as an automatic repair note.
   - Evidence: [32][33][58].
-- **W1.3 Hand the task to a human instead of cheating.**
+- **W1.3 Hand the task to a human instead of cheating.** (done)
   - Give workers an explicit `flag_for_human` outcome, used when the spec and tests contradict each other.
   - The repair loop counts it as a stop condition, not a failure, so repeated failures do not push workers toward cheating.
   - Evidence: [32].
-- **W1.4 Separate reward-hack monitor.**
+- **W1.4 Separate reward-hack monitor.** (done)
   - A dedicated check on every diff looks for test edits, special-casing on inputs, `exit`-style early success and monkey-patching.
   - Track how often it fires per harness version, and block promotion if the rate rises.
   - The evolver never sees it or optimizes against it.
   - Evidence: [33][34][35].
-- **W1.5 Clean-room eval trials.**
+- **W1.5 Clean-room eval trials.** (done)
   - Each eval replay runs in a fresh worktree from the case's base commit, with no git history, lessons or caches from other trials.
   - Candidate and incumbent replays are interleaved on the same machine.
   - Infrastructure failures are already treated as inconclusive. Report their rate.
@@ -486,7 +490,7 @@ Each workstream lists its items and the evidence for each. Code locations are cu
 
 | Milestone | Contents | Why this order |
 |---|---|---|
-| M1 Integrity | W0, W1.1 to W1.5 | Cheap. Closes the self-graded eval gap before any more evolution runs. |
+| M1 Integrity (done) | W0, W1.1 to W1.5 | Cheap. Closes the self-graded eval gap before any more evolution runs. |
 | M2 Measurement | W2.1 to W2.6 | Every later claim needs the bench, paired statistics and calibration. |
 | M3 Evolution | W3.1 to W3.7 | Needs the M2 bench cases and statistics for its splits, stopping rules and holdout. |
 | M4 Verification | W4.1 to W4.5 | Needs the M2 calibration to show each new check adds agreement with ground truth. |
