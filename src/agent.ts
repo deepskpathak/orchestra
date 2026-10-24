@@ -3,11 +3,26 @@
 // all state lives in git and .orchestra, never in a long conversation.
 
 import { spawn, spawnSync } from 'node:child_process';
-import { appendFileSync, mkdirSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { appendFileSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { PACKAGE_ROOT } from './harness.ts';
 import { countToolUse } from './exploration.ts';
+import { containerEnvNames, dockerArgs, hostUser, DEFAULT_IMAGE } from './container.ts';
+import { claudeSandboxSettings, srtArgs, srtSandboxSettings, type SandboxPolicy } from './sandbox.ts';
 import type { Role, WorkerOutcome } from './types.ts';
+
+// Opt-in OS sandbox for one agent call. 'srt' wraps the claude command and reads a settings file we
+// write outside the worker-writable tree (settingsDir); 'claude' passes the sandbox block inline in
+// --settings. Nothing is written into the worktree, so the worker cannot persist settings across
+// calls and a judge session in the same worktree does not auto-load the worker sandbox.
+export interface AgentSandbox {
+  policy: SandboxPolicy;
+  backend: 'srt' | 'claude' | 'docker';
+  docker?: { image?: string; gvisor?: boolean; network?: string }; // docker backend only
+  settingsDir?: string; // srt only: a directory the worker cannot write to; defaults to a fresh temp dir
+}
 
 export interface AgentRequest {
   role: Role;
@@ -25,6 +40,8 @@ export interface AgentRequest {
   timeoutMs?: number;
   meta?: { task?: string; attempt?: number; run?: string; variant?: 'a' | 'b' };
   onAction?: (action: string) => void;
+  sandbox?: AgentSandbox; // absent: spawn exactly as before
+  env?: Record<string, string | undefined>; // absent: process.env
 }
 
 export interface Usage {
@@ -63,12 +80,15 @@ export interface AgentResult {
 export type Runner = (req: AgentRequest) => Promise<AgentResult>;
 
 // Guard hook injected into every agent session. Blocks holdout access, network, pushes.
-function guardSettings(): string {
+// For the claude backend the sandbox block rides in the same inline --settings JSON, built fresh from
+// the policy on every call (nothing is read back from the worktree).
+function guardSettings(sandbox?: AgentSandbox): string {
   const cmd = `node "${join(PACKAGE_ROOT, 'bin', 'orchestra.ts')}" guard`;
   return JSON.stringify({
     hooks: {
       PreToolUse: [{ matcher: '*', hooks: [{ type: 'command', command: cmd, timeout: 10 }] }],
     },
+    ...(sandbox?.backend === 'claude' ? claudeSandboxSettings(sandbox.policy) : {}),
   });
 }
 
@@ -90,7 +110,7 @@ export function buildArgs(req: AgentRequest): string[] {
     '--setting-sources',
     'project,local',
     '--settings',
-    guardSettings(),
+    guardSettings(req.sandbox),
     // Nobody is watching a worker; anything that would prompt is denied instead of hanging.
     '--permission-prompts',
     'none',
@@ -104,6 +124,42 @@ export function buildArgs(req: AgentRequest): string[] {
   return args;
 }
 
+// Fresh srt settings file from the policy, outside the worktree. Never merged with existing content.
+export function writeSrtSettings(cwd: string, policy: SandboxPolicy, settingsDir?: string): string {
+  const dir = settingsDir ?? mkdtempSync(join(tmpdir(), 'orchestra-srt-'));
+  mkdirSync(dir, { recursive: true });
+  const file = join(dir, `srt-${createHash('sha1').update(cwd).digest('hex').slice(0, 12)}.json`);
+  writeFileSync(file, JSON.stringify(srtSandboxSettings(policy), null, 2) + '\n');
+  return file;
+}
+
+export type SpawnFn = typeof spawn;
+
+// The command and args to spawn for a request. Without a sandbox this is plain `claude`.
+export function buildCommand(req: AgentRequest): { command: string; args: string[] } {
+  const args = buildArgs(req);
+  if (req.sandbox?.backend === 'docker') {
+    const { policy, docker } = req.sandbox;
+    const [command, ...rest] = dockerArgs({
+      worktree: req.cwd,
+      tmpDir: policy.write.allow[1],
+      image: docker?.image ?? DEFAULT_IMAGE,
+      envNames: containerEnvNames(req.env ?? {}),
+      gitCommonDir: policy.gitCommonDir,
+      gvisor: docker?.gvisor,
+      network: docker?.network,
+      user: hostUser(),
+    });
+    return { command, args: [...rest, 'claude', ...args] };
+  }
+  if (req.sandbox?.backend === 'srt') {
+    const settings = writeSrtSettings(req.cwd, req.sandbox.policy, req.sandbox.settingsDir);
+    const [command, ...rest] = srtArgs(req.sandbox.policy, settings, 'claude', args);
+    return { command, args: rest };
+  }
+  return { command: 'claude', args };
+}
+
 export function summarizeTool(name: string, input: Record<string, unknown> | undefined): string {
   const i = input ?? {};
   const pick = (i.file_path ?? i.path ?? i.pattern ?? i.command ?? i.description ?? '') as string;
@@ -111,10 +167,11 @@ export function summarizeTool(name: string, input: Record<string, unknown> | und
   return short ? `${name} ${short}` : name;
 }
 
-export const claudeRunner: Runner = (req) =>
+export const makeClaudeRunner = (spawnFn: SpawnFn = spawn): Runner => (req) =>
   new Promise((resolve) => {
     const started = Date.now();
-    const child = spawn('claude', buildArgs(req), { cwd: req.cwd, stdio: ['ignore', 'pipe', 'pipe'], env: process.env });
+    const { command, args } = buildCommand(req);
+    const child = spawnFn(command, args, { cwd: req.cwd, stdio: ['ignore', 'pipe', 'pipe'], env: req.env ?? process.env });
     if (req.logFile) mkdirSync(dirname(req.logFile), { recursive: true });
     let buf = '';
     let stderr = '';
@@ -175,7 +232,7 @@ export const claudeRunner: Runner = (req) =>
     });
     child.on('error', (err) => {
       if (timer) clearTimeout(timer);
-      resolve({ ok: false, text: '', costUsd: 0, turns: 0, durationMs: Date.now() - started, error: `spawn claude failed: ${err.message}` });
+      resolve({ ok: false, text: '', costUsd: 0, turns: 0, durationMs: Date.now() - started, error: `spawn ${command} failed: ${err.message}` });
     });
     child.on('close', (code) => {
       if (timer) clearTimeout(timer);
@@ -191,6 +248,8 @@ export const claudeRunner: Runner = (req) =>
       });
     });
   });
+
+export const claudeRunner: Runner = makeClaudeRunner();
 
 // Structured output fallback: if the schema path did not populate, try the last JSON object in text.
 export function extractJson(res: AgentResult): unknown {

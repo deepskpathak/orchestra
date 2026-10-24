@@ -48,7 +48,25 @@ Workers run with their worktree as the working directory, so parallel tasks cann
 
 The planner returns scenarios in given/when/then form alongside the tasks. The conductor writes them to `holdout/<run>.json` under `.orchestra/`, outside every worktree. Workers are never given them. Only the judge prompt includes them, and the judge is told to assess just the parts a given task is responsible for.
 
-This is enforced in code, not only by prompt: the guard hook in `src/guard.ts` is injected into every agent session and denies any tool call whose input mentions the holdout directory. It also blocks writes to the harness, evals and archive, network commands, `git push`, `npm publish` and common secret files.
+This is enforced in code, not only by prompt. The OS sandbox (when enabled) denies reads of the holdout directory, and the guard hook in `src/guard.ts` is injected into every agent session as a backstop that denies any tool call whose input mentions it. It also blocks writes to the harness, evals and archive, network commands, `git push`, `npm publish` and common secret files.
+
+## Boundary model: OS sandbox first, guard hook as backstop
+
+The real isolation boundary is OS-level confinement, which is opt-in: `--sandbox auto|srt|claude` (or `--unattended`) wraps each worker with `srt`, or with Claude Code `sandbox` settings backed by `bwrap` + `socat` (Linux) or `sandbox-exec` (macOS), and `--sandbox docker` runs workers in a container (`--network=none`, optionally gVisor). The sandbox allow-lists writes (worktree and temp), denies reads of credential directories, `.env*` and the holdout, and limits the network to the model API plus `sandbox.allowedHosts`.
+
+The `src/guard.ts` PreToolUse hook is **defence in depth**, a deny-list backstop that stays on. It matches command text and paths, so `python`, `node`, git remotes or DNS can bypass it. Do not treat it as isolation.
+
+Around the sandbox:
+
+- **Pre-flight self-test.** Before the first agent call the conductor checks, inside the same wrapper, that a blocked host and a denied path really fail. If either probe succeeds, the run aborts.
+- **Env scrubbing.** Git-hosting, registry and cloud credentials are removed from the agent environment.
+- **Read-only git hooks and config.** `.git/hooks` and `.git/config` are read-only to workers.
+- **Orchestrator-only publishing.** Commit, merge, push and PR creation stay in the orchestrator; workers do not publish.
+- **`--unattended` refuses to start** (exit 1, before any agent call) when no backend is found.
+- **Detect and degrade.** Missing `srt`, `bwrap`, `socat`, `sandbox-exec` or `docker` is detected, not assumed. Without a backend, attended runs continue unsandboxed and rely on the hook alone.
+- **Caveats.** `srt` is a research preview. Setup varies by OS; on Linux, `bwrap` needs unprivileged user namespaces, which some distributions disable.
+
+See [isolation.md](isolation.md) for the docker backend and the pre-flight details.
 
 ## The attempt and retry loop
 

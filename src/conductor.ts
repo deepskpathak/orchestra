@@ -2,7 +2,9 @@
 // plan -> parallel workers in worktrees -> tests + judge -> repair or merge queue -> learn.
 // Planners never code, workers never judge, judges never edit (role separation).
 
-import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { homedir, tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import { extractJson, parseWorkerOutcome, type AgentRequest, type AgentResult, type Runner } from './agent.ts';
 import * as g from './git.ts';
 import { alternateWorkerSection, comparePrompt, COMPARE_SCHEMA, contrastApplies, resolveContrast } from './contrast.ts';
@@ -10,6 +12,7 @@ import { plannedFiles } from './exploration.ts';
 import { analyzeDiff, MONITOR_MARK, type IntegrityFlag } from './integrity.ts';
 import { loadHarness, type Harness } from './harness.ts';
 import { formatLearnings, listDomains, normalizeDomain, readAllLearnings, readLearnings, writeLearnings, GLOBAL, type Lesson } from './learnings.ts';
+import { buildSandboxPolicy, preflightSandbox, scrubWorkerEnv, type ProbeExec } from './sandbox.ts';
 import { newRunId, type Store } from './store.ts';
 import type { ActiveAgent, CriterionResult, OrchestraEvent, Role, Run, Scenario, Task, Verdict } from './types.ts';
 
@@ -30,6 +33,12 @@ export interface ConductorOptions {
   // Opt-in ablation: turn one component off. Unset keeps the normal behaviour.
   ablate?: Ablation;
   onUpdate?: (run: Run) => void;
+  // Opt-in OS sandbox for write-capable roles (worker). Unset keeps spawning exactly as before.
+  sandbox?: { backend: 'srt' | 'claude' | 'docker'; allowedHosts?: string[]; image?: string; gvisor?: boolean; network?: string };
+  // Unattended: strip push and publish credentials from every agent env, even without a sandbox object.
+  unattended?: boolean;
+  // Injectable exec for the sandbox pre-flight probes (tests). Defaults to spawnSync.
+  preflightExec?: ProbeExec;
 }
 
 // ---------- prompt builders ----------
@@ -305,6 +314,9 @@ export class Conductor {
   readonly run: Run;
   private readonly store: Store;
   private readonly runner: Runner;
+  private readonly sandboxOpt?: ConductorOptions['sandbox'];
+  private readonly scrubEnv: boolean;
+  private readonly preflightExec?: ProbeExec;
   private readonly harness: Harness;
   private readonly onUpdate?: (run: Run) => void;
   private scenarios: Scenario[] = [];
@@ -318,6 +330,9 @@ export class Conductor {
     this.runner = opts.runner;
     this.harness = loadHarness(opts.store, opts.harnessVersion);
     this.onUpdate = opts.onUpdate;
+    this.sandboxOpt = opts.sandbox;
+    this.preflightExec = opts.preflightExec;
+    this.scrubEnv = Boolean(opts.sandbox || opts.unattended);
     this.ablate = opts.ablate ?? {};
     this.wtRoot = opts.store.path('worktrees');
     const id = (opts.kind === 'eval' ? 'e' : '') + newRunId();
@@ -348,6 +363,7 @@ export class Conductor {
       this.emit('run.start', `Run started: ${run.goal}`, { harness: run.harness });
       this.save();
 
+      this.sandboxPreflight();
       await this.plan();
       run.status = 'running';
       this.save();
@@ -929,6 +945,54 @@ export class Conductor {
 
   // ---------- plumbing ----------
 
+  // The common git dir is the same for every worktree of the repo; resolve it once per run.
+  private gitCommonDirMemo?: string;
+  private gitCommonDir(): string {
+    return (this.gitCommonDirMemo ??= resolve(this.store.root, g.git(this.store.root, 'rev-parse', '--git-common-dir')));
+  }
+
+  private workerPolicy(cwd: string) {
+    return buildSandboxPolicy({
+      worktree: cwd,
+      tmpDir: tmpdir(),
+      home: homedir(),
+      hiddenScenarioDir: this.store.path('holdout'),
+      gitCommonDir: this.gitCommonDir(),
+      allowedHosts: this.sandboxOpt?.allowedHosts,
+    });
+  }
+
+  // Once per run, before the first agent call: both probes must be blocked inside the sandbox.
+  // The network probe is a deliberate outbound attempt expected to fail. Skipped when sandbox is off.
+  private sandboxPreflight(): void {
+    const opt = this.sandboxOpt;
+    if (!opt) return;
+    const exec: ProbeExec =
+      this.preflightExec ??
+      ((command, args, o) => {
+        const r = spawnSync(command, args, { cwd: o.cwd, timeout: o.timeoutMs, encoding: 'utf8', env: scrubWorkerEnv(process.env) as NodeJS.ProcessEnv });
+        return { status: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '', error: r.error?.message };
+      });
+    const res = preflightSandbox(this.workerPolicy(this.integration.path), opt.backend, exec, {
+      cwd: this.integration.path,
+      docker: { image: opt.image, gvisor: opt.gvisor, network: opt.network },
+    });
+    for (const w of res.warnings) this.emit('log', `Sandbox pre-flight warning: ${w}`);
+    if (!res.ok) throw new Error(`Sandbox pre-flight failed, refusing to dispatch workers: ${res.failures.join('; ')}`);
+    this.emit('log', 'Sandbox pre-flight passed: blocked host and denied path both failed as expected');
+  }
+
+  // Sandbox and env additions for one agent call. Empty when the opt-in flags are off.
+  private isolation(role: Role, cwd: string): Pick<AgentRequest, 'sandbox' | 'env'> {
+    const out: Pick<AgentRequest, 'sandbox' | 'env'> = {};
+    if (this.scrubEnv) out.env = scrubWorkerEnv(process.env);
+    if (this.sandboxOpt && role === 'worker') {
+      const policy = this.workerPolicy(cwd);
+      out.sandbox = { policy, backend: this.sandboxOpt.backend, settingsDir: this.store.path('sandbox'), ...(this.sandboxOpt.backend === 'docker' ? { docker: { image: this.sandboxOpt.image, gvisor: this.sandboxOpt.gvisor, network: this.sandboxOpt.network } } : {}) };
+    }
+    return out;
+  }
+
   private async call(role: Role, task: Task | undefined, attempt: number, req: Omit<AgentRequest, 'role' | 'system' | 'model' | 'budgetUsd'>, modelOverride?: string, variant?: 'a' | 'b'): Promise<AgentResult> {
     const { run, harness } = this;
     const sfx = variant ? `-${variant}` : '';
@@ -949,6 +1013,7 @@ export class Conductor {
     let lastSave = 0;
     const res = await this.runner({
       ...req,
+      ...this.isolation(role, req.cwd),
       role,
       model,
       system: harness.prompts[role],
