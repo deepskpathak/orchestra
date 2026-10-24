@@ -21,6 +21,16 @@ test('guard blocks holdout access, network, harness edits, secrets', () => {
   assert.equal(decide('Bash', { command: 'echo pass > scorer/checklist.md' }).allow, false);
   assert.equal(decide('Read', { file_path: '/r/scorer/judge.md' }).allow, true);
   assert.equal(decide('Edit', { file_path: '/r/src/scorer.ts' }).allow, true);
+  // Prose mentioning the scorer is not a scorer write.
+  assert.equal(decide('Write', { file_path: 'README.md', content: 'The frozen scorer/ judges promotion.' }).allow, true);
+  assert.equal(decide('Edit', { file_path: 'docs/a.md', old_string: 'x', new_string: 'see scorer/judge.md' }).allow, true);
+  // Read-only Bash on scorer/ is allowed; writes are not.
+  assert.equal(decide('Bash', { command: 'cat scorer/judge.md' }).allow, true);
+  assert.equal(decide('Bash', { command: 'ls scorer/ && grep -n pass scorer/checklist.md' }).allow, true);
+  assert.equal(decide('Bash', { command: 'rm scorer/judge.md' }).allow, false);
+  assert.equal(decide('Bash', { command: 'sed -i s/a/b/ scorer/judge.md' }).allow, false);
+  assert.equal(decide('Bash', { command: 'cat x | tee scorer/checklist.md' }).allow, false);
+  assert.equal(decide('Bash', { command: 'cp /tmp/x scorer/config.json' }).allow, false);
   assert.equal(decide('Bash', { command: 'npm test' }).allow, true);
   assert.equal(decide('Edit', { file_path: '/r/src/app.ts' }).allow, true);
 });

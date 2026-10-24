@@ -10,13 +10,27 @@ const NETWORK = /\b(curl|wget|ssh|scp|rsync|nc|telnet|ftp)\b|\bgit\s+push\b|\bnp
 const READ_ONLY = new Set(['Read', 'Grep', 'Glob']);
 const SECRET_PATH = /(^|\/)(\.env(\..*)?|id_rsa|id_ed25519|\.npmrc|\.netrc|credentials(\.json)?|.*\.pem|.*\.key)$/;
 
+const SCORER_PATH = /(^|[\/\s"'=<>])scorer(\/|$)/;
+const SCORER_WRITE_CMD = /(^|[\s;&|(])(rm|mv|cp|tee|touch|truncate|chmod|install|ln|dd)\b|\bsed\s+(-\w*i|--in-place)|\bperl\s+-\w*i|>/;
+
+// Only the target path of file tools counts (prose that merely mentions "scorer" is fine).
+// For Bash, a command must both name scorer/ and contain a write-capable operation.
+function touchesScorer(toolName: string, input: Record<string, unknown>): boolean {
+  if (toolName === 'Bash') {
+    const cmd = String(input?.command ?? '').replace(/\\/g, '/');
+    return SCORER_PATH.test(cmd) && SCORER_WRITE_CMD.test(cmd);
+  }
+  const paths = [input?.file_path, input?.path, input?.notebook_path].map((p) => String(p ?? '').replace(/\\/g, '/'));
+  return paths.some((p) => /(^|\/)scorer(\/|$)/.test(p));
+}
+
 export function decide(toolName: string, input: Record<string, unknown>): GuardDecision {
   const blob = JSON.stringify(input ?? {});
   if (/\.orchestra\/holdout|\.orchestra\\\\holdout/.test(blob)) return { allow: false, reason: 'Holdout scenarios are visible to the judge only.' };
   if (/\.orchestra\/(harness|evals|archive\.json)/.test(blob) && toolName !== 'Read' && toolName !== 'Grep' && toolName !== 'Glob') {
     return { allow: false, reason: 'Agents may not modify the harness, evals, or archive.' };
   }
-  if (/(^|[\/"'\s])scorer(\/|\\|["'\s]|$)/.test(blob.replace(/\\\\/g, '/')) && !READ_ONLY.has(toolName)) {
+  if (!READ_ONLY.has(toolName) && touchesScorer(toolName, input)) {
     return { allow: false, reason: 'Agents may not modify the frozen scorer.' };
   }
   if (toolName === 'Bash') {
