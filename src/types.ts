@@ -49,6 +49,7 @@ export interface Task {
   description: string;
   acceptance: string[];
   deps: string[];
+  footprint?: { files: string[]; symbols?: string[] }; // planner-declared files and symbols (sanitised)
   status: TaskStatus;
   attempts: number;
   branch?: string;
@@ -83,6 +84,7 @@ export interface Run {
   endedAt?: number;
   integrationBranch?: string;
   baseRef?: string;
+  atlasSha?: string; // commit the Repo Atlas was built at, when context.atlas is enabled
   tasks: Task[];
   costUsd: number;
   satisfaction?: number;
