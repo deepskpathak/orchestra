@@ -282,7 +282,18 @@ export function preflightSandbox(policy: SandboxPolicy, backend: 'srt' | 'claude
       else if (!out.includes(BLOCKED)) failures.push(`${name} probe inconclusive: wrapper exited ${r.status} with no result, treating the sandbox as not working`);
     };
 
-    probe('network', networkScript(host));
+    // Positive control: the same fetch, unsandboxed. A blocked result inside the sandbox only means
+    // something if the host can reach the probe target at all.
+    const netScript = networkScript(host);
+    let control = '';
+    try {
+      const r = exec('node', ['-e', netScript], { cwd: opts.cwd, timeoutMs });
+      control = r.error ? '' : `${r.stdout}\n${r.stderr}`;
+    } catch {
+      control = '';
+    }
+    if (control.includes(OPEN)) probe('network', netScript);
+    else warnings.push(`network probe inconclusive: the unsandboxed control to ${host} also failed (no connectivity from this host), so the sandbox's network block is NOT verified`);
     if (canary) probe('read', readScript(canary));
     else warnings.push('read probe skipped: no host directory outside the docker mounts is writable; docker read isolation rests on not mounting secrets');
   } finally {

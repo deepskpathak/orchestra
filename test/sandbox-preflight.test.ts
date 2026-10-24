@@ -15,7 +15,9 @@ const result = (stdout: string, extra: object = {}) => ({ status: 0, stdout, std
 const BLOCKED = 'ORCHESTRA_PROBE_BLOCKED\n';
 const OPEN = 'ORCHESTRA_PROBE_OPEN\n';
 // Decides by probe kind: the network script calls fetch, the read script calls readFileSync.
-const fake = (net: string, read: string): ProbeExec => (_c, args) => {
+// The unsandboxed positive control (command "node") always reaches the network here.
+const fake = (net: string, read: string): ProbeExec => (c, args) => {
+  if (c === 'node') return result(OPEN);
   const script = args.join(' ');
   return result(script.includes('fetch(') ? net : read);
 };
@@ -39,13 +41,36 @@ test('read probe succeeds: not ok, names the probe', () => {
   assert.match(r.failures[0], /read probe/);
 });
 
+test('control runs unsandboxed first; if it also fails the result is inconclusive, not BLOCKED', () => {
+  const seen: string[] = [];
+  const exec: ProbeExec = (c) => (seen.push(c), result(BLOCKED));
+  const r = preflightSandbox(policy, 'srt', exec, opts);
+  assert.equal(seen[0], 'node');
+  assert.equal(seen.filter((c) => c === 'srt').length, 1, 'sandboxed network probe skipped, read probe still runs');
+  assert.equal(r.ok, true);
+  assert.equal(r.failures.length, 0);
+  assert.match(r.warnings[0], /inconclusive.*no connectivity/);
+  assert.match(r.warnings[0], /NOT verified/);
+  // A control that cannot even start is the same: never claim BLOCKED.
+  const r2 = preflightSandbox(policy, 'srt', (c) => (c === 'node' ? { status: null, stdout: '', stderr: '', error: 'ENOENT' } : result(BLOCKED)), opts);
+  assert.match(r2.warnings[0], /inconclusive/);
+});
+
+test('control reaches the network and the sandbox also reaches it: still a failure', () => {
+  const r = preflightSandbox(policy, 'claude', fake(OPEN, BLOCKED), opts);
+  assert.equal(r.ok, false);
+  assert.match(r.failures[0], /network probe succeeded/);
+});
+
 test('wrapper missing or silent: not ok (fail closed)', () => {
   const missing = preflightSandbox(policy, 'srt', () => ({ status: null, stdout: '', stderr: '', error: 'spawn srt ENOENT' }), opts);
   assert.equal(missing.ok, false);
-  assert.equal(missing.failures.length, 2);
-  assert.match(missing.failures[0], /could not start/);
-  assert.equal(preflightSandbox(policy, 'srt', () => result(''), opts).ok, false);
-  assert.equal(preflightSandbox(policy, 'srt', () => { throw new Error('boom'); }, opts).ok, false);
+  const withControl = (f: ProbeExec): ProbeExec => (c, a, o) => (c === 'node' ? result(OPEN) : f(c, a, o));
+  const missing2 = preflightSandbox(policy, 'srt', withControl(() => ({ status: null, stdout: '', stderr: '', error: 'spawn srt ENOENT' })), opts);
+  assert.equal(missing2.failures.length, 2);
+  assert.match(missing2.failures[0], /could not start/);
+  assert.equal(preflightSandbox(policy, 'srt', withControl(() => result('')), opts).ok, false);
+  assert.equal(preflightSandbox(policy, 'srt', withControl(() => { throw new Error('boom'); }), opts).ok, false);
 });
 
 test('srt probes get a srt-shaped settings file and claude probes the Claude shape', () => {
@@ -83,18 +108,20 @@ test('docker read canary lives outside every mounted path; srt canary stays in t
 test('docker read probe is skipped with a warning when no unmounted dir is usable', () => {
   const mounted = buildSandboxPolicy({ worktree: '/wt', tmpDir: '/var/tmp', home: '/home/u', hiddenScenarioDir: '/h', gitCommonDir: homedir() });
   const calls: string[] = [];
-  const r = preflightSandbox(mounted, 'docker', (_c, args) => (calls.push(args.join(' ')), result(BLOCKED)), opts);
+  const r = preflightSandbox(mounted, 'docker', (_c, args) => (calls.push(args.join(' ')), result(_c === 'node' ? OPEN : BLOCKED)), opts);
   assert.equal(r.ok, true);
-  assert.equal(calls.length, 1);
+  assert.equal(calls.length, 2, 'control + docker network probe, no read probe');
   assert.match(r.warnings[0], /read probe skipped/);
 });
 
 test('probes run through the srt wrapper and scripts never contain a literal marker', () => {
   const seen: { command: string; args: string[] }[] = [];
-  preflightSandbox(policy, 'srt', (command, args) => (seen.push({ command, args }), result(BLOCKED)), opts);
-  assert.equal(seen.length, 2);
-  assert.ok(seen.every((s) => s.command === 'srt' && s.args[0] === '--settings'));
-  assert.match(seen[1].args.join(' '), /readFileSync/);
+  preflightSandbox(policy, 'srt', (command, args) => (seen.push({ command, args }), result(command === 'node' ? OPEN : BLOCKED)), opts);
+  const wrapped = seen.filter((s) => s.command === 'srt');
+  assert.equal(wrapped.length, 2);
+  assert.equal(seen.length, 3, 'plus the unsandboxed control');
+  assert.ok(wrapped.every((s) => s.args[0] === '--settings'));
+  assert.match(wrapped[1].args.join(' '), /readFileSync/);
   assert.ok(!seen.some((s) => s.args.join(' ').includes('ORCHESTRA_PROBE_OPEN')));
 });
 
@@ -129,7 +156,7 @@ test('sandbox on, both blocked: preflight runs once per run and the run proceeds
   const exec: ProbeExec = (c, a, o) => (n++, fake(BLOCKED, BLOCKED)(c, a, o));
   const run = await runGoal({ store, runner: fakeRunner(), goal: 'g', sandbox: { backend: 'srt' }, preflightExec: exec });
   assert.equal(run.status, 'done');
-  assert.equal(n, 2);
+  assert.equal(n, 3, 'control + two wrapped probes');
 });
 
 test('sandbox off: preflight never invoked', async () => {
