@@ -372,7 +372,10 @@ export class Conductor {
 
   private async plan(): Promise<void> {
     const { run, store, harness } = this;
-    const learnings = readAllLearnings(store);
+    // Eval replays are clean-room: they never read the learnings store, so the lessons a harness
+    // accumulated on past goals cannot leak into the comparison.
+    const isEval = run.kind === 'eval';
+    const learnings = isEval ? {} : readAllLearnings(store);
     const cfg = store.config();
     const files = g.trackedFiles(this.integration.path);
     const fp = fastPathDecision(run.goal, cfg.fastPath);
@@ -381,7 +384,7 @@ export class Conductor {
       files,
       testCommand: cfg.testCommand,
       learnings: formatLearnings(learnings, 'planner'),
-      domains: listDomains(store),
+      domains: isEval ? [] : listDomains(store),
       fastPath: fp.fast,
     });
     const prompt = joinPrompt(built);
@@ -457,7 +460,7 @@ export class Conductor {
     this.emit('task.start', `${task.id} attempt ${task.attempts}: ${task.title}`, undefined, task.id);
     this.save();
 
-    const learnings = readAllLearnings(store);
+    const learnings = this.run.kind === 'eval' ? {} : readAllLearnings(store);
     const others = this.run.tasks.filter((t) => t.id !== task.id).map((t) => `- ${t.id} ${t.title} [${t.status}]`);
     const prompt = joinPrompt(
       workerPrompt({

@@ -34,6 +34,7 @@ export interface ArchiveEntry {
   evalDetail?: Record<string, number>;
   parents?: string[]; // composed variants list the versions they merged
   screenScore?: number | null; // mean score on the cheap screening sample
+  evalInfraRate?: number; // share of the last full eval's replays that failed on infrastructure
   status: 'promoted' | 'candidate' | 'rejected' | 'retired';
 }
 
