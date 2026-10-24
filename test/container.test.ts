@@ -60,6 +60,8 @@ test('e2e: fixture goal completes through the conductor with a docker spawn shim
       store,
       goal: 'Add a thing',
       sandbox: { backend: 'docker', image: 'img:1', gvisor: true },
+      // Pre-flight probes get a fake exec so no real docker is needed.
+      preflightExec: () => ({ status: 0, stdout: 'ORCHESTRA_PROBE_BLOCKED\n', stderr: '' }),
       runner: (req: AgentRequest) => {
         if (req.sandbox) shim.push(buildCommand(req));
         return inner(req);
