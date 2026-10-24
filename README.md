@@ -80,6 +80,8 @@ Set `ORCHESTRA_RUNNER=fake` to use the simulator instead of real Claude sessions
 | `    --detach` | Run in the background; follow with `orchestra watch` |
 | `    --no-evolve` | Skip the automatic evolution check after the run |
 | `    --serve` | Also serve the web dashboard while the run is live |
+| `    --sandbox auto\|srt\|claude\|off` | OS-sandbox workers: writes only to the worktree and temp, no credential reads, network limited to the model API plus `sandbox.allowedHosts`. Default `off` |
+| `    --unattended` | Refuse to start without a sandbox backend (`srt`, `bwrap` + `socat`, or `sandbox-exec`); strips credentials from agent env |
 | `orchestra serve [--port N]` | Web dashboard on localhost (default 4317), read-only |
 | `orchestra serve --tui [runId]` | Interactive terminal dashboard, no browser and no port (alias: `orchestra tui`) |
 | `orchestra watch [runId]` | Full-screen live dashboard (q to quit) |

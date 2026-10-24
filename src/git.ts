@@ -22,10 +22,15 @@ export function assertRepo(root: string): void {
 
 // Keep .orchestra out of git without editing the user's tracked .gitignore.
 export function excludeOrchestra(root: string): void {
+  excludePath(root, '.orchestra/');
+}
+
+// Adds a line to the shared info/exclude (idempotent). Tracked files are unaffected.
+export function excludePath(root: string, line: string): void {
   const abs = resolve(root, git(root, 'rev-parse', '--git-common-dir'), 'info', 'exclude');
   mkdirSync(dirname(abs), { recursive: true });
   const cur = existsSync(abs) ? readFileSync(abs, 'utf8') : '';
-  if (!cur.split('\n').includes('.orchestra/')) appendFileSync(abs, `${cur.endsWith('\n') || !cur ? '' : '\n'}.orchestra/\n`);
+  if (!cur.split('\n').includes(line)) appendFileSync(abs, `${cur.endsWith('\n') || !cur ? '' : '\n'}${line}\n`);
 }
 
 export interface Worktree {

@@ -3,11 +3,19 @@
 // all state lives in git and .orchestra, never in a long conversation.
 
 import { spawn, spawnSync } from 'node:child_process';
-import { appendFileSync, mkdirSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { PACKAGE_ROOT } from './harness.ts';
 import { countToolUse } from './exploration.ts';
+import { claudeSandboxSettings, srtArgs, type SandboxPolicy } from './sandbox.ts';
 import type { Role, WorkerOutcome } from './types.ts';
+
+// Opt-in OS sandbox for one agent call. 'srt' wraps the claude command; 'claude' relies on Claude Code's
+// own sandbox settings. Either way the settings land in the worktree's .claude/settings.local.json.
+export interface AgentSandbox {
+  policy: SandboxPolicy;
+  backend: 'srt' | 'claude';
+}
 
 export interface AgentRequest {
   role: Role;
@@ -25,6 +33,8 @@ export interface AgentRequest {
   timeoutMs?: number;
   meta?: { task?: string; attempt?: number; run?: string; variant?: 'a' | 'b' };
   onAction?: (action: string) => void;
+  sandbox?: AgentSandbox; // absent: spawn exactly as before
+  env?: Record<string, string | undefined>; // absent: process.env
 }
 
 export interface Usage {
@@ -104,6 +114,50 @@ export function buildArgs(req: AgentRequest): string[] {
   return args;
 }
 
+// Merge sandbox settings into <cwd>/.claude/settings.local.json, keeping every existing key.
+// Objects merge recursively, arrays are unioned, and our values win for scalars (fail-closed).
+export function writeSandboxSettings(cwd: string, policy: SandboxPolicy): string {
+  const file = join(cwd, '.claude', 'settings.local.json');
+  let existing: Record<string, unknown> = {};
+  if (existsSync(file)) {
+    try {
+      const parsed = JSON.parse(readFileSync(file, 'utf8'));
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) existing = parsed;
+    } catch {
+      // Unreadable settings are replaced: the sandbox block must be present.
+    }
+  }
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(file, JSON.stringify(mergeSettings(existing, claudeSandboxSettings(policy)), null, 2) + '\n');
+  return file;
+}
+
+function mergeSettings(a: any, b: any): any {
+  if (Array.isArray(a) && Array.isArray(b)) return [...new Set([...a, ...b])];
+  const isObj = (v: unknown) => Boolean(v) && typeof v === 'object' && !Array.isArray(v);
+  if (isObj(a) && isObj(b)) {
+    const out: Record<string, unknown> = { ...a };
+    for (const [k, v] of Object.entries(b)) out[k] = k in out ? mergeSettings(out[k], v) : v;
+    return out;
+  }
+  return b;
+}
+
+export type SpawnFn = typeof spawn;
+
+// The command and args to spawn for a request. Without a sandbox this is plain `claude`.
+export function buildCommand(req: AgentRequest): { command: string; args: string[] } {
+  const args = buildArgs(req);
+  if (req.sandbox) {
+    const settings = writeSandboxSettings(req.cwd, req.sandbox.policy);
+    if (req.sandbox.backend === 'srt') {
+      const [command, ...rest] = srtArgs(req.sandbox.policy, settings, 'claude', args);
+      return { command, args: rest };
+    }
+  }
+  return { command: 'claude', args };
+}
+
 export function summarizeTool(name: string, input: Record<string, unknown> | undefined): string {
   const i = input ?? {};
   const pick = (i.file_path ?? i.path ?? i.pattern ?? i.command ?? i.description ?? '') as string;
@@ -111,10 +165,11 @@ export function summarizeTool(name: string, input: Record<string, unknown> | und
   return short ? `${name} ${short}` : name;
 }
 
-export const claudeRunner: Runner = (req) =>
+export const makeClaudeRunner = (spawnFn: SpawnFn = spawn): Runner => (req) =>
   new Promise((resolve) => {
     const started = Date.now();
-    const child = spawn('claude', buildArgs(req), { cwd: req.cwd, stdio: ['ignore', 'pipe', 'pipe'], env: process.env });
+    const { command, args } = buildCommand(req);
+    const child = spawnFn(command, args, { cwd: req.cwd, stdio: ['ignore', 'pipe', 'pipe'], env: req.env ?? process.env });
     if (req.logFile) mkdirSync(dirname(req.logFile), { recursive: true });
     let buf = '';
     let stderr = '';
@@ -175,7 +230,7 @@ export const claudeRunner: Runner = (req) =>
     });
     child.on('error', (err) => {
       if (timer) clearTimeout(timer);
-      resolve({ ok: false, text: '', costUsd: 0, turns: 0, durationMs: Date.now() - started, error: `spawn claude failed: ${err.message}` });
+      resolve({ ok: false, text: '', costUsd: 0, turns: 0, durationMs: Date.now() - started, error: `spawn ${command} failed: ${err.message}` });
     });
     child.on('close', (code) => {
       if (timer) clearTimeout(timer);
@@ -191,6 +246,8 @@ export const claudeRunner: Runner = (req) =>
       });
     });
   });
+
+export const claudeRunner: Runner = makeClaudeRunner();
 
 // Structured output fallback: if the schema path did not populate, try the last JSON object in text.
 export function extractJson(res: AgentResult): unknown {
