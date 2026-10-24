@@ -14,7 +14,7 @@ Defaults come from `DEFAULT_PROJECT_CONFIG` in `src/store.ts`. Missing keys fall
 | `concurrency` | number | `3` | Maximum tasks running in parallel. |
 | `testCommand` | string or null | `null` | Command run in each worktree and on the integration branch. `null` means no tests are run. |
 | `allowedTools` | string[] | `["Read", "Edit", "Write", "Glob", "Grep", "Bash"]` | Tools workers may use. |
-| `disallowedTools` | string[] | `["WebFetch", "WebSearch", "Bash(git push:*)", "Bash(curl:*)", "Bash(wget:*)"]` | Tools workers may not use. Keeps workers off the network and from publishing. A guard hook enforces more. |
+| `disallowedTools` | string[] | `["WebFetch", "WebSearch", "Bash(git push:*)", "Bash(curl:*)", "Bash(wget:*)"]` | Tools workers may not use. Keeps workers off the network and from publishing at the tool-permission level. A guard hook adds a deny-list backstop. Neither is OS isolation; see the `sandbox` section below. |
 | `permissionMode` | string | `"acceptEdits"` | Permission mode passed to worker sessions. |
 | `runBudgetUsd` | number | `20` | Spend cap per run. Once reached, tasks that are pending or in repair fail with "run budget exhausted". |
 | `judgeTiers` | object | see below | Tiered judging settings. |
@@ -24,6 +24,8 @@ Defaults come from `DEFAULT_PROJECT_CONFIG` in `src/store.ts`. Missing keys fall
 | `evolve` | object | see below | Self-improvement settings. |
 
 ### `sandbox`
+
+The OS sandbox (or docker backend) is the real boundary for workers. `disallowedTools` and the guard hook are defence in depth and can be bypassed through `python`, `node`, git remotes or DNS. See [architecture.md](architecture.md#boundary-model-os-sandbox-first-guard-hook-as-backstop).
 
 Optional, absent by default. Read only from the repo's own `.orchestra/config.json` (never the run-time harness copy). Used when `orchestra run --sandbox` or `--unattended` is on.
 
@@ -160,7 +162,7 @@ The harness is the evolvable part of Orchestra: role prompts (`planner.md`, `wor
 - The evolver creates `vN+1` as a copy of a parent with changed files. It may edit only `planner.md`, `worker.md`, `judge.md`, `librarian.md`, `config.json`, `tools.md`, `style.md` and `checklist.md`. Lines in `checklist.md` may be added but not removed. See [self-improvement](self-improvement.md).
 - Guard rails: a candidate `config.json` may not lower `passThreshold`, and must define a model for every role.
 - Promoting a version marks it `promoted` and the previous one `retired`. See [self-improvement.md](self-improvement.md) for the full evolve, promote and rollback flow.
-- Agent sessions cannot write to the harness, evals or archive (enforced by the guard hook in `src/guard.ts`).
+- Agent sessions cannot write to the harness, evals or archive (denied by the guard hook in `src/guard.ts`, a backstop; the OS sandbox confines writes when enabled).
 
 ## Environment variables
 

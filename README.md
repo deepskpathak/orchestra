@@ -30,7 +30,7 @@ You give Orchestra a goal. It plans a task graph, builds tasks in parallel git w
 - **Self-evaluating.** Every agent session is recorded in a ledger, and `orchestra stats` reports health per harness version.
 - **Self-improving.** The evolver proposes a harness change, a Factory Eval compares it to the incumbent, and promotion needs a measured gain. Rollback is `orchestra promote <vN>`.
 - **Live dashboards.** A terminal dashboard, a read-only localhost web task board with dependency arrows, and a Claude Code statusline.
-- **Guard rails in code.** A PreToolUse hook blocks holdout reads, network commands, `git push`, and edits to the harness and evals. Each run has a budget.
+- **Guard rails in code.** A PreToolUse hook is a deny-list backstop for holdout reads, network commands, `git push`, and edits to the harness and evals. It is not the isolation boundary (see [Isolation](#isolation)). Each run has a budget.
 
 ## Quick start
 
@@ -99,12 +99,19 @@ Set `ORCHESTRA_RUNNER=fake` to use the simulator instead of real Claude sessions
 
 Inside Claude Code, the plugin adds `/orchestra:setup`, `/orchestra:run`, `/orchestra:serve`, `/orchestra:status`, `/orchestra:stats`, `/orchestra:bench`, and `/orchestra:evolve`.
 
+## Isolation
+
+The boundary is the OS, not the hook. Opt in with `--sandbox auto|srt|claude` (OS sandbox: `srt`, or Claude Code `sandbox` settings via `bwrap` + `socat` or `sandbox-exec`) or `--sandbox docker` (container, optional gVisor). The sandbox allows writes only to the worktree and temp, denies reads of credential directories, `.env*` and the holdout, and limits network to the model API plus `sandbox.allowedHosts`. A pre-flight self-test aborts the run if a blocked host or denied path is reachable. Credentials are stripped from worker env, `.git/hooks` and `.git/config` are read-only, and only the orchestrator commits, pushes and opens PRs. `--unattended` refuses to start without a backend. Missing tools are detected and the run degrades to unsandboxed (attended only).
+
+The `src/guard.ts` hook stays on as **defence in depth**. It is a deny-list that `python`, `node`, git remotes or DNS can bypass. `srt` is a research preview and sandbox setup varies by OS (Linux needs unprivileged user namespaces). Details: [docs/architecture.md](docs/architecture.md#boundary-model-os-sandbox-first-guard-hook-as-backstop) and [docs/isolation.md](docs/isolation.md).
+
 ## Documentation
 
 - [Getting started](docs/getting-started.md): install, init, first run, and the demo
 - [Architecture](docs/architecture.md): roles, worktrees, holdout scenarios, merge queue, event log
 - [Self-improvement](docs/self-improvement.md): ledger, Factory Eval, evolve, promote and rollback
 - [Dashboards](docs/dashboards.md): watch, status, serve, and the statusline
+- [Isolation](docs/isolation.md): sandbox boundary model and the docker backend
 - [Configuration](docs/configuration.md): `.orchestra/config.json` and harness config
 - [Whitepaper](docs/whitepaper-orchestra.md): design, methodology, limitations, and threats to validity
 - [Closing the gaps](docs/research/closing-the-gaps.md): research review and the ordered plan to address the whitepaper's limitations
@@ -120,4 +127,4 @@ Inside Claude Code, the plugin adds `/orchestra:setup`, `/orchestra:run`, `/orch
 
 ## Status
 
-The current version is in `package.json`. The test suite runs against the simulator (`npm test`). Workers share one machine, with no containers yet. Evolution reruns past goals, so it costs roughly `sample × 2` runs; tune `evolve.sample`, `evolve.every` and `evolve.candidates` in the config.
+The current version is in `package.json`. The test suite runs against the simulator (`npm test`). Workers share one machine unless you opt in to `--sandbox`; the default is unsandboxed. Evolution reruns past goals, so it costs roughly `sample × 2` runs; tune `evolve.sample`, `evolve.every` and `evolve.candidates` in the config.

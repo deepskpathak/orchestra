@@ -177,7 +177,7 @@ Rails are enforced in code, not only in prompts:
 - **No lowered bar.** A `config.json` with a lower `passThreshold` than its parent is rejected, as is one missing a model for any role. A `checklist.md` that drops a line the parent had is rejected too.
 - **Measured gain only.** Promotion needs `minGain` and zero regressions on the sampled eval cases, scored by the frozen scorer, and no rise in the integrity monitor fire rate beyond one flag.
 - **Frozen scorer.** `scorer/` is outside the evolvable set, and the guard blocks writes to the installed copy.
-- **Agent hook** (`src/guard.ts`, run as `orchestra guard`). Every agent session gets a PreToolUse hook that denies:
+- **Agent hook** (`src/guard.ts`, run as `orchestra guard`). A deny-list backstop, not the isolation boundary (the OS sandbox is; see [architecture.md](architecture.md#boundary-model-os-sandbox-first-guard-hook-as-backstop)). Every agent session gets a PreToolUse hook that denies:
   - any access to the hidden holdout scenarios (visible to the judge only)
   - writes to the harness, evals or archive files (read, grep and glob stay allowed)
   - Bash network commands (`curl`, `wget`, `ssh`, and similar), `git push`, `npm publish` and `gh` create commands
