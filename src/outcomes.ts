@@ -4,7 +4,7 @@
 // at the bottom does the read-only git lookups and tolerates missing branches. A rate with a zero
 // denominator is null and renders as n/a.
 
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { readBenchRows } from './calibration.ts';
 import { git } from './git.ts';
 import type { Store } from './store.ts';
 import type { Run } from './types.ts';
@@ -163,22 +163,13 @@ export function gitFactsForRun(root: string, run: Run, main: string): RunGitFact
   return { landed: true, editLines, reverted, fixups };
 }
 
+// Bench results live at <store>/bench/<benchId>/results.jsonl; readBenchRows knows that layout.
 function benchRows(store: Store): BenchOutcomeRow[] {
-  const dir = store.path('bench');
-  if (!existsSync(dir)) return [];
-  const rows: BenchOutcomeRow[] = [];
-  for (const f of readdirSync(dir).filter((n) => n.endsWith('.jsonl'))) {
-    for (const line of readFileSync(`${dir}/${f}`, 'utf8').split('\n')) {
-      try {
-        const r = JSON.parse(line);
-        const pass = r.pass ?? r.passed;
-        if (typeof r.humanMinutes === 'number' && typeof pass === 'boolean') rows.push({ humanMinutes: r.humanMinutes, pass });
-      } catch {
-        // blank or malformed line: skip
-      }
-    }
+  try {
+    return readBenchRows(store).filter((r) => typeof r.humanMinutes === 'number' && typeof r.checkPass === 'boolean').map((r) => ({ humanMinutes: r.humanMinutes, pass: r.checkPass }));
+  } catch {
+    return []; // a corrupt results file must not take the stats screen down
   }
-  return rows;
 }
 
 export function collectOutcomes(store: Store): OutcomeMetrics {

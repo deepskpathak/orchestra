@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { PACKAGE_ROOT } from '../src/harness.ts';
@@ -136,4 +136,14 @@ test('orchestra stats prints the outcome section', () => {
   assert.match(r.stdout, /Outcome metrics/);
   assert.match(r.stdout, /merge acceptance\s+100% \(1 of 1/);
   assert.match(r.stdout, /success by task count/);
+});
+
+test('collector reads bench rows from <bench>/<id>/results.jsonl using checkPass', () => {
+  const store = tempRepo();
+  const dir = join(store.path('bench'), 'b1');
+  mkdirSync(dir, { recursive: true });
+  const row = (humanMinutes: number, checkPass: boolean) => JSON.stringify({ arm: 'full', goal: 'g', humanMinutes, checkPass });
+  writeFileSync(join(dir, 'results.jsonl'), [row(10, true), row(10, false), row(90, true)].join('\n') + '\n');
+  const m = collectOutcomes(store);
+  assert.deepEqual(m.byHumanMinutes.map((b) => [b.label, b.succeeded, b.runs]), [['<=15 min', 1, 2], ['1-4 h', 1, 1]]);
 });
