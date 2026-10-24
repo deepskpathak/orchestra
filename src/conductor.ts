@@ -977,6 +977,7 @@ export class Conductor {
       cwd: this.integration.path,
       docker: { image: opt.image, gvisor: opt.gvisor },
     });
+    for (const w of res.warnings) this.emit('log', `Sandbox pre-flight warning: ${w}`);
     if (!res.ok) throw new Error(`Sandbox pre-flight failed, refusing to dispatch workers: ${res.failures.join('; ')}`);
     this.emit('log', 'Sandbox pre-flight passed: blocked host and denied path both failed as expected');
   }

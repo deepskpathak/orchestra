@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { test } from 'node:test';
 import type { AgentRequest, Runner } from '../src/agent.ts';
 import { runGoal } from '../src/conductor.ts';
@@ -21,7 +22,7 @@ const fake = (net: string, read: string): ProbeExec => (_c, args) => {
 
 test('both probes blocked: ok', () => {
   for (const backend of ['srt', 'claude', 'docker'] as const) {
-    assert.deepEqual(preflightSandbox(policy, backend, fake(BLOCKED, BLOCKED), opts), { ok: true, failures: [] });
+    assert.deepEqual(preflightSandbox(policy, backend, fake(BLOCKED, BLOCKED), opts), { ok: true, failures: [], warnings: [] });
   }
 });
 
@@ -60,6 +61,32 @@ test('srt probes get a srt-shaped settings file and claude probes the Claude sha
   };
   assert.ok(read('srt').filesystem.denyRead);
   assert.equal(read('claude').sandbox.enabled, true);
+});
+
+test('docker read canary lives outside every mounted path; srt canary stays in the denied tmp dir', () => {
+  const canaryOf = (backend: 'srt' | 'docker') => {
+    let path = '';
+    preflightSandbox(policy, backend, (_c, args) => {
+      const m = args.join(' ').match(/readFileSync\("([^"]+)"\)/);
+      if (m) path = m[1];
+      return result(BLOCKED);
+    }, opts);
+    return path;
+  };
+  const d = canaryOf('docker');
+  assert.ok(d.endsWith('canary.txt'));
+  // opts.cwd and the policy tmp dir are mounted; the canary must not be under either.
+  for (const mounted of ['/tmp', '/wt', '/r/.git']) assert.ok(!d.startsWith(mounted + '/'), `${d} under ${mounted}`);
+  assert.match(canaryOf('srt'), /orchestra-preflight-/);
+});
+
+test('docker read probe is skipped with a warning when no unmounted dir is usable', () => {
+  const mounted = buildSandboxPolicy({ worktree: '/wt', tmpDir: '/var/tmp', home: '/home/u', hiddenScenarioDir: '/h', gitCommonDir: homedir() });
+  const calls: string[] = [];
+  const r = preflightSandbox(mounted, 'docker', (_c, args) => (calls.push(args.join(' ')), result(BLOCKED)), opts);
+  assert.equal(r.ok, true);
+  assert.equal(calls.length, 1);
+  assert.match(r.warnings[0], /read probe skipped/);
 });
 
 test('probes run through the srt wrapper and scripts never contain a literal marker', () => {

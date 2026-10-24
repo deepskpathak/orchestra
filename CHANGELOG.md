@@ -14,6 +14,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Sandbox: settings are no longer written to the worker-writable `<worktree>/.claude/settings.local.json` and merged with whatever was there. The `claude` backend passes the sandbox block inline in `--settings`, built fresh from the policy; the `srt` backend gets a fresh file under `.orchestra/sandbox/`, which the worker cannot write. Repo or worker content can no longer persist `excludedCommands`, `allow` rules or hooks into the sandbox settings. Residual: Claude Code still merges the repo's own project settings by design, so a hostile repo `sandbox.excludedCommands` is not stripped under the `claude` backend; prefer `srt` or `docker` for untrusted repos.
 - Sandbox: judge sessions (same task worktree as the worker) no longer inherit the worker's sandbox settings, because no `settings.local.json` is left in the worktree any more. The `.git/info/exclude` entry for it is dropped. A test checks that no session cwd contains the file.
 - Conductor: the git common dir for the worker sandbox policy is resolved once per run instead of running `git rev-parse` on every agent call.
+- Sandbox pre-flight (docker): the read-probe canary used to sit under the temp directory, which docker mounts read-write, so the probe could never pass against a real daemon. It now lives outside every mount (`/var/tmp`, else the home directory); if none is usable the probe is skipped with a warning. `PreflightResult` gains `warnings`, logged by the conductor.
 
 ### Added
 

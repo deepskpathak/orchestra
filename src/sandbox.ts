@@ -5,8 +5,8 @@
 // backstop (defence in depth), because a python/node/git-remote command can bypass its regexes.
 
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { homedir, tmpdir } from 'node:os';
+import { join, sep } from 'node:path';
 import { DEFAULT_IMAGE, dockerArgs } from './container.ts';
 
 export type SandboxBackend = 'srt' | 'claude' | 'none';
@@ -185,6 +185,7 @@ export interface PreflightOptions {
 export interface PreflightResult {
   ok: boolean;
   failures: string[]; // each names the probe: "network probe ..." or "read probe ..."
+  warnings: string[]; // probes that could not be run meaningfully; the run continues but should say so
 }
 
 const OPEN = 'ORCHESTRA_PROBE_OPEN';
@@ -204,17 +205,42 @@ function readScript(file: string): string {
   return `try{require('fs').readFileSync(${JSON.stringify(file)});console.log(${marker(OPEN)})}catch(e){console.log(${marker(BLOCKED)})}`;
 }
 
+// A host directory for the docker read canary that no container mount covers. Read isolation for
+// docker comes from not mounting a path, so the canary has to live outside every mount (tmpdir is
+// mounted rw, so the usual temp location would make the probe open for real). Null when none is usable.
+function unmountedCanaryBase(mounts: string[]): string | null {
+  const covered = (p: string) => mounts.some((m) => p === m || p.startsWith(m.endsWith(sep) ? m : m + sep));
+  for (const base of ['/var/tmp', homedir()]) {
+    try {
+      if (base && !covered(base)) {
+        const d = mkdtempSync(join(base, 'orchestra-canary-'));
+        return d;
+      }
+    } catch {
+      // not writable here, try the next candidate
+    }
+  }
+  return null;
+}
+
 // Runs both probes inside the same wrapper workers get. Each must FAIL (be blocked) for ok. A probe
 // that succeeds, a wrapper that cannot start, or output with no marker (inconclusive) all fail closed.
 export function preflightSandbox(policy: SandboxPolicy, backend: 'srt' | 'claude' | 'docker', exec: ProbeExec, opts: PreflightOptions): PreflightResult {
   const timeoutMs = opts.timeoutMs ?? 60_000;
   const dir = mkdtempSync(join(tmpdir(), 'orchestra-preflight-'));
   const failures: string[] = [];
+  const warnings: string[] = [];
+  let canaryDir: string | null = null;
   try {
-    const canary = join(dir, 'canary.txt');
-    writeFileSync(canary, 'orchestra preflight canary\n');
-    // The canary lives in a dir added to the deny-read list, so a worker-visible tmp path is still denied.
-    const probePolicy: SandboxPolicy = { ...policy, read: { deny: [...policy.read.deny, dir] } };
+    // srt and claude can deny reads, so the canary sits in tmp and its dir is added to the deny list.
+    // docker cannot: its canary must be outside every mounted path (see unmountedCanaryBase).
+    let canary: string | null = join(dir, 'canary.txt');
+    if (backend === 'docker') {
+      canaryDir = unmountedCanaryBase([opts.cwd, policy.write.allow[1] ?? tmpdir(), policy.gitCommonDir]);
+      canary = canaryDir ? join(canaryDir, 'canary.txt') : null;
+    }
+    if (canary) writeFileSync(canary, 'orchestra preflight canary\n');
+    const probePolicy: SandboxPolicy = { ...policy, read: { deny: backend === 'docker' ? [...policy.read.deny] : [...policy.read.deny, dir] } };
     const settings = join(dir, 'settings.json');
     writeFileSync(settings, JSON.stringify(backend === 'srt' ? srtSandboxSettings(probePolicy) : claudeSandboxSettings(probePolicy), null, 2) + '\n');
     const host = PROBE_HOSTS.find((h) => !policy.network.allowedHosts.includes(h)) ?? PROBE_HOSTS[0];
@@ -257,11 +283,13 @@ export function preflightSandbox(policy: SandboxPolicy, backend: 'srt' | 'claude
     };
 
     probe('network', networkScript(host));
-    probe('read', readScript(canary));
+    if (canary) probe('read', readScript(canary));
+    else warnings.push('read probe skipped: no host directory outside the docker mounts is writable; docker read isolation rests on not mounting secrets');
   } finally {
     rmSync(dir, { recursive: true, force: true });
+    if (canaryDir) rmSync(canaryDir, { recursive: true, force: true });
   }
-  return { ok: failures.length === 0, failures };
+  return { ok: failures.length === 0, failures, warnings };
 }
 
 function shellQuote(s: string): string {
