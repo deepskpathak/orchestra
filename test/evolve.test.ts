@@ -483,3 +483,18 @@ test('scorer prompt keeps test-file diffs when a large src diff would exhaust th
   const p = scorerPrompt(loadScorer(), { goal: 'g', diff: 'd', checkPassed: null, integrityFlags: ['weakened-test in test/a.test.ts (1 assertion line(s) removed)'], cwd: '.' });
   assert.match(p, /INTEGRITY MONITOR FLAGS[\s\S]*weakened-test/);
 });
+
+test('harvest fills source and taskType so paired statistics can cluster and group', async () => {
+  const store = tempRepo();
+  const runner = fakeRunner();
+  const a = harvest(store, await runGoal({ store, runner, goal: 'Build it' }))!;
+  const b = harvest(store, await runGoal({ store, runner, goal: '  build   IT ' }))!;
+  assert.ok(a.source && a.source === b.source, 'same goal text shares a cluster');
+  assert.notEqual(a.id, b.id);
+  assert.ok(a.taskType && a.taskType.length > 0);
+  const run = await runGoal({ store, runner, goal: 'other thing' });
+  const c = harvest(store, { ...run, domain: 'cli' })!;
+  assert.equal(c.taskType, 'cli');
+  assert.notEqual(c.source, a.source);
+  assert.equal(listEvals(store).find((x) => x.id === c.id)?.source, c.source); // persisted
+});

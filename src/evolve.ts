@@ -95,7 +95,9 @@ export function listEvals(store: Store): EvalCase[] {
 // Harvest: a clean, high-satisfaction run becomes a regression case for future harnesses.
 export function harvest(store: Store, run: Run, minSatisfaction = 0.8): EvalCase | null {
   if (run.kind !== 'goal' || run.status !== 'done' || (run.satisfaction ?? 0) < minSatisfaction || !run.baseRef) return null;
-  const c: EvalCase = { id: run.id, goal: run.goal, base: run.baseRef, check: store.config().testCommand, harvestedFrom: run.id };
+  // Cluster by goal text (re-runs of the same goal are correlated) and type by the planner's domain slug, the only
+  // task metadata a goal run carries; without these every case is its own cluster of type 'unknown'.
+  const c: EvalCase = { id: run.id, goal: run.goal, base: run.baseRef, check: store.config().testCommand, harvestedFrom: run.id, source: run.goal.trim().replace(/\s+/g, ' ').toLowerCase(), taskType: run.domain || 'unknown' };
   store.writeJson(`evals/${run.id}.json`, c);
   return c;
 }
