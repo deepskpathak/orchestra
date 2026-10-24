@@ -198,5 +198,6 @@ export interface ProjectConfig {
     candidates: number; // variants proposed per cycle; 1 = classic single-variant loop
     promotionRule: 'gain' | 'paired'; // 'gain' = gain above max(minGain, spread); 'paired' = 95% CI lower bound above zero
     niMargin: number; // paired rule: a task type whose mean delta is below -niMargin vetoes promotion
+    minJudgeAgreement?: number | null; // refuse to evolve when the incumbent's judge/hidden-check agreement is below this; null = off
   };
 }

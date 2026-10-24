@@ -188,3 +188,7 @@ Rails are enforced in code, not only in prompts:
 ## Try it without spending money
 
 `orchestra demo` uses the simulator and sets `evolve.every` and `evolve.sample` to 1 in its temporary project, so the whole loop runs quickly.
+
+## Judge calibration floor (`evolve.minJudgeAgreement`)
+
+The evolver optimises against the judge, so a drifting judge corrupts evolution. Set `evolve.minJudgeAgreement` (for example `0.8`) and `orchestra evolve` first measures the incumbent's agreement between judge verdicts and bench hidden checks. With at least 10 bench runs on record and agreement below the floor, it returns without calling the evolver and the reason names the floor. Unset (`null`, the default) behaviour is unchanged. See [bench.md](bench.md#judge-calibration).

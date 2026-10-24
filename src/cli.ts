@@ -5,7 +5,8 @@ import { existsSync, mkdtempSync, openSync, readFileSync, writeFileSync } from '
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { claudeRunner, preflight, type Runner } from './agent.ts';
-import { loadArms, renderSummary, runBench, verifyOracles } from './bench.ts';
+import { importGrades, readBenchRows, renderCalibration, storeCalibration, writeSample } from './calibration.ts';
+import { loadArms, summarize, renderSummary, runBench, verifyOracles } from './bench.ts';
 import { runGoal } from './conductor.ts';
 import { explorationMetrics, renderExploration } from './exploration.ts';
 import { collectOutcomes, renderOutcomes } from './outcomes.ts';
@@ -41,7 +42,13 @@ Usage:
   orchestra bench                Run the fixed benchmark suite: arms x goals x repeats, hidden checks, JSONL + summary
       --arms a,b --goals g1,g2 --repeats N   Choose arms (default bench/arms.json), goals and repeats per goal
       --suite <dir>              Use another suite directory (default: the bundled bench/)
+      --report                   Summarise all stored bench results, with judge agreement and kappa per harness version
       --verify-oracles           Check that every goal's oracle passes its own hidden check (exit 1 otherwise)
+  orchestra bench calibrate --sample N [--seed S]
+                                 Write a stratified sample of verdicts (near-threshold and split votes oversampled) to
+                                 .orchestra/bench/calibration/sample.jsonl for human grading
+  orchestra bench calibrate --import <file>
+                                 Import human grades (id + humanPass) and report human-judge kappa
   orchestra evals                List Factory Eval cases
   orchestra --version            Print the installed Orchestra version
   orchestra promote <vN>         Promote a harness version (also used for rollback)
@@ -286,6 +293,7 @@ function cmdStats(args: string[]): void {
   if (rates.length) console.log(`Eval infra failure rate: ${rates.map((a) => `${a.version} ${(a.evalInfraRate! * 100).toFixed(0)}%`).join('   ')}`);
   console.log(`\n${renderOutcomes(collectOutcomes(store))}`);
   console.log(`\n${renderExploration(explorationMetrics(store.ledgerRows()))}`);
+  console.log(`\n${renderCalibration(storeCalibration(store))}`);
 }
 
 async function cmdEvolve(): Promise<void> {
@@ -400,6 +408,30 @@ async function cmdBench(args: string[]): Promise<void> {
     if (bad.length) die(`oracle check failed for ${bad.map((r) => r.goal).join(', ')}`);
     if (!results.length) die('no bench goals found');
     console.log(`\n${results.length} oracle(s) pass their hidden checks.`);
+    return;
+  }
+  if (args[0] === 'calibrate') {
+    const store = storeOrDie();
+    const imp = flag(args, '--import');
+    if (imp) {
+      if (!existsSync(imp)) die(`grades file not found: ${imp}`);
+      const r = importGrades(store, imp);
+      console.log(`imported ${r.imported} human grade(s) (${r.total} total)\n\n${renderCalibration(storeCalibration(store))}`);
+      return;
+    }
+    const size = Number(flag(args, '--sample') ?? 50);
+    if (!Number.isInteger(size) || size < 1) die('--sample must be a positive integer');
+    const seed = Number(flag(args, '--seed') ?? 1);
+    const { file, items } = writeSample(store, size, seed);
+    if (!items.length) die('no bench results yet; run `orchestra bench` first');
+    console.log(`wrote ${items.length} verdict(s) to ${file}\nSet humanPass to true or false on each line, then run: orchestra bench calibrate --import <file>`);
+    return;
+  }
+  if (args.includes('--report')) {
+    const store = storeOrDie();
+    const rows = readBenchRows(store);
+    if (rows.length) console.log(`${renderSummary(summarize(rows))}\n`);
+    console.log(renderCalibration(storeCalibration(store)));
     return;
   }
   const store = storeOrDie();
