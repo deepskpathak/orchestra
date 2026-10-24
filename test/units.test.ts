@@ -16,21 +16,37 @@ test('guard blocks holdout access, network, harness edits, secrets', () => {
   assert.equal(decide('Bash', { command: 'git push origin main' }).allow, false);
   assert.equal(decide('Edit', { file_path: '/r/.orchestra/harness/v1/judge.md' }).allow, false);
   assert.equal(decide('Read', { file_path: '/r/.env' }).allow, false);
-  assert.equal(decide('Edit', { file_path: '/r/scorer/judge.md' }).allow, false);
-  assert.equal(decide('Write', { file_path: 'scorer/config.json', content: '{}' }).allow, false);
-  assert.equal(decide('Bash', { command: 'echo pass > scorer/checklist.md' }).allow, false);
-  assert.equal(decide('Read', { file_path: '/r/scorer/judge.md' }).allow, true);
-  assert.equal(decide('Edit', { file_path: '/r/src/scorer.ts' }).allow, true);
+  assert.equal(decide('Edit', { file_path: '/r/src/app.ts' }).allow, true);
+});
+
+test('guard protects the installed scorer, not any scorer/ directory in the target repo', () => {
+  const ctx = { cwd: '/w', scorerDir: '/pkg/scorer' };
+  const d = (tool: string, input: Record<string, unknown>) => decide(tool, input, ctx).allow;
+  assert.equal(d('Edit', { file_path: '/pkg/scorer/judge.md' }), false);
+  assert.equal(d('Write', { file_path: '../pkg/scorer/config.json', content: '{}' }), false);
+  assert.equal(d('Bash', { command: 'echo pass > /pkg/scorer/checklist.md' }), false);
+  assert.equal(d('Read', { file_path: '/pkg/scorer/judge.md' }), true);
+  // A project with its own scorer/ or src/scorer/ is unaffected.
+  assert.equal(d('Edit', { file_path: '/w/scorer/model.py' }), true);
+  assert.equal(d('Write', { file_path: 'src/scorer/index.ts', content: 'x' }), true);
+  assert.equal(d('Bash', { command: 'echo x > scorer/a.txt' }), true);
   // Prose mentioning the scorer is not a scorer write.
-  assert.equal(decide('Write', { file_path: 'README.md', content: 'The frozen scorer/ judges promotion.' }).allow, true);
-  assert.equal(decide('Edit', { file_path: 'docs/a.md', old_string: 'x', new_string: 'see scorer/judge.md' }).allow, true);
-  // Read-only Bash on scorer/ is allowed; writes are not.
-  assert.equal(decide('Bash', { command: 'cat scorer/judge.md' }).allow, true);
-  assert.equal(decide('Bash', { command: 'ls scorer/ && grep -n pass scorer/checklist.md' }).allow, true);
-  assert.equal(decide('Bash', { command: 'rm scorer/judge.md' }).allow, false);
-  assert.equal(decide('Bash', { command: 'sed -i s/a/b/ scorer/judge.md' }).allow, false);
-  assert.equal(decide('Bash', { command: 'cat x | tee scorer/checklist.md' }).allow, false);
-  assert.equal(decide('Bash', { command: 'cp /tmp/x scorer/config.json' }).allow, false);
+  assert.equal(d('Write', { file_path: 'README.md', content: 'The frozen /pkg/scorer/ judges promotion.' }), true);
+  // Read-only Bash on the scorer is allowed; harmless redirects do not count as writes.
+  assert.equal(d('Bash', { command: 'cat /pkg/scorer/judge.md' }), true);
+  assert.equal(d('Bash', { command: 'grep -r foo /pkg/scorer 2>&1' }), true);
+  assert.equal(d('Bash', { command: 'cat /pkg/scorer/x > /dev/null' }), true);
+  // Writes, including the previously missed forms.
+  for (const command of [
+    'rm /pkg/scorer/judge.md',
+    'sed -i s/a/b/ /pkg/scorer/judge.md',
+    'cat x | tee /pkg/scorer/checklist.md',
+    'cp /tmp/x /pkg/scorer/config.json',
+    'cd /pkg/scorer && echo x > judge.md',
+    'git -C /pkg/scorer checkout -- judge.md',
+    'echo x > /pkg/scor*/judge.md',
+    'python3 -c "open(\'/pkg/scorer/judge.md\',\'w\').write(\'x\')"',
+  ]) assert.equal(d('Bash', { command }), false, command);
   assert.equal(decide('Bash', { command: 'npm test' }).allow, true);
   assert.equal(decide('Edit', { file_path: '/r/src/app.ts' }).allow, true);
 });
