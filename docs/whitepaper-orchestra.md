@@ -216,7 +216,7 @@ We propose, but have not run, the following protocol. Each step uses existing co
 
 ## 10 Future work
 
-A research review and an ordered plan that addresses the limitations below, and the newly found self-graded evaluation gap, are in [Closing the gaps](research/closing-the-gaps.md).
+A research review and an ordered plan that addresses the limitations in section 8, and a newly found self-graded evaluation gap, are in [Closing the gaps](research/closing-the-gaps.md).
 
 Drawn from `README.md`, `CHANGELOG.md`, `PLAN.md` and `docs/research/cost-accuracy-speed.md`:
 
