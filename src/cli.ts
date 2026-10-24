@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { claudeRunner, preflight, type Runner } from './agent.ts';
 import { importGrades, readBenchRows, renderCalibration, storeCalibration, writeSample } from './calibration.ts';
-import { loadArms, summarize, renderSummary, runBench, verifyOracles } from './bench.ts';
+import { ABLATION_ARMS, SINGLE_SESSION_ARM, ablationTable, loadArms, renderAblationTable, summarize, renderSummary, runBench, verifyOracles } from './bench.ts';
 import { runGoal } from './conductor.ts';
 import { explorationMetrics, renderExploration } from './exploration.ts';
 import { collectOutcomes, renderOutcomes } from './outcomes.ts';
@@ -42,6 +42,7 @@ Usage:
   orchestra bench                Run the fixed benchmark suite: arms x goals x repeats, hidden checks, JSONL + summary
       --arms a,b --goals g1,g2 --repeats N   Choose arms (default bench/arms.json), goals and repeats per goal
       --suite <dir>              Use another suite directory (default: the bundled bench/)
+      --ablations                Run the built-in arms full, -scenarios, -repair, -learnings, -contrastive, -evolver plus a matched-cost single-session baseline
       --report                   Summarise all stored bench results, with judge agreement and kappa per harness version
       --verify-oracles           Check that every goal's oracle passes its own hidden check (exit 1 otherwise)
   orchestra bench calibrate --sample N [--seed S]
@@ -431,15 +432,20 @@ async function cmdBench(args: string[]): Promise<void> {
     const store = storeOrDie();
     const rows = readBenchRows(store);
     if (rows.length) console.log(`${renderSummary(summarize(rows))}\n`);
+    // Pairs are (goal, repeat), so only the latest bench that ran a "full" arm is compared.
+    const latest = rows.filter((r) => r.arm === 'full').map((r) => r.bench).sort().pop();
+    if (latest) console.log(`Ablations in ${latest} (paired versus full, 95% CI clustered by goal)\n${renderAblationTable(ablationTable(rows.filter((r) => r.bench === latest)))}\n`);
     console.log(renderCalibration(storeCalibration(store)));
     return;
   }
   const store = storeOrDie();
   const repeats = Number(flag(args, '--repeats') ?? 1);
   if (!Number.isInteger(repeats) || repeats < 1) die('--repeats must be a positive integer');
-  const arms = loadArms(suite, flag(args, '--arms')?.split(',').filter(Boolean));
+  const named = flag(args, '--arms')?.split(',').filter(Boolean);
+  const arms = args.includes('--ablations') ? [...ABLATION_ARMS, SINGLE_SESSION_ARM] : loadArms(suite, named);
   const res = await runBench({ store, runner: runner(), suite, arms, goals, repeats, onRow: (r) => console.log(`${r.arm} ${r.goal} #${r.repeat}: ${r.checkPass ? 'pass' : 'fail'} ($${r.costUsd.toFixed(3)})`) });
   console.log(`\n${renderSummary(res.summary)}`);
+  if (args.includes('--ablations')) console.log(`\n${renderAblationTable(ablationTable(res.rows))}`);
   console.log(`\nresults: ${join(res.dir, 'results.jsonl')}\nsummary: ${join(res.dir, 'summary.json')}`);
 }
 
