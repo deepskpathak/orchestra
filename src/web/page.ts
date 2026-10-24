@@ -338,19 +338,20 @@ pre { margin: 0; padding: 10px 12px; max-height: 420px; overflow: auto; font: 12
 (function () {
   var $ = function (id) { return document.getElementById(id); };
   var RING = 2 * Math.PI * 52;
-  var TONE = { pending: 'idle', running: 'run', repair: 'warn', judging: 'judge', merging: 'accent', merged: 'ok', failed: 'bad', blocked: 'bad',
+  var TONE = { pending: 'idle', running: 'run', repair: 'warn', judging: 'judge', merging: 'accent', merged: 'ok', failed: 'bad', blocked: 'bad', needs_human: 'warn',
     planning: 'run', compounding: 'accent', done: 'ok' };
-  var LABEL = { pending: 'Queued', running: 'Building', repair: 'Repairing', judging: 'Verifying', merging: 'Merging', merged: 'Merged', failed: 'Failed', blocked: 'Blocked' };
+  var LABEL = { pending: 'Queued', running: 'Building', repair: 'Repairing', judging: 'Verifying', merging: 'Merging', merged: 'Merged', failed: 'Failed', blocked: 'Blocked', needs_human: 'Needs human' };
   var ROLE_TONE = { planner: 'accent', worker: 'run', judge: 'judge', librarian: 'ok', evolver: 'warn' };
   var ACTIVE = { running: 1, repair: 1, judging: 1, merging: 1 };
   // Rough share of the pipeline a task has covered, for the in-flight arc of the ring.
-  var WEIGHT = { pending: 0, blocked: 0, failed: 0, running: .25, repair: .2, judging: .55, merging: .8, merged: 1 };
+  var WEIGHT = { pending: 0, blocked: 0, failed: 0, needs_human: 0, running: .25, repair: .2, judging: .55, merging: .8, merged: 1 };
   var COLS = [
     { key: 'queued', name: 'Queued', tone: 'idle', has: ['pending'] },
     { key: 'build', name: 'Building', tone: 'run', has: ['running', 'repair'] },
     { key: 'verify', name: 'Verifying', tone: 'judge', has: ['judging'] },
     { key: 'merge', name: 'Merging', tone: 'accent', has: ['merging'] },
     { key: 'done', name: 'Done', tone: 'ok', has: ['merged'] },
+    { key: 'human', name: 'Needs human', tone: 'warn', has: ['needs_human'] },
     { key: 'stuck', name: 'Failed', tone: 'bad', has: ['failed', 'blocked'] }
   ];
   var MIX = [
@@ -359,12 +360,13 @@ pre { margin: 0; padding: 10px 12px; max-height: 420px; overflow: auto; font: 12
     { name: 'Verifying', tone: 'judge', has: ['judging'] },
     { name: 'Building', tone: 'run', has: ['running', 'repair'] },
     { name: 'Queued', tone: 'idle', has: ['pending'] },
+    { name: 'Needs human', tone: 'warn', has: ['needs_human'] },
     { name: 'Failed', tone: 'bad', has: ['failed', 'blocked'] }
   ];
   var EV = {
     'run.start': ['&#9835;', 'accent'], 'run.end': ['&#9632;', 'accent'], plan: ['&#9671;', 'accent'],
     'task.start': ['&#9654;', 'run'], 'task.verdict': ['&#9878;', 'judge'], 'task.repair': ['&#8635;', 'warn'],
-    'task.merged': ['&#10003;', 'ok'], 'task.failed': ['&#10005;', 'bad'], 'agent.start': ['&#9679;', 'run'],
+    'task.merged': ['&#10003;', 'ok'], 'task.failed': ['&#10005;', 'bad'], 'task.needs_human': ['&#63;', 'warn'], 'agent.start': ['&#9679;', 'run'],
     'agent.action': ['&#8250;', 'idle'], 'agent.end': ['&#9675;', 'idle'], learn: ['&#10022;', 'ok'], evolve: ['&#10227;', 'warn'], log: ['&#183;', 'idle']
   };
 

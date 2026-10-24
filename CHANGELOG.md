@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- `flag_for_human` worker outcome: a worker that finds the spec and tests contradict each other ends with `FLAG_FOR_HUMAN: <reason>`. The task stops with status `needs_human` (reason recorded, `task.needs_human` event), gets no repair retries, and is reported separately from failed tasks in the run summary, TUI and web dashboard.
 - Research paper `docs/research/closing-the-gaps.md`: a review of about 90 academic, industry and practitioner sources on evaluating, verifying, isolating and self-improving agentic software factories, and an ordered plan (8 workstreams, 6 milestones, stated hypotheses) to address the whitepaper's limitations. It also documents a gap: a candidate harness's own evolvable judge scores its Factory Eval runs.
 
 ## [0.6.1] - 2026-10-22

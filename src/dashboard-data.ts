@@ -30,6 +30,7 @@ export function listRunSummaries(store: Store) {
       satisfaction: r.satisfaction ?? null,
       tasks: r.tasks.length,
       merged: r.tasks.filter((t) => t.status === 'merged').length,
+      needsHuman: r.tasks.filter((t) => t.status === 'needs_human').length,
     }));
 }
 

@@ -92,6 +92,7 @@ export const STATUS_ICON: Record<TaskStatus, [string, Style]> = {
   merging: ['⇢', 'blue'],
   merged: ['✓', 'green'],
   failed: ['✗', 'red'],
+  needs_human: ['?', 'yellow'],
   blocked: ['⊘', 'red'],
 };
 
@@ -111,6 +112,7 @@ export function counts(run: Run) {
     active: by(['running', 'judging', 'merging']),
     repair: by(['repair']),
     failed: by(['failed', 'blocked']),
+    needsHuman: by(['needs_human']),
     pending: by(['pending']),
   };
 }
@@ -155,7 +157,7 @@ export function renderDashboard(run: Run, events: OrchestraEvent[], o: RenderOpt
   const statusStyle: Style = run.status === 'done' ? 'green' : run.status === 'failed' ? 'red' : 'cyan';
   row(
     `${bar(frac, Math.min(30, Math.floor(inner / 4)), c)} ${k.merged}/${k.total}  ` +
-      `${c('green', `✓${k.merged}`)} ${c('cyan', `●${k.active}`)} ${c('yellow', `⟳${k.repair}`)} ${c('red', `✗${k.failed}`)}  ` +
+      `${c('green', `✓${k.merged}`)} ${c('cyan', `●${k.active}`)} ${c('yellow', `⟳${k.repair}`)} ${c('red', `✗${k.failed}`)}${k.needsHuman ? ` ${c('yellow', `?${k.needsHuman}`)}` : ''}  ` +
       `${c('bold', `$${run.costUsd.toFixed(2)}`)}  ${c(statusStyle, run.status.toUpperCase())}` +
       (run.satisfaction !== undefined ? `  sat ${c('bold', run.satisfaction.toFixed(2))}` : ''),
   );
@@ -205,7 +207,7 @@ export function eventLine(e: OrchestraEvent, start: number, c: ReturnType<typeof
       ? 'green'
       : e.kind === 'task.failed'
         ? 'red'
-        : e.kind === 'task.repair'
+        : e.kind === 'task.needs_human' || e.kind === 'task.repair'
           ? 'yellow'
           : e.kind === 'task.verdict'
             ? 'magenta'

@@ -428,3 +428,29 @@ test('contrastive: librarian prompt carries the judge reasons with run and task 
   });
   assert.match(libPrompt, new RegExp(`contrast \\(run ${run.id}, task T2, attempt 2\\): picked B over A because Attempt B handled`));
 });
+
+test('flag_for_human stops after one attempt: needs_human, reason stored, event emitted, not a failure', async () => {
+  const store = tempRepo();
+  const run = await runGoal({ store, runner: fakeRunner({ flagForHuman: ['T1'], failFirstAttemptOf: [] }), goal: 'g' });
+  const by = Object.fromEntries(run.tasks.map((t) => [t.id, t]));
+  assert.equal(by.T1.status, 'needs_human');
+  assert.equal(by.T1.attempts, 1);
+  assert.match(by.T1.humanReason ?? '', /contradict/);
+  assert.equal(by.T3.status, 'blocked');
+  assert.equal(by.T2.status, 'merged');
+  const evs = store.events(run.id);
+  assert.equal(evs.filter((e) => e.kind === 'task.needs_human' && e.task === 'T1').length, 1);
+  assert.equal(evs.filter((e) => e.kind === 'task.repair' && e.task === 'T1').length, 0);
+  assert.equal(evs.filter((e) => e.kind === 'task.failed' && e.task === 'T1' && !/blocked/.test(e.msg)).length, 0);
+  assert.equal(run.status, 'failed');
+  assert.match(run.error ?? '', /1 need a human/);
+  assert.match(run.error ?? '', /\(2 failed|\(\d+ failed/);
+});
+
+test('parseWorkerOutcome reads structured and text flags', async () => {
+  const { parseWorkerOutcome } = await import('../src/agent.ts');
+  const base = { ok: true, costUsd: 0, turns: 1, durationMs: 0 };
+  assert.deepEqual(parseWorkerOutcome({ ...base, text: 'did it' }), { outcome: 'done' });
+  assert.deepEqual(parseWorkerOutcome({ ...base, text: 'x\nFLAG_FOR_HUMAN: spec vs test' }), { outcome: 'flag_for_human', reason: 'spec vs test' });
+  assert.deepEqual(parseWorkerOutcome({ ...base, text: '', structured: { outcome: 'flag_for_human' } }), { outcome: 'flag_for_human', reason: 'no reason given' });
+});
