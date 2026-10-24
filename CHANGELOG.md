@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- W2.6 outcome metrics beyond satisfaction (`src/outcomes.ts`): merge acceptance, edits before landing, revert rate and breakage proxy, cost and wall-clock per accepted merge, and success versus task length. Shown in `orchestra stats` and added to `/api/info` as `outcomes` (existing fields unchanged); see docs/dashboards.md.
 - M1 Integrity (W0.1, W1.1 to W1.5), which closes the self-graded eval gap:
   - W0.1: the README Status section matches `package.json`, with a guard test.
   - W1.1: a frozen promotion scorer in the top-level `scorer/` directory (pinned `config.json`, `judge.md`, `checklist.md`), outside the evolvable harness. Eval replays are scored by it plus the case `check`, not by the candidate's own judge. The guard blocks writes to the installed `scorer/`, and the evolver never sees it.

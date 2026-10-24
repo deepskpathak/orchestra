@@ -3,6 +3,7 @@
 
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { git } from './git.ts';
+import { collectOutcomes } from './outcomes.ts';
 import { currentVersion, loadHarness } from './harness.ts';
 import type { Store } from './store.ts';
 import type { Run } from './types.ts';
@@ -45,7 +46,7 @@ export function harnessLimits(store: Store): { maxAttempts?: number; passThresho
 }
 
 export function infoSnapshot(store: Store) {
-  return { harness: currentVersion(store), current: store.currentRunId(), repo: store.root, ...harnessLimits(store) };
+  return { harness: currentVersion(store), current: store.currentRunId(), repo: store.root, ...harnessLimits(store), outcomes: collectOutcomes(store) };
 }
 
 // Task detail: verdict is already in run.json; add the branch diff and the tail of each agent log.

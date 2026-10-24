@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { claudeRunner, preflight, type Runner } from './agent.ts';
 import { runGoal } from './conductor.ts';
+import { collectOutcomes, renderOutcomes } from './outcomes.ts';
 import { evolutionDue, evolve, harvest, listEvals, metrics } from './evolve.ts';
 import { fakeRunner } from './fake.ts';
 import { excludeOrchestra } from './git.ts';
@@ -277,6 +278,7 @@ function cmdStats(args: string[]): void {
   console.log(`\nFactory Eval cases: ${listEvals(store).length}   versions: ${listVersions(store).join(', ')}`);
   const rates = readArchive(store).filter((a) => a.evalInfraRate !== undefined);
   if (rates.length) console.log(`Eval infra failure rate: ${rates.map((a) => `${a.version} ${(a.evalInfraRate! * 100).toFixed(0)}%`).join('   ')}`);
+  console.log(`\n${renderOutcomes(collectOutcomes(store))}`);
 }
 
 async function cmdEvolve(): Promise<void> {
