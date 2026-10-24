@@ -8,7 +8,7 @@ import { runGoal } from '../src/conductor.ts';
 import { evaluate, evaluatePair, evolutionDue, evolve, harvest, listEvals, metrics, promotionDecision } from '../src/evolve.ts';
 import { fakeRunner } from '../src/fake.ts';
 import { EVOLVABLE_FILES, createVariant, currentVersion, loadHarness, readArchive } from '../src/harness.ts';
-import { loadScorer } from '../src/scorer.ts';
+import { fitDiff, loadScorer, scorerPrompt } from '../src/scorer.ts';
 import { tempRepo } from './helpers.ts';
 import { DEFAULT_PROJECT_CONFIG } from '../src/store.ts';
 
@@ -470,4 +470,16 @@ test('evolve: a candidate that trips the monitor more than the incumbent is not 
   await evolve(store, spy, quiet);
   assert.ok(prompts.length >= 2);
   for (const p of prompts) assert.doesNotMatch(p, /integrity|grading file|weakened-test|reward-hack|monitor/i);
+});
+
+test('scorer prompt keeps test-file diffs when a large src diff would exhaust the budget', () => {
+  const file = (path: string, n: number) => `diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n@@ -1 +1 @@\n${'+x\n'.repeat(n)}`;
+  const diff = file('src/a.ts', 30_000) + file('src/b.ts', 5_000) + file('test/a.test.ts', 50);
+  const out = fitDiff(diff);
+  assert.ok(out.length < 25_000);
+  assert.ok(out.includes('diff --git a/test/a.test.ts'), 'grading-surface file survives truncation');
+  assert.match(out, /diff truncated; cut or partial: .*src\/a\.ts/);
+  assert.equal(fitDiff('small'), 'small');
+  const p = scorerPrompt(loadScorer(), { goal: 'g', diff: 'd', checkPassed: null, integrityFlags: ['weakened-test in test/a.test.ts (1 assertion line(s) removed)'], cwd: '.' });
+  assert.match(p, /INTEGRITY MONITOR FLAGS[\s\S]*weakened-test/);
 });

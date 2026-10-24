@@ -141,7 +141,7 @@ async function evalCase(store: Store, runner: Runner, version: string, c: EvalCa
   let score = 0;
   if (ok && run.integrationBranch) {
     const diff = c.base ? git(store.root, 'diff', `${c.base}...${run.integrationBranch}`) : '';
-    const scored = await scoreReplay(scorer, runner, { goal: c.goal, diff, checkPassed, cwd: store.root, runId: run.id });
+    const scored = await scoreReplay(scorer, runner, { goal: c.goal, diff, checkPassed, integrityFlags: run.tasks.flatMap((t) => (t.integrityFlags ?? []).map((f) => `${f.kind} in ${f.file} (${f.detail})`)), cwd: store.root, runId: run.id });
     cost += scored.cost;
     store.ledger({ t: Date.now(), run: run.id, kind: 'eval', harness: version, role: 'judge', model: scorer.model, ok: scored.ok, costUsd: scored.cost, durationMs: 0, turns: 0 });
     if (!scored.ok && INFRA_ERROR.test(scored.error ?? '')) {

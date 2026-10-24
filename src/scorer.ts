@@ -6,6 +6,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { extractJson, type Runner } from './agent.ts';
 import { PACKAGE_ROOT } from './harness.ts';
+import { isGradingSurface } from './integrity.ts';
 import { resolveModel } from './models.ts';
 
 export const SCORER_DIR = join(PACKAGE_ROOT, 'scorer');
@@ -38,6 +39,7 @@ export interface ReplayEvidence {
   goal: string;
   diff: string;
   checkPassed: boolean | null; // null when the case has no check
+  integrityFlags?: string[]; // integrity-monitor findings for the replay, shown to the scorer as evidence
   cwd: string;
   runId?: string;
 }
@@ -55,11 +57,34 @@ const SCHEMA = {
   required: ['pass', 'score', 'summary'],
 };
 
+// Fit a diff into the scorer's budget without letting size hide tampering: files are split out, grading
+// surfaces (tests, scenarios, workflows) go first, each file gets an equal share, and anything cut is named.
+export function fitDiff(diff: string, max = MAX_DIFF_CHARS): string {
+  if (diff.length <= max) return diff;
+  const chunks = diff.split(/^(?=diff --git )/m).filter(Boolean);
+  const nameOf = (c: string) => /^diff --git a\/(.+?) b\//.exec(c)?.[1] ?? '';
+  const ordered = [...chunks.filter((c) => isGradingSurface(nameOf(c))), ...chunks.filter((c) => !isGradingSurface(nameOf(c)))];
+  const cap = Math.max(1000, Math.floor(max / ordered.length));
+  const kept: string[] = [];
+  const cut: string[] = [];
+  let used = 0;
+  for (const c of ordered) {
+    const body = c.length > cap ? `${c.slice(0, cap)}\n... (file diff truncated)\n` : c;
+    if (used + body.length > max) cut.push(nameOf(c) || '(unnamed)');
+    else {
+      kept.push(body);
+      used += body.length;
+      if (c.length > cap) cut.push(`${nameOf(c)} (partial)`);
+    }
+  }
+  return `${kept.join('')}\n... (diff truncated; cut or partial: ${cut.join(', ') || 'none'})`;
+}
+
 // The replay's own satisfaction is deliberately absent from the prompt.
 export function scorerPrompt(s: Scorer, e: ReplayEvidence): string {
-  const diff = e.diff.length > MAX_DIFF_CHARS ? `${e.diff.slice(0, MAX_DIFF_CHARS)}\n... (diff truncated)` : e.diff;
   const check = e.checkPassed === null ? 'no check configured' : e.checkPassed ? 'PASSED' : 'FAILED';
-  return [`${SCORER_MARKER} (scorer v${s.version})`, `SCORER CHECKLIST:\n${s.checklist}`, `GOAL:\n${e.goal}`, `CHECK RESULT: ${check}`, `DIFF:\n${diff || '(empty)'}`].join('\n\n');
+  const flags = e.integrityFlags?.length ? `INTEGRITY MONITOR FLAGS (grading-surface edits, weakened tests, reward hacks):\n${e.integrityFlags.map((f) => `- ${f}`).join('\n')}` : '';
+  return [`${SCORER_MARKER} (scorer v${s.version})`, `SCORER CHECKLIST:\n${s.checklist}`, `GOAL:\n${e.goal}`, `CHECK RESULT: ${check}`, flags, `DIFF:\n${fitDiff(e.diff) || '(empty)'}`].filter(Boolean).join('\n\n');
 }
 
 export async function scoreReplay(scorer: Scorer, runner: Runner, e: ReplayEvidence): Promise<ScoredReplay> {
