@@ -171,7 +171,7 @@ Tracked on GitHub as **#56 W9 Repo context** (a sub-issue of M6, #17).
 ## 9 Roadmap housekeeping
 
 - The plan is tracked as GitHub issues: milestone parents M1 to M6 (#12 to #17), workstream items W0.1 to W8.1 (#18 to #55), and W9 (#56 to #62).
-- The Roadmap board view (project 3, view 4) showed items only up to #45 when checked; #46 to #62 may need adding to the board.
+- All of these, including #56 to #62, are on the Roadmap board (project 3), which adds new repo issues automatically.
 
 ## 10 References (continuing from `closing-the-gaps.md`)
 
