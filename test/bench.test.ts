@@ -249,3 +249,51 @@ test('single-session budget does not read the source store harness when the comp
   const single = rows.find((r) => r.arm === 'single-session')!;
   assert.ok(single.budgetUsd! > 0);
 });
+
+test('a crashing arm becomes failed rows, the rest of the bench and summary.json survive, and temp repos are cleaned up', async () => {
+  const store = tempRepo();
+  const priv = mkdtempSync(join(tmpdir(), 'orchestra-private-tmp-')); // private TMPDIR so parallel test files cannot disturb the count
+  const oldTmp = process.env.TMPDIR;
+  process.env.TMPDIR = priv;
+  const arms = [{ name: 'ok' }, { name: 'ghost', harness: 'v99' }]; // v99 does not exist: that arm's rows throw
+  let res;
+  try {
+    res = await runBench({ store, runner: fakeRunner(), goals: ['calc-sub'], repeats: 2, arms, benchId: 'bf' });
+  } finally {
+    process.env.TMPDIR = oldTmp;
+  }
+  const { rows, dir } = res;
+  assert.deepEqual(readdirSync(priv), []);
+  rmSync(priv, { recursive: true, force: true });
+  assert.equal(rows.length, 4);
+  const ghost = rows.filter((r) => r.arm === 'ghost');
+  assert.equal(ghost.length, 2);
+  for (const r of ghost) {
+    assert.equal(r.checkPass, false);
+    assert.match(r.error!, /v99/);
+  }
+  assert.ok(rows.filter((r) => r.arm === 'ok').every((r) => r.error === undefined));
+  const summary = JSON.parse(readFileSync(join(dir, 'summary.json'), 'utf8'));
+  assert.deepEqual(summary.arms.map((a: { arm: string }) => a.arm), ['ok', 'ghost']);
+  assert.equal(readFileSync(join(dir, 'results.jsonl'), 'utf8').trim().split('\n').length, 4);
+});
+
+test('materialiseFixture removes its temp dir when git setup fails', () => {
+  const suite = mkdtempSync(join(tmpdir(), 'orchestra-suite-'));
+  const bad = join(suite, 'fixtures', 'f');
+  cpSync(join(DEFAULT_SUITE, 'fixtures', readdirSync(join(DEFAULT_SUITE, 'fixtures'))[0]), bad, { recursive: true });
+  const priv = mkdtempSync(join(tmpdir(), 'orchestra-private-tmp-'));
+  const oldPath = process.env.PATH;
+  const oldTmp = process.env.TMPDIR;
+  process.env.TMPDIR = priv;
+  process.env.PATH = '/nonexistent'; // git cannot be found, so init throws after the dir exists
+  try {
+    assert.throws(() => materialiseFixture(suite, 'f'));
+  } finally {
+    process.env.PATH = oldPath;
+    process.env.TMPDIR = oldTmp;
+    rmSync(suite, { recursive: true, force: true });
+  }
+  assert.deepEqual(readdirSync(priv), []);
+  rmSync(priv, { recursive: true, force: true });
+});

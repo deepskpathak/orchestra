@@ -60,6 +60,7 @@ export interface BenchRow {
   taskVerdicts: Record<string, boolean | null>;
   split?: boolean; // a contrastive pair's two judge verdicts disagreed; written only when true
   budgetUsd?: number; // single-session rows: the matched-cost budget
+  error?: string; // set when this (arm, goal, repeat) crashed; the row then counts as a failed check
   singleSession?: boolean; // written only when true: the row has no judge, so calibration skips it
   costUsd: number;
   wallMs: number;
@@ -101,11 +102,16 @@ export function materialiseFixture(suite: string, fixture: string): { dir: strin
   const src = join(suite, 'fixtures', fixture);
   if (!existsSync(src)) throw new Error(`bench fixture "${fixture}" not found at ${src}`);
   const dir = mkdtempSync(join(tmpdir(), 'orchestra-bench-'));
-  cpSync(src, dir, { recursive: true });
-  git(dir, 'init', '-q', '-b', 'main');
-  git(dir, 'add', '-A');
-  git(dir, '-c', 'user.name=Orchestra', '-c', 'user.email=orchestra@localhost', 'commit', '-qm', 'bench base');
-  return { dir, base: git(dir, 'rev-parse', 'HEAD') };
+  try {
+    cpSync(src, dir, { recursive: true });
+    git(dir, 'init', '-q', '-b', 'main');
+    git(dir, 'add', '-A');
+    git(dir, '-c', 'user.name=Orchestra', '-c', 'user.email=orchestra@localhost', 'commit', '-qm', 'bench base');
+    return { dir, base: git(dir, 'rev-parse', 'HEAD') };
+  } catch (err) {
+    rmSync(dir, { recursive: true, force: true }); // nobody else holds this path yet, so do not leak it
+    throw err;
+  }
 }
 
 const scriptPath = (suite: string, rel: string): string => (isAbsolute(rel) ? rel : resolve(suite, rel));
@@ -223,82 +229,95 @@ export async function runBench(o: BenchOptions): Promise<{ benchId: string; dir:
 
   // Single-session baselines run last: their budget is the mean cost per goal of the arm they are compared with.
   const ordered = [...arms.filter((a) => !a.singleSession), ...arms.filter((a) => a.singleSession)];
-  for (const arm of ordered) {
-    const fallbackBudget = () => loadHarness(o.store, arm.harness === 'incumbent' ? undefined : arm.harness).config.budgetUsd.worker;
-    let budgetUsd: number | undefined; // single-session arms only; resolved on first use, inside the per-row try
-    for (const goal of goals) {
-      for (let repeat = 1; repeat <= repeats; repeat++) {
-        const { dir: repo, base } = materialiseFixture(suite, goal.fixture);
-        const t0 = Date.now();
-        try {
-          // The run happens in the throwaway repo's own store, so it is never harvested or counted for evolution here.
-          excludeOrchestra(repo);
-          const store = new Store(repo);
-          store.writeJson('config.json', armConfig(arm));
-          seedHarness(store);
-          const version = arm.harness === 'incumbent' ? currentVersion(o.store) : arm.harness;
-          if (version && version !== 'v1') {
-            const from = o.store.path('harness', version);
-            if (!existsSync(from)) throw new Error(`arm ${arm.name}: harness ${version} not found (have ${listVersions(o.store).join(', ')})`);
-            cpSync(from, store.path('harness', version), { recursive: true });
-          }
-          let row: BenchRow;
-          if (arm.singleSession) {
-            budgetUsd ??= matchedBudget(rows, arm, arms, fallbackBudget);
-            const harness = loadHarness(store, version);
-            const res = await o.runner({
-              role: 'worker',
-              prompt: goal.goal,
-              system: harness.prompts.worker,
-              cwd: repo,
-              model: harness.config.models.worker,
-              budgetUsd: budgetUsd!,
-              allowedTools: store.config().allowedTools,
-              timeoutMs: 30 * 60_000,
-              meta: { attempt: 1 },
-            });
-            const checkPass = runCheck(suite, goal, repo).pass;
-            row = { arm: arm.name, goal: goal.id, taskType: goal.taskType, humanMinutes: goal.humanMinutes, repeat, runId: `single-${goal.id}-${repeat}`, harness: harness.version, checkPass, judgeSatisfaction: null, taskVerdicts: {}, singleSession: true, budgetUsd, costUsd: res.costUsd, wallMs: Date.now() - t0 };
-          } else {
-            const run = await runGoal({ store, runner: o.runner, goal: goal.goal, harnessVersion: version, baseRef: base, kind: 'eval', ablate: arm.ablate });
-            let checkPass = false;
-            if (run.integrationBranch) {
-              const co = mkdtempSync(join(tmpdir(), 'orchestra-bench-check-'));
-              try {
-                git(repo, 'worktree', 'add', '-q', '--detach', co, run.integrationBranch);
-                checkPass = runCheck(suite, goal, co).pass;
-              } finally {
-                try { git(repo, 'worktree', 'remove', '--force', co); } catch { rmSync(co, { recursive: true, force: true }); }
-              }
+  try {
+    for (const arm of ordered) {
+      const fallbackBudget = () => loadHarness(o.store, arm.harness === 'incumbent' ? undefined : arm.harness).config.budgetUsd.worker;
+      let budgetUsd: number | undefined; // single-session arms only; resolved on first use, inside the per-row try
+      for (const goal of goals) {
+        for (let repeat = 1; repeat <= repeats; repeat++) {
+          const t0 = Date.now();
+          let repo: string | undefined;
+          let version: string | undefined;
+          try {
+            const fx = materialiseFixture(suite, goal.fixture);
+            repo = fx.dir;
+            const base = fx.base;
+            // The run happens in the throwaway repo's own store, so it is never harvested or counted for evolution here.
+            excludeOrchestra(repo);
+            const store = new Store(repo);
+            store.writeJson('config.json', armConfig(arm));
+            seedHarness(store);
+            version = arm.harness === 'incumbent' ? currentVersion(o.store) : arm.harness;
+            if (version && version !== 'v1') {
+              const from = o.store.path('harness', version);
+              if (!existsSync(from)) throw new Error(`arm ${arm.name}: harness ${version} not found (have ${listVersions(o.store).join(', ')})`);
+              cpSync(from, store.path('harness', version), { recursive: true });
             }
-            row = {
-              arm: arm.name,
-              goal: goal.id,
-              taskType: goal.taskType,
-              humanMinutes: goal.humanMinutes,
-              repeat,
-              runId: run.id,
-              harness: run.harness,
-              checkPass,
-              judgeSatisfaction: run.satisfaction ?? null,
-              taskVerdicts: Object.fromEntries(run.tasks.map((t) => [t.id, t.verdict ? t.verdict.pass : null])),
-              ...(run.tasks.some((t) => t.contrast?.a.verdict && t.contrast.b.verdict && t.contrast.a.verdict.pass !== t.contrast.b.verdict.pass) ? { split: true } : {}),
-              costUsd: run.costUsd,
-              wallMs: Date.now() - t0,
-            };
+            let row: BenchRow;
+            if (arm.singleSession) {
+              budgetUsd ??= matchedBudget(rows, arm, arms, fallbackBudget);
+              const harness = loadHarness(store, version);
+              const res = await o.runner({
+                role: 'worker',
+                prompt: goal.goal,
+                system: harness.prompts.worker,
+                cwd: repo,
+                model: harness.config.models.worker,
+                budgetUsd: budgetUsd!,
+                allowedTools: store.config().allowedTools,
+                timeoutMs: 30 * 60_000,
+                meta: { attempt: 1 },
+              });
+              const checkPass = runCheck(suite, goal, repo).pass;
+              row = { arm: arm.name, goal: goal.id, taskType: goal.taskType, humanMinutes: goal.humanMinutes, repeat, runId: `single-${goal.id}-${repeat}`, harness: harness.version, checkPass, judgeSatisfaction: null, taskVerdicts: {}, singleSession: true, budgetUsd, costUsd: res.costUsd, wallMs: Date.now() - t0 };
+            } else {
+              const run = await runGoal({ store, runner: o.runner, goal: goal.goal, harnessVersion: version, baseRef: base, kind: 'eval', ablate: arm.ablate });
+              let checkPass = false;
+              if (run.integrationBranch) {
+                const co = mkdtempSync(join(tmpdir(), 'orchestra-bench-check-'));
+                try {
+                  git(repo, 'worktree', 'add', '-q', '--detach', co, run.integrationBranch);
+                  checkPass = runCheck(suite, goal, co).pass;
+                } finally {
+                  try { git(repo, 'worktree', 'remove', '--force', co); } catch { rmSync(co, { recursive: true, force: true }); }
+                }
+              }
+              row = {
+                arm: arm.name,
+                goal: goal.id,
+                taskType: goal.taskType,
+                humanMinutes: goal.humanMinutes,
+                repeat,
+                runId: run.id,
+                harness: run.harness,
+                checkPass,
+                judgeSatisfaction: run.satisfaction ?? null,
+                taskVerdicts: Object.fromEntries(run.tasks.map((t) => [t.id, t.verdict ? t.verdict.pass : null])),
+                ...(run.tasks.some((t) => t.contrast?.a.verdict && t.contrast.b.verdict && t.contrast.a.verdict.pass !== t.contrast.b.verdict.pass) ? { split: true } : {}),
+                costUsd: run.costUsd,
+                wallMs: Date.now() - t0,
+              };
+            }
+            rows.push(row);
+            appendFileSync(file, JSON.stringify(row) + '\n');
+            o.onRow?.(row);
+          } catch (err) {
+            // One crashed (arm, goal, repeat) must not discard the rest of the bench: record it as a failed check.
+            const row: BenchRow = { arm: arm.name, goal: goal.id, taskType: goal.taskType, humanMinutes: goal.humanMinutes, repeat, runId: `failed-${arm.name}-${goal.id}-${repeat}`, harness: version ?? arm.harness ?? '', checkPass: false, judgeSatisfaction: null, taskVerdicts: {}, ...(arm.singleSession ? { singleSession: true } : {}), ...(budgetUsd !== undefined ? { budgetUsd } : {}), costUsd: 0, wallMs: Date.now() - t0, error: (err as Error).message };
+            rows.push(row);
+            appendFileSync(file, JSON.stringify(row) + '\n');
+            o.onRow?.(row);
+          } finally {
+            if (repo) rmSync(repo, { recursive: true, force: true });
           }
-          rows.push(row);
-          appendFileSync(file, JSON.stringify(row) + '\n');
-          o.onRow?.(row);
-        } finally {
-          rmSync(repo, { recursive: true, force: true });
         }
       }
     }
+  } finally {
+    // Always leave a summary of whatever completed, even if something outside the per-row guard throws.
+    writeFileSync(join(dir, 'summary.json'), JSON.stringify({ benchId, repeats, arms: summarize(rows) }, null, 2) + '\n');
   }
-  const summary = summarize(rows);
-  writeFileSync(join(dir, 'summary.json'), JSON.stringify({ benchId, repeats, arms: summary }, null, 2) + '\n');
-  return { benchId, dir, rows, summary };
+  return { benchId, dir, rows, summary: summarize(rows) };
 }
 
 export interface AblationRow {
