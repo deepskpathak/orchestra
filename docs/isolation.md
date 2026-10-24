@@ -1,0 +1,38 @@
+# Isolation: the docker backend
+
+`orchestra run --sandbox docker` is an **opt-in** backend for untrusted repos. Each worker call runs as
+`docker run --rm --network=none ...` instead of a bare `claude` process. The default (`--sandbox off`) is unchanged.
+
+## What the container gets
+
+- The worker's worktree, read-write, mounted at the same path as on the host (so the worktree's `.git` pointer resolves).
+- The temp directory, read-write.
+- The shared git directory, with `hooks` and `config` overlaid **read-only**. Git needs the common dir to commit.
+- Working directory set to the worktree.
+- Environment by name only (`-e NAME`, values come from the spawn env): `ANTHROPIC_*` and `CLAUDE_*`. Git-hosting, registry and cloud credentials are scrubbed first, and the host `PATH` and `HOME` are not passed.
+- Nothing else from the host: no `~/.ssh`, no `.env*` outside the worktree, no holdout.
+
+## Flags
+
+| Flag | Meaning |
+|---|---|
+| `--sandbox docker` | Use the container backend. Exits 1 with a hint if `docker` is not on PATH. Never chosen by `--sandbox auto`. |
+| `--sandbox-image <image>` | Image to run. Default `orchestra-worker:latest`. It must contain the `claude` CLI; Orchestra does not build it. |
+| `--gvisor` | Adds `--runtime=runsc` (gVisor must be installed and registered with docker). |
+
+## Limit you must decide on: the model API
+
+`--network=none` blocks **all** networking, including the model API. A container started this way cannot
+reach it by itself. Orchestra does not guess a route. Either accept that (a worker that cannot call the model
+will fail), or provide the route yourself in the image, for example a local proxy reachable over a mounted unix
+socket. Package registries are blocked too, so install dependencies into the image beforehand.
+
+## Boundary model
+
+The container (or the `srt`/`claude` OS sandbox) is the real control. The guard hook in `src/guard.ts` is a
+deny-list backstop only.
+
+## Tests
+
+CI has no docker. The tests use a pure `dockerArgs` builder, an injected detector, and a spawn shim, so they pass without it.
+The backend has not been run against a real docker daemon in this repo's tests.

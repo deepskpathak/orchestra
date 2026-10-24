@@ -7,6 +7,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } fr
 import { dirname, join } from 'node:path';
 import { PACKAGE_ROOT } from './harness.ts';
 import { countToolUse } from './exploration.ts';
+import { containerEnvNames, dockerArgs, DEFAULT_IMAGE } from './container.ts';
 import { claudeSandboxSettings, srtArgs, type SandboxPolicy } from './sandbox.ts';
 import type { Role, WorkerOutcome } from './types.ts';
 
@@ -14,7 +15,8 @@ import type { Role, WorkerOutcome } from './types.ts';
 // own sandbox settings. Either way the settings land in the worktree's .claude/settings.local.json.
 export interface AgentSandbox {
   policy: SandboxPolicy;
-  backend: 'srt' | 'claude';
+  backend: 'srt' | 'claude' | 'docker';
+  docker?: { image?: string; gvisor?: boolean }; // docker backend only
 }
 
 export interface AgentRequest {
@@ -148,6 +150,18 @@ export type SpawnFn = typeof spawn;
 // The command and args to spawn for a request. Without a sandbox this is plain `claude`.
 export function buildCommand(req: AgentRequest): { command: string; args: string[] } {
   const args = buildArgs(req);
+  if (req.sandbox?.backend === 'docker') {
+    const { policy, docker } = req.sandbox;
+    const [command, ...rest] = dockerArgs({
+      worktree: req.cwd,
+      tmpDir: policy.write.allow[1],
+      image: docker?.image ?? DEFAULT_IMAGE,
+      envNames: containerEnvNames(req.env ?? {}),
+      gitCommonDir: dirname(policy.write.deny[0]),
+      gvisor: docker?.gvisor,
+    });
+    return { command, args: [...rest, 'claude', ...args] };
+  }
   if (req.sandbox) {
     const settings = writeSandboxSettings(req.cwd, req.sandbox.policy);
     if (req.sandbox.backend === 'srt') {

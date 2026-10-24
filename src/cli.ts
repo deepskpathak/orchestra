@@ -34,6 +34,10 @@ Usage:
       --sandbox auto|srt|claude|off
                                  OS-sandbox workers (writes only to the worktree and temp, no credential reads,
                                  network limited to the model API plus sandbox.allowedHosts). Default off
+      --sandbox docker           Opt-in container backend for untrusted repos: docker run --rm --network=none.
+                                 Needs docker; --network=none also blocks the model API (see docs/isolation.md)
+      --sandbox-image <image>    Image for --sandbox docker (default orchestra-worker:latest; must contain claude)
+      --gvisor                   With --sandbox docker, add --runtime=runsc
       --unattended               Refuse to start unless a sandbox backend (srt, bwrap+socat or sandbox-exec) is
                                  available; strips push and publish tokens from agent env
   orchestra serve [--port N]     Web dashboard on localhost (default 4317), read-only
@@ -64,7 +68,7 @@ Usage:
   orchestra statusline           Statusline command for Claude Code (reads JSON on stdin)
 
 Env: ORCHESTRA_RUNNER=fake uses the simulator instead of real Claude sessions.
-     ORCHESTRA_SANDBOX_DETECT=none|srt|claude overrides sandbox detection (tests and CI).`;
+     ORCHESTRA_SANDBOX_DETECT=none|srt|claude|docker overrides sandbox detection (tests and CI).`;
 
 function runner(): Runner {
   return process.env.ORCHESTRA_RUNNER === 'fake' ? fakeRunner({ stepMs: Number(process.env.ORCHESTRA_FAKE_STEP_MS ?? 150) }) : claudeRunner;
@@ -125,36 +129,45 @@ export function detectTestCommand(root: string): string | null {
   return null;
 }
 
-const SANDBOX_MODES = ['auto', 'srt', 'claude', 'off'];
+const SANDBOX_MODES = ['auto', 'srt', 'claude', 'docker', 'off'];
 
 interface SandboxProbe {
   backend: SandboxBackend; // what `auto` would pick
   srt: boolean;
   claude: boolean; // Claude Code's built-in sandbox can run
+  docker?: boolean; // docker CLI is on PATH (only used by --sandbox docker, never by auto)
   reason: string;
 }
 
 // ORCHESTRA_SANDBOX_DETECT=none|srt|claude is a test and CI hook that replaces probing the machine.
 export function probeSandbox(env: Record<string, string | undefined> = process.env): SandboxProbe {
   const forced = env.ORCHESTRA_SANDBOX_DETECT;
+  if (forced === 'docker') return { backend: 'none', srt: false, claude: false, docker: true, reason: 'ORCHESTRA_SANDBOX_DETECT=docker' };
   if (forced === 'none') return { backend: 'none', srt: false, claude: false, reason: 'ORCHESTRA_SANDBOX_DETECT=none' };
   if (forced === 'srt') return { backend: 'srt', srt: true, claude: false, reason: 'ORCHESTRA_SANDBOX_DETECT=srt' };
   if (forced === 'claude') return { backend: 'claude', srt: false, claude: true, reason: 'ORCHESTRA_SANDBOX_DETECT=claude' };
   const which = (c: string) => spawnSync('which', [c], { stdio: 'ignore' }).status === 0;
   const d = detectSandbox({ platform: process.platform, which });
   const claude = process.platform === 'darwin' ? d.available.includes('sandbox-exec') : d.available.includes('bwrap') && d.available.includes('socat');
-  return { backend: d.backend, srt: d.available.includes('srt'), claude, reason: d.reason };
+  return { backend: d.backend, srt: d.available.includes('srt'), claude, docker: which('docker'), reason: d.reason };
 }
 
 // Resolves --sandbox / --unattended into the conductor option. Dies (exit 1) before any agent call
 // when a requested backend is missing or unattended mode has nothing to confine workers with.
-export function resolveSandbox(args: string[], probe: SandboxProbe = probeSandbox()): { backend: 'srt' | 'claude' | null; unattended: boolean } {
+export function resolveSandbox(
+  args: string[],
+  probe: SandboxProbe = probeSandbox(),
+): { backend: 'srt' | 'claude' | 'docker' | null; unattended: boolean; image?: string; gvisor?: boolean } {
   const unattended = args.includes('--unattended');
   const mode = flag(args, '--sandbox') ?? (unattended ? 'auto' : 'off');
   if (!SANDBOX_MODES.includes(mode)) die(`--sandbox must be one of: ${SANDBOX_MODES.join(', ')} (got "${mode}")`);
   const need = 'Install srt (sandbox-runtime), or bwrap and socat (Linux), or use macOS sandbox-exec';
   if (unattended && mode === 'off') die(`--unattended needs a sandbox, but --sandbox is off. ${need}.`);
   if (mode === 'off') return { backend: null, unattended };
+  if (mode === 'docker') {
+    if (!probe.docker) die('--sandbox docker requested but docker was not found on PATH. Install docker (or use --sandbox srt|claude).');
+    return { backend: 'docker', unattended, image: flag(args, '--sandbox-image'), gvisor: args.includes('--gvisor') };
+  }
   if (mode === 'srt' || mode === 'claude') {
     if (!(mode === 'srt' ? probe.srt : probe.claude)) die(`--sandbox ${mode} requested but it is not available (${probe.reason}). ${need}.`);
     return { backend: mode, unattended };
@@ -172,7 +185,8 @@ async function cmdRun(args: string[]): Promise<void> {
   const noEvolve = args.includes('--no-evolve');
   const withWeb = args.includes('--serve');
   const sandboxVal = flag(args, '--sandbox');
-  const goal = args.filter((a) => !a.startsWith('--') && a !== sandboxVal).join(' ').trim();
+  const imageVal = flag(args, '--sandbox-image');
+  const goal = args.filter((a) => !a.startsWith('--') && a !== sandboxVal && a !== imageVal).join(' ').trim();
   if (!goal) die('Usage: orchestra run "<goal>"');
   const store = storeOrDie();
   const iso = resolveSandbox(args);
@@ -180,7 +194,7 @@ async function cmdRun(args: string[]): Promise<void> {
   if (detach) {
     const log = store.path('daemon.log');
     const fd = openSync(log, 'a');
-    const child = spawn(process.execPath, [join(PACKAGE_ROOT, 'bin', 'orchestra.ts'), 'run', goal, ...(noEvolve ? ['--no-evolve'] : []), ...(sandboxVal ? ['--sandbox', sandboxVal] : []), ...(iso.unattended ? ['--unattended'] : [])], {
+    const child = spawn(process.execPath, [join(PACKAGE_ROOT, 'bin', 'orchestra.ts'), 'run', goal, ...(noEvolve ? ['--no-evolve'] : []), ...(sandboxVal ? ['--sandbox', sandboxVal] : []), ...(imageVal ? ['--sandbox-image', imageVal] : []), ...(args.includes('--gvisor') ? ['--gvisor'] : []), ...(iso.unattended ? ['--unattended'] : [])], {
       cwd: store.root,
       detached: true,
       stdio: ['ignore', fd, fd],
@@ -209,7 +223,7 @@ async function cmdRun(args: string[]): Promise<void> {
     runner: r,
     goal,
     onUpdate: (u) => (latest = u),
-    sandbox: iso.backend ? { backend: iso.backend, allowedHosts: store.config().sandbox?.allowedHosts } : undefined,
+    sandbox: iso.backend ? { backend: iso.backend, allowedHosts: store.config().sandbox?.allowedHosts, image: iso.image, gvisor: iso.gvisor } : undefined,
     unattended: iso.unattended,
   });
   clearInterval(tick);
