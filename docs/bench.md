@@ -48,3 +48,15 @@ Use `ORCHESTRA_RUNNER=fake` to exercise the engine without spending tokens; the 
 ```
 
 Nested config objects merge one level deep. A `harness` other than `v1` is copied from your project's store.
+
+## Judge calibration
+
+`orchestra bench --report` and `orchestra stats` show, per harness version, how often the judge's verdict (run satisfaction at or above `passThreshold`, else all tasks passed) matches the hidden check, plus Cohen's kappa. Human grades add a human-judge kappa.
+
+```
+orchestra bench calibrate --sample 50 [--seed 1]   # writes .orchestra/bench/calibration/sample.jsonl
+# edit the file: set humanPass to true or false on each line you grade
+orchestra bench calibrate --import graded.jsonl    # merges grades, prints human-judge kappa
+```
+
+The sample oversamples disagreements between judge and check, contrastive pairs whose two verdicts disagreed, and scores within 0.1 of `passThreshold`. About 70% of the sample is reserved for those; the rest is random. The same seed gives the same sample. Set `evolve.minJudgeAgreement` to block evolution when agreement falls below a floor.

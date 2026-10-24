@@ -3,6 +3,7 @@
 // Factory Eval against the incumbent, keep every variant in the archive, promote only on
 // a measured gain with no regressions.
 
+import { agreementBlock, storeCalibration } from './calibration.ts';
 import { meanDefined, pairedDecision, passAt1, passHatK } from './stats.ts';
 import { spawnSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
@@ -373,6 +374,8 @@ export async function evolve(store: Store, runner: Runner, log: (msg: string) =>
   const h = loadHarness(store, incumbent);
   const cfg = store.config();
   const m = metrics(store);
+  const blocked = agreementBlock(storeCalibration(store), incumbent, cfg.evolve.minJudgeAgreement);
+  if (blocked) return { candidate: null, incumbent, candidateScore: null, incumbentScore: null, promoted: false, reason: blocked };
   const recentIssues = goalRuns(store)
     .slice(-5)
     // Monitor output must never reach the evolver, or it could learn to evade the monitor.

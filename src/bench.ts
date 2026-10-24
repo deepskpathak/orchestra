@@ -41,6 +41,7 @@ export interface BenchRow {
   checkPass: boolean;
   judgeSatisfaction: number | null;
   taskVerdicts: Record<string, boolean | null>;
+  split?: boolean; // a contrastive pair's two judge verdicts disagreed; written only when true
   costUsd: number;
   wallMs: number;
 }
@@ -230,6 +231,7 @@ export async function runBench(o: BenchOptions): Promise<{ benchId: string; dir:
             checkPass,
             judgeSatisfaction: run.satisfaction ?? null,
             taskVerdicts: Object.fromEntries(run.tasks.map((t) => [t.id, t.verdict ? t.verdict.pass : null])),
+            ...(run.tasks.some((t) => t.contrast?.a.verdict && t.contrast.b.verdict && t.contrast.a.verdict.pass !== t.contrast.b.verdict.pass) ? { split: true } : {}),
             costUsd: run.costUsd,
             wallMs: Date.now() - t0,
           };
