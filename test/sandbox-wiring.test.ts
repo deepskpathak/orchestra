@@ -7,7 +7,7 @@ import { PassThrough } from 'node:stream';
 import { spawnSync } from 'node:child_process';
 import { test } from 'node:test';
 import { buildArgs, buildCommand, makeClaudeRunner, type AgentRequest } from '../src/agent.ts';
-import { resolveSandbox } from '../src/cli.ts';
+import { goalFromArgs, resolveSandbox } from '../src/cli.ts';
 import { PACKAGE_ROOT } from '../src/harness.ts';
 import { buildSandboxPolicy, scrubWorkerEnv } from '../src/sandbox.ts';
 import { tempRepo } from './helpers.ts';
@@ -169,6 +169,14 @@ test('worker policy resolves the git common dir once, not per agent call', async
   // With the repo unreadable, a second call can only succeed from the memo.
   rmSync(join(store.root, '.git', 'HEAD'));
   assert.equal(c.workerPolicy('/wt/b').gitCommonDir, first);
+});
+
+test('goalFromArgs strips flag values by position, not by matching words', () => {
+  assert.equal(goalFromArgs(['turn', 'off', 'the', 'cache', '--sandbox', 'off']), 'turn off the cache');
+  assert.equal(goalFromArgs(['--sandbox', 'off', 'turn', 'off', 'it']), 'turn off it');
+  assert.equal(goalFromArgs(['use', 'img', 'for', 'img', '--sandbox-image', 'img', '--gvisor', '--detach']), 'use img for img');
+  assert.equal(goalFromArgs(['Add', 'a', 'thing', '--no-evolve']), 'Add a thing');
+  assert.equal(goalFromArgs(['--sandbox', 'docker']), '');
 });
 
 test('resolveSandbox: modes and defaults', () => {

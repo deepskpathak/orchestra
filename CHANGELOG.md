@@ -16,6 +16,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Conductor: the git common dir for the worker sandbox policy is resolved once per run instead of running `git rev-parse` on every agent call.
 - Sandbox pre-flight (docker): the read-probe canary used to sit under the temp directory, which docker mounts read-write, so the probe could never pass against a real daemon. It now lives outside every mount (`/var/tmp`, else the home directory); if none is usable the probe is skipped with a warning. `PreflightResult` gains `warnings`, logged by the conductor.
 - Sandbox pre-flight: a failed network probe no longer counts as BLOCKED by itself. The same fetch runs unsandboxed first as a positive control; if it also fails the result is reported as inconclusive (no connectivity), the sandboxed network probe is skipped, and a warning is logged that network confinement is not verified. The control is one extra outbound request to the probe host by the orchestrator process. Tests use the injected exec only.
+- CLI: `orchestra run` no longer drops goal words that equal the `--sandbox` or `--sandbox-image` value (`orchestra run turn off the cache --sandbox off` kept only `turn the cache`). The flag and its value are removed by position.
 
 ### Added
 

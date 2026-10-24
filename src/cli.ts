@@ -180,13 +180,25 @@ export function resolveSandbox(
   return { backend: probe.backend, unattended };
 }
 
+// Positionals that make up the goal. The value-taking flags are removed together with their value by
+// position, so a goal word that happens to equal a flag value ("turn off the cache --sandbox off") stays.
+export function goalFromArgs(args: string[]): string {
+  const valueFlags = new Set(['--sandbox', '--sandbox-image']);
+  const words: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    if (valueFlags.has(args[i])) i++;
+    else if (!args[i].startsWith('--')) words.push(args[i]);
+  }
+  return words.join(' ').trim();
+}
+
 async function cmdRun(args: string[]): Promise<void> {
   const detach = args.includes('--detach');
   const noEvolve = args.includes('--no-evolve');
   const withWeb = args.includes('--serve');
   const sandboxVal = flag(args, '--sandbox');
   const imageVal = flag(args, '--sandbox-image');
-  const goal = args.filter((a) => !a.startsWith('--') && a !== sandboxVal && a !== imageVal).join(' ').trim();
+  const goal = goalFromArgs(args);
   if (!goal) die('Usage: orchestra run "<goal>"');
   const store = storeOrDie();
   const iso = resolveSandbox(args);
