@@ -392,6 +392,16 @@ test('contrastive: A wins, B worktree and branch removed', async () => {
   assert.doesNotMatch(files, /T2-b\.txt/);
 });
 
+test('contrastive: a worker flagging for a human removes the B worktree and branch', async () => {
+  const store = tempRepo({ concurrency: 1, contrastive });
+  const run = await runGoal({ store, runner: fakeRunner({ failFirstAttemptOf: ['T2'], flagOnRepair: ['T2'] }), goal: 'g' });
+  const t2 = run.tasks.find((t) => t.id === 'T2')!;
+  assert.equal(t2.status, 'needs_human');
+  assert.ok(!existsSync(store.path('worktrees', run.id, 'T2-b')));
+  const branches = execFileSync('git', ['branch', '--list', `orchestra/${run.id}/*`], { cwd: store.root, encoding: 'utf8' });
+  assert.doesNotMatch(branches, /T2-b/);
+});
+
 test('contrastive: a preferred attempt below passThreshold is not merged on preference alone', async () => {
   const store = tempRepo({ concurrency: 1, contrastive });
   const run = await runGoal({ store, runner: fakeRunner({ contrastPick: 'B', contrastScores: { a: 0.3, b: 0.5 }, failFirstAttemptOf: ['T1'] }), goal: 'g' });

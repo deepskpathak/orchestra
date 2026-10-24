@@ -8,10 +8,11 @@ import type { AgentRequest, AgentResult, Runner } from './agent.ts';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-export function fakeRunner(opts: { stepMs?: number; failFirstAttemptOf?: string[]; failAlways?: string[]; flagForHuman?: string[]; tamper?: (req: AgentRequest) => boolean; judgeFailTimes?: number; contrastPick?: 'A' | 'B'; contrastScores?: { a: number; b: number } } = {}): Runner {
+export function fakeRunner(opts: { stepMs?: number; failFirstAttemptOf?: string[]; failAlways?: string[]; flagForHuman?: string[]; flagOnRepair?: string[]; tamper?: (req: AgentRequest) => boolean; judgeFailTimes?: number; contrastPick?: 'A' | 'B'; contrastScores?: { a: number; b: number } } = {}): Runner {
   const step = opts.stepMs ?? 0;
   const failFirst = new Set(opts.failFirstAttemptOf ?? ['T2']);
   const flagHuman = new Set(opts.flagForHuman ?? []);
+  const flagRepair = new Set(opts.flagOnRepair ?? []);
   const failAlways = new Set(opts.failAlways ?? []);
   let judgeFailsLeft = opts.judgeFailTimes ?? 0;
 
@@ -76,7 +77,7 @@ export function fakeRunner(opts: { stepMs?: number; failFirstAttemptOf?: string[
         }
         execFileSync('git', ['add', '-A'], { cwd: req.cwd });
         execFileSync('git', ['commit', '-qm', `${task}: attempt ${attempt}`], { cwd: req.cwd });
-        if (flagHuman.has(task)) {
+        if (flagHuman.has(task) || (flagRepair.has(task) && Number(attempt) > 1)) {
           return done({ outcome: 'flag_for_human', reason: `Spec and tests contradict each other for ${task}` }, `FLAG_FOR_HUMAN: Spec and tests contradict each other for ${task}`, 0.2);
         }
         return done(undefined, `Implemented ${task}`, 0.2);

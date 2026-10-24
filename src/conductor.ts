@@ -600,7 +600,12 @@ export class Conductor {
     // Either contrastive worker flagging a contradiction stops the task for a human.
     for (const w of [workA, workB]) {
       const flag = w.ok ? parseWorkerOutcome(w) : undefined;
-      if (flag?.outcome === 'flag_for_human') return this.flagForHuman(task, flag.reason);
+      if (flag?.outcome === 'flag_for_human') {
+        // The task stays on worktree A; retire the unused B worktree and branch.
+        g.removeWorktree(store.root, wtB.path);
+        g.deleteBranch(store.root, wtB.branch);
+        return this.flagForHuman(task, flag.reason);
+      }
     }
 
     task.status = 'judging';
