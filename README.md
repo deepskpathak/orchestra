@@ -103,6 +103,7 @@ Inside Claude Code, the plugin adds `/orchestra:setup`, `/orchestra:run`, `/orch
 - [Dashboards](docs/dashboards.md): watch, status, serve, and the statusline
 - [Configuration](docs/configuration.md): `.orchestra/config.json` and harness config
 - [Whitepaper](docs/whitepaper-orchestra.md): design, methodology, limitations, and threats to validity
+- [Closing the gaps](docs/research/closing-the-gaps.md): research review and the ordered plan to address the whitepaper's limitations
 - [Blog post](docs/blog/orchestra-substack-post.md): a plain-language tour with an example run
 
 ## Project

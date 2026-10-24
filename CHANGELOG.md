@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- Research paper `docs/research/closing-the-gaps.md`: a review of about 90 academic, industry and practitioner sources on evaluating, verifying, isolating and self-improving agentic software factories, and an ordered plan (8 workstreams, 6 milestones, stated hypotheses) to address the whitepaper's limitations. It also documents a gap: a candidate harness's own evolvable judge scores its Factory Eval runs.
+
 ## [0.6.1] - 2026-10-22
 
 ### Added
