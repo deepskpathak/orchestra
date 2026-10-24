@@ -1,6 +1,6 @@
 // `orchestra` command line. Thin layer over conductor / evolve / render.
 
-import { spawn, execFileSync } from 'node:child_process';
+import { spawn, spawnSync, execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, openSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -15,6 +15,7 @@ import { fakeRunner } from './fake.ts';
 import { excludeOrchestra } from './git.ts';
 import { guardMain } from './guard.ts';
 import { GLOBAL, listDomains, readLearnings } from './learnings.ts';
+import { detectSandbox, type SandboxBackend } from './sandbox.ts';
 import { PACKAGE_ROOT, currentVersion, packageVersion, listVersions, promote, readArchive, seedHarness } from './harness.ts';
 import { DEFAULT_PROJECT_CONFIG, Store, findRepoRoot } from './store.ts';
 import { serve } from './web/server.ts';
@@ -30,6 +31,11 @@ Usage:
       --detach                   Run in the background; follow with \`orchestra watch\`
       --no-evolve                Skip the automatic evolution check after the run
       --serve                    Also serve the web dashboard while the run is live
+      --sandbox auto|srt|claude|off
+                                 OS-sandbox workers (writes only to the worktree and temp, no credential reads,
+                                 network limited to the model API plus sandbox.allowedHosts). Default off
+      --unattended               Refuse to start unless a sandbox backend (srt, bwrap+socat or sandbox-exec) is
+                                 available; strips push and publish tokens from agent env
   orchestra serve [--port N]     Web dashboard on localhost (default 4317), read-only
   orchestra serve --tui [runId]  Interactive terminal dashboard (no browser, opens no port); alias: orchestra tui
   orchestra watch [runId]        Full-screen live dashboard (q to quit)
@@ -57,7 +63,8 @@ Usage:
   orchestra demo                 Simulated run in a temp repo (no tokens spent)
   orchestra statusline           Statusline command for Claude Code (reads JSON on stdin)
 
-Env: ORCHESTRA_RUNNER=fake uses the simulator instead of real Claude sessions.`;
+Env: ORCHESTRA_RUNNER=fake uses the simulator instead of real Claude sessions.
+     ORCHESTRA_SANDBOX_DETECT=none|srt|claude overrides sandbox detection (tests and CI).`;
 
 function runner(): Runner {
   return process.env.ORCHESTRA_RUNNER === 'fake' ? fakeRunner({ stepMs: Number(process.env.ORCHESTRA_FAKE_STEP_MS ?? 150) }) : claudeRunner;
@@ -118,18 +125,62 @@ export function detectTestCommand(root: string): string | null {
   return null;
 }
 
+const SANDBOX_MODES = ['auto', 'srt', 'claude', 'off'];
+
+interface SandboxProbe {
+  backend: SandboxBackend; // what `auto` would pick
+  srt: boolean;
+  claude: boolean; // Claude Code's built-in sandbox can run
+  reason: string;
+}
+
+// ORCHESTRA_SANDBOX_DETECT=none|srt|claude is a test and CI hook that replaces probing the machine.
+export function probeSandbox(env: Record<string, string | undefined> = process.env): SandboxProbe {
+  const forced = env.ORCHESTRA_SANDBOX_DETECT;
+  if (forced === 'none') return { backend: 'none', srt: false, claude: false, reason: 'ORCHESTRA_SANDBOX_DETECT=none' };
+  if (forced === 'srt') return { backend: 'srt', srt: true, claude: false, reason: 'ORCHESTRA_SANDBOX_DETECT=srt' };
+  if (forced === 'claude') return { backend: 'claude', srt: false, claude: true, reason: 'ORCHESTRA_SANDBOX_DETECT=claude' };
+  const which = (c: string) => spawnSync('which', [c], { stdio: 'ignore' }).status === 0;
+  const d = detectSandbox({ platform: process.platform, which });
+  const claude = process.platform === 'darwin' ? d.available.includes('sandbox-exec') : d.available.includes('bwrap') && d.available.includes('socat');
+  return { backend: d.backend, srt: d.available.includes('srt'), claude, reason: d.reason };
+}
+
+// Resolves --sandbox / --unattended into the conductor option. Dies (exit 1) before any agent call
+// when a requested backend is missing or unattended mode has nothing to confine workers with.
+export function resolveSandbox(args: string[], probe: SandboxProbe = probeSandbox()): { backend: 'srt' | 'claude' | null; unattended: boolean } {
+  const unattended = args.includes('--unattended');
+  const mode = flag(args, '--sandbox') ?? (unattended ? 'auto' : 'off');
+  if (!SANDBOX_MODES.includes(mode)) die(`--sandbox must be one of: ${SANDBOX_MODES.join(', ')} (got "${mode}")`);
+  const need = 'Install srt (sandbox-runtime), or bwrap and socat (Linux), or use macOS sandbox-exec';
+  if (unattended && mode === 'off') die(`--unattended needs a sandbox, but --sandbox is off. ${need}.`);
+  if (mode === 'off') return { backend: null, unattended };
+  if (mode === 'srt' || mode === 'claude') {
+    if (!(mode === 'srt' ? probe.srt : probe.claude)) die(`--sandbox ${mode} requested but it is not available (${probe.reason}). ${need}.`);
+    return { backend: mode, unattended };
+  }
+  if (probe.backend === 'none') {
+    if (unattended) die(`--unattended refuses to start without a sandbox backend (${probe.reason}). ${need}.`);
+    console.error(`orchestra: warning: --sandbox auto found no backend (${probe.reason}); workers run unsandboxed.`);
+    return { backend: null, unattended };
+  }
+  return { backend: probe.backend, unattended };
+}
+
 async function cmdRun(args: string[]): Promise<void> {
   const detach = args.includes('--detach');
   const noEvolve = args.includes('--no-evolve');
   const withWeb = args.includes('--serve');
-  const goal = args.filter((a) => !a.startsWith('--')).join(' ').trim();
+  const sandboxVal = flag(args, '--sandbox');
+  const goal = args.filter((a) => !a.startsWith('--') && a !== sandboxVal).join(' ').trim();
   if (!goal) die('Usage: orchestra run "<goal>"');
   const store = storeOrDie();
+  const iso = resolveSandbox(args);
 
   if (detach) {
     const log = store.path('daemon.log');
     const fd = openSync(log, 'a');
-    const child = spawn(process.execPath, [join(PACKAGE_ROOT, 'bin', 'orchestra.ts'), 'run', goal, ...(noEvolve ? ['--no-evolve'] : [])], {
+    const child = spawn(process.execPath, [join(PACKAGE_ROOT, 'bin', 'orchestra.ts'), 'run', goal, ...(noEvolve ? ['--no-evolve'] : []), ...(sandboxVal ? ['--sandbox', sandboxVal] : []), ...(iso.unattended ? ['--unattended'] : [])], {
       cwd: store.root,
       detached: true,
       stdio: ['ignore', fd, fd],
@@ -153,7 +204,14 @@ async function cmdRun(args: string[]): Promise<void> {
     else printed = printNewEvents(store, latest, printed);
   }, live ? 120 : 400);
 
-  const run = await runGoal({ store, runner: r, goal, onUpdate: (u) => (latest = u) });
+  const run = await runGoal({
+    store,
+    runner: r,
+    goal,
+    onUpdate: (u) => (latest = u),
+    sandbox: iso.backend ? { backend: iso.backend, allowedHosts: store.config().sandbox?.allowedHosts } : undefined,
+    unattended: iso.unattended,
+  });
   clearInterval(tick);
   latest = run;
   if (live) live.close(run, store);

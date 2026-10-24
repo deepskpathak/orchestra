@@ -164,6 +164,8 @@ export interface HarnessConfig {
 }
 
 export interface ProjectConfig {
+  // Opt-in OS sandbox settings, read from the repo's own .orchestra/config.json only.
+  sandbox?: { allowedHosts?: string[] };
   concurrency: number;
   testCommand: string | null;
   allowedTools: string[];

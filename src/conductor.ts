@@ -2,7 +2,8 @@
 // plan -> parallel workers in worktrees -> tests + judge -> repair or merge queue -> learn.
 // Planners never code, workers never judge, judges never edit (role separation).
 
-import { join } from 'node:path';
+import { homedir, tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import { extractJson, parseWorkerOutcome, type AgentRequest, type AgentResult, type Runner } from './agent.ts';
 import * as g from './git.ts';
 import { alternateWorkerSection, comparePrompt, COMPARE_SCHEMA, contrastApplies, resolveContrast } from './contrast.ts';
@@ -10,6 +11,7 @@ import { plannedFiles } from './exploration.ts';
 import { analyzeDiff, MONITOR_MARK, type IntegrityFlag } from './integrity.ts';
 import { loadHarness, type Harness } from './harness.ts';
 import { formatLearnings, listDomains, normalizeDomain, readAllLearnings, readLearnings, writeLearnings, GLOBAL, type Lesson } from './learnings.ts';
+import { buildSandboxPolicy, scrubWorkerEnv } from './sandbox.ts';
 import { newRunId, type Store } from './store.ts';
 import type { ActiveAgent, CriterionResult, OrchestraEvent, Role, Run, Scenario, Task, Verdict } from './types.ts';
 
@@ -30,6 +32,10 @@ export interface ConductorOptions {
   // Opt-in ablation: turn one component off. Unset keeps the normal behaviour.
   ablate?: Ablation;
   onUpdate?: (run: Run) => void;
+  // Opt-in OS sandbox for write-capable roles (worker). Unset keeps spawning exactly as before.
+  sandbox?: { backend: 'srt' | 'claude'; allowedHosts?: string[] };
+  // Unattended: strip push and publish credentials from every agent env, even without a sandbox object.
+  unattended?: boolean;
 }
 
 // ---------- prompt builders ----------
@@ -305,6 +311,8 @@ export class Conductor {
   readonly run: Run;
   private readonly store: Store;
   private readonly runner: Runner;
+  private readonly sandboxOpt?: ConductorOptions['sandbox'];
+  private readonly scrubEnv: boolean;
   private readonly harness: Harness;
   private readonly onUpdate?: (run: Run) => void;
   private scenarios: Scenario[] = [];
@@ -318,6 +326,8 @@ export class Conductor {
     this.runner = opts.runner;
     this.harness = loadHarness(opts.store, opts.harnessVersion);
     this.onUpdate = opts.onUpdate;
+    this.sandboxOpt = opts.sandbox;
+    this.scrubEnv = Boolean(opts.sandbox || opts.unattended);
     this.ablate = opts.ablate ?? {};
     this.wtRoot = opts.store.path('worktrees');
     const id = (opts.kind === 'eval' ? 'e' : '') + newRunId();
@@ -929,6 +939,27 @@ export class Conductor {
 
   // ---------- plumbing ----------
 
+  // Sandbox and env additions for one agent call. Empty when the opt-in flags are off.
+  private isolation(role: Role, cwd: string): Pick<AgentRequest, 'sandbox' | 'env'> {
+    const out: Pick<AgentRequest, 'sandbox' | 'env'> = {};
+    if (this.scrubEnv) out.env = scrubWorkerEnv(process.env);
+    if (this.sandboxOpt && role === 'worker') {
+      const root = this.store.root;
+      const policy = buildSandboxPolicy({
+        worktree: cwd,
+        tmpDir: tmpdir(),
+        home: homedir(),
+        hiddenScenarioDir: this.store.path('holdout'),
+        gitCommonDir: resolve(root, g.git(root, 'rev-parse', '--git-common-dir')),
+        allowedHosts: this.sandboxOpt.allowedHosts,
+      });
+      // The generated settings must not be committed into the task branch.
+      g.excludePath(root, '.claude/settings.local.json');
+      out.sandbox = { policy, backend: this.sandboxOpt.backend };
+    }
+    return out;
+  }
+
   private async call(role: Role, task: Task | undefined, attempt: number, req: Omit<AgentRequest, 'role' | 'system' | 'model' | 'budgetUsd'>, modelOverride?: string, variant?: 'a' | 'b'): Promise<AgentResult> {
     const { run, harness } = this;
     const sfx = variant ? `-${variant}` : '';
@@ -949,6 +980,7 @@ export class Conductor {
     let lastSave = 0;
     const res = await this.runner({
       ...req,
+      ...this.isolation(role, req.cwd),
       role,
       model,
       system: harness.prompts[role],

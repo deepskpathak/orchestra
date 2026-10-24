@@ -23,6 +23,14 @@ Defaults come from `DEFAULT_PROJECT_CONFIG` in `src/store.ts`. Missing keys fall
 | `contrastive` | object | see below | Two-worker contrastive repair. |
 | `evolve` | object | see below | Self-improvement settings. |
 
+### `sandbox`
+
+Optional, absent by default. Read only from the repo's own `.orchestra/config.json` (never the run-time harness copy). Used when `orchestra run --sandbox` or `--unattended` is on.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `sandbox.allowedHosts` | string[] | `[]` | Extra hosts (for example package registries) workers may reach. The model API host is always allowed. |
+
 ### `judgeTiers`
 
 Off by default. When enabled, a cheap judge runs first and its verdict is final only if tests passed (or none ran), the score differs from `passThreshold` by more than `margin`, and it listed no issues. Otherwise, or if the cheap judge returns no verdict, the strong judge from the harness config (`models.judge`) runs and its verdict is final. Ledger rows record the model actually used.
