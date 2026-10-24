@@ -147,3 +147,15 @@ test('collector reads bench rows from <bench>/<id>/results.jsonl using checkPass
   const m = collectOutcomes(store);
   assert.deepEqual(m.byHumanMinutes.map((b) => [b.label, b.succeeded, b.runs]), [['<=15 min', 1, 2], ['1-4 h', 1, 1]]);
 });
+
+test('dashboard info reuses outcomes while nothing changed and recomputes when a run or branch changes', () => {
+  const store = seedLanded({ land: true });
+  const a = infoSnapshot(store).outcomes;
+  assert.equal(infoSnapshot(store).outcomes, a); // same object: no second round of git calls
+  const run = store.loadRun('r1')!;
+  store.saveRun({ ...run, costUsd: run.costUsd + 1 });
+  const b = infoSnapshot(store).outcomes;
+  assert.notEqual(b, a);
+  execFileSync('git', ['branch', 'extra'], { cwd: store.root });
+  assert.notEqual(infoSnapshot(store).outcomes, b);
+});
