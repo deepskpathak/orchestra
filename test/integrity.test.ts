@@ -33,6 +33,7 @@ test('reward-hack: ordinary variables named items/expected/testCount are not hel
 test('grading-surface: negative', () => {
   assert.equal(isGradingSurface('src/latest.ts'), false);
   assert.equal(isGradingSurface('docs/testing.md'), false);
+  assert.equal(isGradingSurface('src/scorer/index.ts'), false, 'a repo own scorer module is ordinary code');
   assert.deepEqual(analyzeDiff(mod('src/app.ts', '-a\n+b')), []);
 });
 

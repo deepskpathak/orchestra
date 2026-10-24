@@ -26,7 +26,8 @@ const GRADING_PATTERNS: RegExp[] = [
   /(^|\/)scenarios?\.[^/]+$/,
   /\.scenario\.[^/]+$/,
   /(^|\/)\.github\/workflows\//,
-  /(^|\/)scorers?\//,
+  // Only a root-level scorer/ (a repo's own src/scorer/ is ordinary code).
+  /^scorer\//,
 ];
 
 export function isGradingSurface(path: string): boolean {
