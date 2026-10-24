@@ -260,7 +260,9 @@ test('a crashing arm becomes failed rows, the rest of the bench and summary.json
   try {
     res = await runBench({ store, runner: fakeRunner(), goals: ['calc-sub'], repeats: 2, arms, benchId: 'bf' });
   } finally {
-    process.env.TMPDIR = oldTmp;
+    // Assigning undefined would store the string 'undefined' and poison later tests where TMPDIR is unset (CI).
+    if (oldTmp === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = oldTmp;
   }
   const { rows, dir } = res;
   assert.deepEqual(readdirSync(priv), []);
