@@ -17,6 +17,7 @@ export const DEFAULT_PROJECT_CONFIG: ProjectConfig = {
   preJudge: { enabled: false, lintCommand: null, requireTests: true },
   contrastive: { enabled: false, onlyWithoutTests: true, maxPairs: 1 },
   fastPath: { enabled: false, maxGoalChars: 400 },
+  context: { atlas: { enabled: false, mapTokens: 1024, packs: false, packTokens: 1500 } },
   evolve: { every: 3, autoPromote: true, minGain: 0.02, sample: 5, minCases: 5, candidates: 1, promotionRule: 'gain', niMargin: 0.05, minJudgeAgreement: null },
 };
 
@@ -86,7 +87,7 @@ export class Store {
 
   config(): ProjectConfig {
     const c = this.readJson<Partial<ProjectConfig>>('config.json', {});
-    return { ...DEFAULT_PROJECT_CONFIG, ...c, judgeTiers: { ...DEFAULT_PROJECT_CONFIG.judgeTiers, ...(c.judgeTiers ?? {}) }, preJudge: { ...DEFAULT_PROJECT_CONFIG.preJudge, ...(c.preJudge ?? {}) }, contrastive: { ...DEFAULT_PROJECT_CONFIG.contrastive, ...(c.contrastive ?? {}) }, fastPath: { ...DEFAULT_PROJECT_CONFIG.fastPath, ...(c.fastPath ?? {}) }, evolve: { ...DEFAULT_PROJECT_CONFIG.evolve, ...(c.evolve ?? {}) } };
+    return { ...DEFAULT_PROJECT_CONFIG, ...c, judgeTiers: { ...DEFAULT_PROJECT_CONFIG.judgeTiers, ...(c.judgeTiers ?? {}) }, preJudge: { ...DEFAULT_PROJECT_CONFIG.preJudge, ...(c.preJudge ?? {}) }, contrastive: { ...DEFAULT_PROJECT_CONFIG.contrastive, ...(c.contrastive ?? {}) }, fastPath: { ...DEFAULT_PROJECT_CONFIG.fastPath, ...(c.fastPath ?? {}) }, context: { ...DEFAULT_PROJECT_CONFIG.context, ...(c.context ?? {}), atlas: { ...DEFAULT_PROJECT_CONFIG.context.atlas, ...(c.context?.atlas ?? {}) } }, evolve: { ...DEFAULT_PROJECT_CONFIG.evolve, ...(c.evolve ?? {}) } };
   }
 
   // ---- runs ----

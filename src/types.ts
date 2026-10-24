@@ -191,6 +191,14 @@ export interface ProjectConfig {
     enabled: boolean; // small single-concern goals get one task and no hidden-scenario requirement
     maxGoalChars: number;
   };
+  context: {
+    atlas: {
+      enabled: boolean; // Repo Atlas: commit-keyed code graph (W9)
+      mapTokens: number; // budget for the L0 ranked map
+      packs: boolean; // L1 task packs in worker prompts
+      packTokens: number; // budget for one L1 pack
+    };
+  };
   evolve: {
     every: number; // auto-evolve after every N completed runs, 0 disables
     autoPromote: boolean;

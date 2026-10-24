@@ -1,0 +1,638 @@
+// Repo Atlas (W9): a deterministic, commit-keyed code graph. Nodes are dirs, files and symbols;
+// edges are contains, imports, references and tests. Extraction is regex based (no parser, no LLM,
+// no dependency) with a file-level fallback for any other text file. The extractors are pure
+// functions of source text. Cached at .orchestra/atlas/<sha>.json and rebuilt incrementally from
+// the nearest cached commit. Never indexes the Orchestra state dir, .env* or guard secret paths.
+
+import { existsSync, readdirSync } from 'node:fs';
+import { commitExists, diffNamesBetween, filesAtRef, git, readBlobsAtRef } from './git.ts';
+import { isSecretPath } from './guard.ts';
+import { Store } from './store.ts';
+
+export const ATLAS_VERSION = 1;
+const MAX_FILE_BYTES = 256 * 1024;
+const MAX_SYMBOLS_PER_FILE = 500;
+const MAX_NEAREST_CANDIDATES = 8;
+
+export type SymbolKind = 'function' | 'class' | 'method' | 'type' | 'const';
+
+export interface AtlasSymbol {
+  name: string; // qualified for methods (Class.method)
+  kind: SymbolKind;
+  line: number; // 1-based
+  exported: boolean;
+}
+
+export interface ImportRef {
+  spec: string; // module specifier as written
+  names: string[]; // bindings pulled in (original names); empty for side-effect, namespace or whole-module imports
+  mod?: boolean; // Rust `mod x;`
+}
+
+export interface Extracted {
+  symbols: AtlasSymbol[];
+  imports: ImportRef[];
+}
+
+export interface FileEntry extends Extracted {
+  lang: string;
+  size: number;
+  lines: number;
+}
+
+export type NodeKind = 'dir' | 'file' | 'symbol';
+export type EdgeKind = 'contains' | 'imports' | 'references' | 'tests';
+
+export interface AtlasNode {
+  id: string; // dir: "<path>/" ("./" for the root); file: path; symbol: "<path>#<name>"
+  kind: NodeKind;
+  path: string;
+  name: string;
+  lang?: string;
+  symKind?: SymbolKind;
+  line?: number;
+  exported?: boolean;
+}
+
+export interface AtlasEdge {
+  from: string;
+  to: string;
+  kind: EdgeKind;
+}
+
+export interface Atlas {
+  version: number;
+  sha: string;
+  files: Record<string, FileEntry>;
+  nodes: AtlasNode[];
+  edges: AtlasEdge[];
+}
+
+export interface AtlasStats {
+  files: number;
+  dirs: number;
+  symbols: number;
+  edges: Record<EdgeKind, number>;
+  languages: Record<string, number>;
+}
+
+// ---- exclusions ----
+
+// True for anything the atlas must never index: the Orchestra state dir at any depth, .env* files
+// and the guard's secret path pattern.
+export function isExcludedPath(path: string): boolean {
+  const p = path.replace(/\\/g, '/');
+  const segs = p.split('/');
+  if (segs.includes('.orchestra')) return true;
+  if ((segs[segs.length - 1] ?? '').startsWith('.env')) return true;
+  return isSecretPath(p);
+}
+
+// ---- language detection ----
+
+const EXT_LANG: Record<string, string> = {
+  ts: 'ts', tsx: 'ts', mts: 'ts', cts: 'ts', js: 'js', jsx: 'js', mjs: 'js', cjs: 'js',
+  py: 'python', go: 'go', java: 'java', rs: 'rust',
+};
+
+export function languageOf(path: string): string {
+  const m = /\.([A-Za-z0-9]+)$/.exec(path);
+  return (m && EXT_LANG[m[1].toLowerCase()]) || 'text';
+}
+
+const isJsLike = (lang: string) => lang === 'ts' || lang === 'js';
+
+// ---- extractors (pure: source text in, symbols and imports out) ----
+
+const KEYWORDS = new Set(['if', 'for', 'while', 'switch', 'catch', 'return', 'new', 'else', 'function', 'do', 'try', 'throw', 'await', 'typeof', 'synchronized', 'super', 'this']);
+
+function indentOf(line: string): number {
+  return line.length - line.trimStart().length;
+}
+
+function uniqImports(list: ImportRef[]): ImportRef[] {
+  const seen = new Set<string>();
+  const out: ImportRef[] = [];
+  for (const i of list) {
+    const key = `${i.mod ? 'm:' : ''}${i.spec}|${i.names.join(',')}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      out.push(i);
+    }
+  }
+  return out;
+}
+
+function parseNamedList(body: string): string[] {
+  return body
+    .split(',')
+    .map((s) => s.trim().replace(/^type\s+/, ''))
+    .filter(Boolean)
+    .map((s) => s.split(/\s+as\s+/)[0].trim())
+    .filter((s) => /^[\w$]+$/.test(s));
+}
+
+export function extractTsJs(text: string): Extracted {
+  const symbols: AtlasSymbol[] = [];
+  const lines = text.split('\n');
+  let cls: { name: string; indent: number } | null = null;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const ind = indentOf(line);
+    if (cls && ind <= cls.indent && /^\s*\}/.test(line)) cls = null;
+    let m: RegExpExecArray | null;
+    if ((m = /^\s*(export\s+)?(?:default\s+)?(?:declare\s+)?(?:abstract\s+)?class\s+([\w$]+)/.exec(line))) {
+      symbols.push({ name: m[2], kind: 'class', line: i + 1, exported: !!m[1] });
+      cls = { name: m[2], indent: ind };
+    } else if ((m = /^\s*(export\s+)?(?:default\s+)?(?:declare\s+)?(?:async\s+)?function\s*\*?\s*([\w$]+)/.exec(line))) {
+      symbols.push({ name: m[2], kind: 'function', line: i + 1, exported: !!m[1] });
+    } else if ((m = /^\s*(export\s+)?(?:declare\s+)?(?:const\s+)?(?:interface|enum)\s+([\w$]+)/.exec(line)) || (m = /^\s*(export\s+)?(?:declare\s+)?type\s+([\w$]+)\s*(?:<[^=]*>)?\s*=/.exec(line))) {
+      symbols.push({ name: m[2], kind: 'type', line: i + 1, exported: !!m[1] });
+    } else if ((m = /^\s*export\s+(?:const|let|var)\s+([\w$]+)/.exec(line))) {
+      symbols.push({ name: m[1], kind: 'const', line: i + 1, exported: true });
+    } else if (cls && ind > cls.indent && (m = /^\s*(?:(?:public|private|protected|static|async|readonly|override|abstract|get|set)\s+)*\*?\s*([\w$]+)\s*(?:<[^>(]*>)?\s*\([^)]*\)?[^=;{]*\{/.exec(line)) && !KEYWORDS.has(m[1])) {
+      symbols.push({ name: `${cls.name}.${m[1]}`, kind: 'method', line: i + 1, exported: false });
+    }
+    if (symbols.length >= MAX_SYMBOLS_PER_FILE) break;
+  }
+  const imports: ImportRef[] = [];
+  for (const m of text.matchAll(/\b(import|export)\s+(type\s+)?([^'"`;]*?)\s*from\s*['"]([^'"]+)['"]/g)) {
+    const clause = m[3];
+    const names: string[] = [];
+    const brace = /\{([^}]*)\}/.exec(clause);
+    if (brace) names.push(...parseNamedList(brace[1]));
+    const def = /^([\w$]+)\s*(?:,|$)/.exec(clause.trim());
+    if (def && m[1] === 'import') names.push('default');
+    imports.push({ spec: m[4], names });
+  }
+  for (const m of text.matchAll(/\bimport\s*['"]([^'"]+)['"]/g)) imports.push({ spec: m[1], names: [] });
+  for (const m of text.matchAll(/\b(?:require|import)\s*\(\s*['"]([^'"]+)['"]\s*\)/g)) imports.push({ spec: m[1], names: [] });
+  return { symbols, imports: uniqImports(imports) };
+}
+
+export function extractPython(text: string): Extracted {
+  const symbols: AtlasSymbol[] = [];
+  const lines = text.split('\n');
+  let cls: { name: string; indent: number; body: number } | null = null;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line.trim() || line.trim().startsWith('#')) continue;
+    const ind = indentOf(line);
+    if (cls && ind <= cls.indent && !/^\s*[@)]/.test(line)) cls = null;
+    if (cls && cls.body < 0 && ind > cls.indent) cls.body = ind;
+    let m: RegExpExecArray | null;
+    if ((m = /^(\s*)class\s+(\w+)/.exec(line))) {
+      if (ind === 0 || cls) symbols.push({ name: cls ? `${cls.name}.${m[2]}` : m[2], kind: 'class', line: i + 1, exported: ind === 0 && !m[2].startsWith('_') });
+      if (ind === 0) cls = { name: m[2], indent: 0, body: -1 };
+    } else if ((m = /^(\s*)(?:async\s+)?def\s+(\w+)/.exec(line))) {
+      if (ind === 0) symbols.push({ name: m[2], kind: 'function', line: i + 1, exported: !m[2].startsWith('_') });
+      else if (cls && ind === cls.body) symbols.push({ name: `${cls.name}.${m[2]}`, kind: 'method', line: i + 1, exported: false });
+    } else if (ind === 0 && (m = /^([A-Z][A-Z0-9_]*)\s*(?::[^=]+)?=/.exec(line))) {
+      symbols.push({ name: m[1], kind: 'const', line: i + 1, exported: true });
+    }
+    if (symbols.length >= MAX_SYMBOLS_PER_FILE) break;
+  }
+  const imports: ImportRef[] = [];
+  for (const m of text.matchAll(/^[ \t]*from[ \t]+(\.*[\w.]*)[ \t]+import[ \t]+(\([^)]*\)|[^\n]*)/gm)) {
+    const names = m[2]
+      .replace(/[()]/g, '')
+      .split(',')
+      .map((s) => s.replace(/#.*$/, '').trim().split(/\s+as\s+/)[0].trim())
+      .filter((s) => /^\w+$/.test(s));
+    imports.push({ spec: m[1], names });
+  }
+  for (const m of text.matchAll(/^[ \t]*import[ \t]+([^\n#]+)/gm)) {
+    for (const part of m[1].split(',')) {
+      const spec = part.trim().split(/\s+as\s+/)[0].trim();
+      if (/^[\w.]+$/.test(spec)) imports.push({ spec, names: [] });
+    }
+  }
+  return { symbols, imports: uniqImports(imports) };
+}
+
+export function extractGo(text: string): Extracted {
+  const symbols: AtlasSymbol[] = [];
+  const lines = text.split('\n');
+  const cap = (n: string) => /^[A-Z]/.test(n);
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    let m: RegExpExecArray | null;
+    if ((m = /^func\s+\(\s*\w*\s*\*?\s*(\w+)[^)]*\)\s*(\w+)/.exec(line))) symbols.push({ name: `${m[1]}.${m[2]}`, kind: 'method', line: i + 1, exported: cap(m[2]) });
+    else if ((m = /^func\s+(\w+)/.exec(line))) symbols.push({ name: m[1], kind: 'function', line: i + 1, exported: cap(m[1]) });
+    else if ((m = /^type\s+(\w+)\s+(struct|interface)?/.exec(line))) symbols.push({ name: m[1], kind: m[2] === 'struct' ? 'class' : 'type', line: i + 1, exported: cap(m[1]) });
+    else if ((m = /^(?:const|var)\s+(\w+)/.exec(line))) symbols.push({ name: m[1], kind: 'const', line: i + 1, exported: cap(m[1]) });
+    if (symbols.length >= MAX_SYMBOLS_PER_FILE) break;
+  }
+  const imports: ImportRef[] = [];
+  for (const m of text.matchAll(/^import\s+(?:[\w.]+\s+)?"([^"]+)"/gm)) imports.push({ spec: m[1], names: [] });
+  for (const m of text.matchAll(/^import\s*\(([\s\S]*?)\)/gm)) for (const q of m[1].matchAll(/"([^"]+)"/g)) imports.push({ spec: q[1], names: [] });
+  return { symbols, imports: uniqImports(imports) };
+}
+
+export function extractJava(text: string): Extracted {
+  const symbols: AtlasSymbol[] = [];
+  const lines = text.split('\n');
+  let cls: string | null = null;
+  const mods = '(?:(?:public|protected|private|abstract|final|static|sealed|strictfp|synchronized|native|default)\\s+)*';
+  const typeRe = new RegExp(`^\\s*(${mods})(?:class|interface|enum|record|@interface)\\s+(\\w+)`);
+  const methodRe = new RegExp(`^\\s+(${mods})(?:<[^>]+>\\s+)?([\\w<>\\[\\],.?]+(?:\\s+[\\w<>\\[\\],.?]+)*?)\\s+(\\w+)\\s*\\([^;]*\\)\\s*(?:throws\\s+[\\w., ]+)?\\s*\\{?\\s*$`);
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    let m: RegExpExecArray | null;
+    if ((m = typeRe.exec(line))) {
+      const top = indentOf(line) === 0;
+      symbols.push({ name: cls && !top ? `${cls}.${m[2]}` : m[2], kind: 'class', line: i + 1, exported: /\bpublic\b/.test(m[1]) });
+      if (top) cls = m[2];
+    } else if (cls && (m = methodRe.exec(line))) {
+      const ret = m[2].split(/\s+/)[0];
+      if (!KEYWORDS.has(ret) && !KEYWORDS.has(m[3])) symbols.push({ name: `${cls}.${m[3]}`, kind: 'method', line: i + 1, exported: /\bpublic\b/.test(m[1]) });
+    }
+    if (symbols.length >= MAX_SYMBOLS_PER_FILE) break;
+  }
+  const imports: ImportRef[] = [];
+  for (const m of text.matchAll(/^import\s+(static\s+)?([\w.]+?)(\.\*)?;/gm)) {
+    if (m[3]) continue;
+    const parts = m[2].split('.');
+    const last = parts.pop() as string;
+    imports.push(m[1] ? { spec: parts.join('.'), names: [last] } : { spec: m[2], names: [last] });
+  }
+  return { symbols, imports: uniqImports(imports) };
+}
+
+function expandUse(expr: string): string[] {
+  const brace = /^(.*?)\{(.*)\}(.*)$/.exec(expr.trim());
+  if (!brace) return [expr.trim().replace(/\s+as\s+\w+$/, '')];
+  const [, pre, inner, post] = brace;
+  const parts: string[] = [];
+  let depth = 0;
+  let cur = '';
+  for (const ch of inner) {
+    if (ch === '{') depth++;
+    if (ch === '}') depth--;
+    if (ch === ',' && depth === 0) {
+      parts.push(cur);
+      cur = '';
+    } else cur += ch;
+  }
+  if (cur.trim()) parts.push(cur);
+  return parts.flatMap((p) => (p.trim() === 'self' ? [pre.replace(/::$/, '') + post] : expandUse(pre + p.trim() + post)));
+}
+
+export function extractRust(text: string): Extracted {
+  const symbols: AtlasSymbol[] = [];
+  const lines = text.split('\n');
+  const vis = '(pub(?:\\([^)]*\\))?\\s+)?';
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const ind = indentOf(line);
+    let m: RegExpExecArray | null;
+    if ((m = new RegExp(`^\\s*${vis}(?:const\\s+)?(?:async\\s+)?(?:unsafe\\s+)?(?:extern\\s+"[^"]*"\\s+)?fn\\s+(\\w+)`).exec(line))) {
+      symbols.push({ name: m[2], kind: ind === 0 ? 'function' : 'method', line: i + 1, exported: !!m[1] });
+    } else if ((m = new RegExp(`^\\s*${vis}(struct|enum|trait|type|union)\\s+(\\w+)`).exec(line))) {
+      symbols.push({ name: m[3], kind: m[2] === 'struct' ? 'class' : 'type', line: i + 1, exported: !!m[1] });
+    } else if ((m = new RegExp(`^${vis}(?:const|static)\\s+(?:mut\\s+)?(\\w+)`).exec(line))) {
+      symbols.push({ name: m[2], kind: 'const', line: i + 1, exported: !!m[1] });
+    }
+    if (symbols.length >= MAX_SYMBOLS_PER_FILE) break;
+  }
+  const imports: ImportRef[] = [];
+  for (const m of text.matchAll(/^[ \t]*(?:pub(?:\([^)]*\))?[ \t]+)?use[ \t]+([^;]+);/gm)) {
+    for (const path of expandUse(m[1].replace(/\s+/g, ' '))) {
+      const segs = path.split('::').filter(Boolean);
+      if (segs.length) imports.push({ spec: segs.join('::'), names: [segs[segs.length - 1]] });
+    }
+  }
+  for (const m of text.matchAll(/^[ \t]*(?:pub(?:\([^)]*\))?[ \t]+)?mod[ \t]+(\w+);/gm)) imports.push({ spec: m[1], names: [], mod: true });
+  return { symbols, imports: uniqImports(imports) };
+}
+
+// Dispatches on the path's language. Unknown languages yield a file-level entry with no symbols.
+export function extractFile(path: string, text: string): FileEntry {
+  const lang = languageOf(path);
+  let ex: Extracted = { symbols: [], imports: [] };
+  if (isJsLike(lang)) ex = extractTsJs(text);
+  else if (lang === 'python') ex = extractPython(text);
+  else if (lang === 'go') ex = extractGo(text);
+  else if (lang === 'java') ex = extractJava(text);
+  else if (lang === 'rust') ex = extractRust(text);
+  const lines = text ? text.split('\n').length - (text.endsWith('\n') ? 1 : 0) : 0;
+  return { lang, size: Buffer.byteLength(text), lines, symbols: ex.symbols, imports: ex.imports };
+}
+
+// ---- import resolution and graph ----
+
+const posixDir = (p: string) => (p.includes('/') ? p.slice(0, p.lastIndexOf('/')) : '');
+const baseName = (p: string) => p.slice(p.lastIndexOf('/') + 1);
+
+function normalizeJoin(dir: string, rel: string): string {
+  const out = dir ? dir.split('/') : [];
+  for (const seg of rel.split('/')) {
+    if (seg === '.' || seg === '') continue;
+    if (seg === '..') out.pop();
+    else out.push(seg);
+  }
+  return out.join('/');
+}
+
+interface Index {
+  files: Set<string>;
+  suffix: Map<string, string[]>; // every path suffix (by segment) to the files ending with it
+  dirs: Map<string, string[]>; // dir -> files directly in it
+}
+
+function buildIndex(paths: string[]): Index {
+  const files = new Set(paths);
+  const suffix = new Map<string, string[]>();
+  const dirs = new Map<string, string[]>();
+  for (const p of paths) {
+    const segs = p.split('/');
+    for (let i = 0; i < segs.length; i++) {
+      const s = segs.slice(i).join('/');
+      const list = suffix.get(s);
+      if (list) list.push(p);
+      else suffix.set(s, [p]);
+    }
+    const d = posixDir(p);
+    const list = dirs.get(d);
+    if (list) list.push(p);
+    else dirs.set(d, [p]);
+  }
+  return { files, suffix, dirs };
+}
+
+const JS_EXTS = ['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs'];
+
+function resolveJs(from: string, imp: ImportRef, idx: Index): string[] {
+  if (!imp.spec.startsWith('.')) return [];
+  const base = normalizeJoin(posixDir(from), imp.spec);
+  const cands = [base];
+  const stripped = base.replace(/\.(m|c)?jsx?$/, '');
+  for (const stem of new Set([base, stripped])) {
+    for (const e of JS_EXTS) cands.push(stem + e);
+    for (const e of JS_EXTS) cands.push(`${stem}/index${e}`);
+  }
+  const hit = cands.find((c) => idx.files.has(c) && c !== from);
+  return hit ? [hit] : [];
+}
+
+function resolvePython(from: string, imp: ImportRef, idx: Index): string[] {
+  const dots = /^\.*/.exec(imp.spec)![0].length;
+  const mod = imp.spec.slice(dots).replace(/\./g, '/');
+  const out: string[] = [];
+  const tryMod = (m: string, relDir: string | null) => {
+    for (const c of [`${m}.py`, `${m}/__init__.py`]) {
+      if (relDir !== null) {
+        const p = normalizeJoin(relDir, c);
+        if (idx.files.has(p)) return p;
+      } else {
+        const hits = idx.suffix.get(c);
+        if (hits?.length) return [...hits].sort((a, b) => a.length - b.length)[0];
+      }
+    }
+    return null;
+  };
+  let relDir: string | null = null;
+  if (dots) {
+    relDir = posixDir(from);
+    for (let i = 1; i < dots; i++) relDir = posixDir(relDir);
+  }
+  const main = mod ? tryMod(mod, relDir) : null;
+  if (main && main !== from) out.push(main);
+  for (const n of imp.names) {
+    const sub = tryMod(mod ? `${mod}/${n}` : n, relDir);
+    if (sub && sub !== from && !out.includes(sub)) out.push(sub);
+  }
+  if (!mod && dots) {
+    const init = normalizeJoin(relDir ?? '', '__init__.py');
+    if (idx.files.has(init) && init !== from && !out.includes(init)) out.push(init);
+  }
+  return out;
+}
+
+function resolveGo(from: string, imp: ImportRef, idx: Index): string[] {
+  const parts = imp.spec.split('/');
+  for (let k = parts.length; k >= 1; k--) {
+    const dir = parts.slice(parts.length - k).join('/');
+    const hits = [...idx.dirs.entries()].filter(([d]) => d === dir || d.endsWith('/' + dir));
+    const files = hits.flatMap(([, f]) => f).filter((f) => f.endsWith('.go') && !f.endsWith('_test.go') && f !== from);
+    if (files.length) return files.sort();
+  }
+  return [];
+}
+
+function resolveJava(from: string, imp: ImportRef, idx: Index): string[] {
+  const hits = idx.suffix.get(imp.spec.replace(/\./g, '/') + '.java') ?? [];
+  return hits.filter((h) => h !== from).sort().slice(0, 1);
+}
+
+function resolveRust(from: string, imp: ImportRef, idx: Index): string[] {
+  const dir = posixDir(from);
+  const stem = baseName(from).replace(/\.rs$/, '');
+  if (imp.mod) {
+    const base = stem === 'mod' || stem === 'lib' || stem === 'main' ? dir : normalizeJoin(dir, stem);
+    for (const c of [normalizeJoin(base, `${imp.spec}.rs`), normalizeJoin(base, `${imp.spec}/mod.rs`)]) if (idx.files.has(c)) return [c];
+    return [];
+  }
+  const segs = imp.spec.split('::').filter((s) => s !== 'crate' && s !== 'self' && s !== 'super');
+  for (let k = segs.length; k >= 1; k--) {
+    const rel = segs.slice(0, k).join('/');
+    for (const c of [`${rel}.rs`, `${rel}/mod.rs`]) {
+      const hits = (idx.suffix.get(c) ?? []).filter((h) => h !== from);
+      if (hits.length) return [[...hits].sort((a, b) => a.length - b.length)[0]];
+    }
+  }
+  return [];
+}
+
+export function resolveImport(from: string, lang: string, imp: ImportRef, idx: Index): string[] {
+  if (isJsLike(lang)) return resolveJs(from, imp, idx);
+  if (lang === 'python') return resolvePython(from, imp, idx);
+  if (lang === 'go') return resolveGo(from, imp, idx);
+  if (lang === 'java') return resolveJava(from, imp, idx);
+  if (lang === 'rust') return resolveRust(from, imp, idx);
+  return [];
+}
+
+const TEST_PATH = /(^|\/)(tests?|__tests__|spec)\//;
+
+export function isTestPath(path: string): boolean {
+  const b = baseName(path);
+  return TEST_PATH.test(path) || /\.(test|spec)\.\w+$/.test(b) || /_test\.\w+$/.test(b) || /^test_.*\.py$/.test(b) || /(Test|Tests|IT)\.java$/.test(b);
+}
+
+// "foo.test.ts" / "test_foo.py" / "foo_test.go" / "FooTest.java" -> "foo" / "Foo"
+function testSubject(path: string): string | null {
+  const b = baseName(path).replace(/\.[^.]+$/, '');
+  const s = b.replace(/\.(test|spec)$/, '').replace(/_test$/, '').replace(/^test_/, '').replace(/(Tests?|IT)$/, '');
+  return s && s !== b ? s : s || null;
+}
+
+const GENERIC_STEMS = new Set(['index', 'main', 'mod', 'lib', 'init', '__init__', 'utils', 'helpers']);
+
+// Pure: derives nodes and edges from per-file extractions. Deterministic ordering.
+export function buildGraph(files: Record<string, FileEntry>): { nodes: AtlasNode[]; edges: AtlasEdge[] } {
+  const paths = Object.keys(files).sort();
+  const idx = buildIndex(paths);
+  const nodes: AtlasNode[] = [];
+  const edges: AtlasEdge[] = [];
+  const edgeSeen = new Set<string>();
+  const addEdge = (from: string, to: string, kind: EdgeKind) => {
+    if (from === to) return;
+    const key = `${kind}|${from}|${to}`;
+    if (edgeSeen.has(key)) return;
+    edgeSeen.add(key);
+    edges.push({ from, to, kind });
+  };
+  const dirId = (d: string) => (d ? `${d}/` : './');
+
+  const dirs = new Set<string>(['']);
+  for (const p of paths) for (let d = posixDir(p); d; d = posixDir(d)) dirs.add(d);
+  for (const d of [...dirs].sort()) {
+    nodes.push({ id: dirId(d), kind: 'dir', path: d, name: d ? baseName(d) : '.' });
+    if (d) addEdge(dirId(posixDir(d)), dirId(d), 'contains');
+  }
+  const symIds = new Map<string, Map<string, string>>(); // path -> symbol name -> id
+  for (const p of paths) {
+    const f = files[p];
+    nodes.push({ id: p, kind: 'file', path: p, name: baseName(p), lang: f.lang });
+    addEdge(dirId(posixDir(p)), p, 'contains');
+    const names = new Map<string, string>();
+    for (const s of f.symbols) {
+      let id = `${p}#${s.name}`;
+      if (names.has(s.name)) id = `${id}@${s.line}`;
+      if (!names.has(s.name)) names.set(s.name, id);
+      nodes.push({ id, kind: 'symbol', path: p, name: s.name, symKind: s.kind, line: s.line, exported: s.exported });
+      addEdge(p, id, 'contains');
+    }
+    symIds.set(p, names);
+  }
+
+  const bySubject = new Map<string, string[]>();
+  for (const p of paths) {
+    if (isTestPath(p)) continue;
+    const stem = baseName(p).replace(/\.[^.]+$/, '');
+    const list = bySubject.get(stem);
+    if (list) list.push(p);
+    else bySubject.set(stem, [p]);
+  }
+
+  for (const p of paths) {
+    const f = files[p];
+    const test = isTestPath(p);
+    for (const imp of f.imports) {
+      for (const target of resolveImport(p, f.lang, imp, idx)) {
+        addEdge(p, target, 'imports');
+        if (test && !isTestPath(target)) addEdge(p, target, 'tests');
+        const syms = symIds.get(target);
+        for (const n of imp.names) {
+          const id = syms?.get(n);
+          if (id) addEdge(p, id, 'references');
+        }
+      }
+    }
+    if (test) {
+      const subject = testSubject(p);
+      if (subject && !GENERIC_STEMS.has(subject)) for (const t of bySubject.get(subject) ?? []) addEdge(p, t, 'tests');
+    }
+  }
+  return { nodes, edges };
+}
+
+// ---- build, cache, incremental ----
+
+function readEntry(path: string, buf: Buffer | null | undefined): FileEntry | null {
+  if (!buf || buf.length > MAX_FILE_BYTES) return null;
+  if (buf.subarray(0, 8000).includes(0)) return null; // binary
+  return extractFile(path, buf.toString('utf8'));
+}
+
+function assemble(sha: string, files: Record<string, FileEntry>): Atlas {
+  const sorted: Record<string, FileEntry> = {};
+  for (const p of Object.keys(files).sort()) sorted[p] = files[p];
+  return { version: ATLAS_VERSION, sha, files: sorted, ...buildGraph(sorted) };
+}
+
+function indexableFiles(root: string, sha: string): string[] {
+  return filesAtRef(root, sha).filter((p) => !isExcludedPath(p));
+}
+
+function extractMany(root: string, sha: string, paths: string[]): Record<string, FileEntry> {
+  const out: Record<string, FileEntry> = {};
+  const CHUNK = 2000;
+  for (let i = 0; i < paths.length; i += CHUNK) {
+    const blobs = readBlobsAtRef(root, sha, paths.slice(i, i + CHUNK));
+    for (const [p, buf] of blobs) {
+      const e = readEntry(p, buf);
+      if (e) out[p] = e;
+    }
+  }
+  return out;
+}
+
+// Full build of the tracked tree at `sha`, or an incremental one when `prev` (a cached atlas for an
+// ancestor or sibling commit) is given: only changed and added files are re-extracted.
+export function buildAtlas(root: string, sha: string, prev?: Atlas): Atlas {
+  const full = git(root, 'rev-parse', sha);
+  if (prev && prev.version === ATLAS_VERSION && commitExists(root, prev.sha)) {
+    const changed = new Set(diffNamesBetween(root, prev.sha, full));
+    const now = new Set(indexableFiles(root, full));
+    const files: Record<string, FileEntry> = {};
+    for (const [p, e] of Object.entries(prev.files)) if (now.has(p) && !changed.has(p)) files[p] = e;
+    const redo = [...now].filter((p) => changed.has(p) || (!files[p] && !(p in prev.files)));
+    Object.assign(files, extractMany(root, full, redo));
+    return assemble(full, files);
+  }
+  return assemble(full, extractMany(root, full, indexableFiles(root, full)));
+}
+
+function cachedShas(store: Store): string[] {
+  const d = store.path('atlas');
+  if (!existsSync(d)) return [];
+  return readdirSync(d)
+    .filter((f) => /^[0-9a-f]{40}\.json$/.test(f))
+    .map((f) => f.slice(0, -5));
+}
+
+function readCached(store: Store, sha: string): Atlas | null {
+  try {
+    const a = store.readJson<Atlas | null>(`atlas/${sha}.json`, null);
+    return a && a.version === ATLAS_VERSION && a.sha === sha ? a : null;
+  } catch {
+    return null; // corrupt cache: rebuild
+  }
+}
+
+// Exact cache hit, else incremental from the cached commit with the smallest diff, else full.
+export function loadOrBuildAtlas(root: string, sha: string): Atlas {
+  const store = new Store(root);
+  const full = git(root, 'rev-parse', sha);
+  const hit = readCached(store, full);
+  if (hit) return hit;
+  let best: { atlas: Atlas; n: number } | null = null;
+  const candidates = cachedShas(store).filter((s) => s !== full && commitExists(root, s));
+  const scored = candidates.map((s) => ({ s, n: diffNamesBetween(root, s, full).length })).sort((a, b) => a.n - b.n).slice(0, MAX_NEAREST_CANDIDATES);
+  for (const c of scored) {
+    const atlas = readCached(store, c.s);
+    if (atlas) {
+      best = { atlas, n: c.n };
+      break;
+    }
+  }
+  const built = buildAtlas(root, full, best?.atlas);
+  store.writeText(`atlas/${full}.json`, JSON.stringify(built) + '\n');
+  return built;
+}
+
+export function atlasStats(atlas: Atlas): AtlasStats {
+  const edges: Record<EdgeKind, number> = { contains: 0, imports: 0, references: 0, tests: 0 };
+  for (const e of atlas.edges) edges[e.kind]++;
+  const languages: Record<string, number> = {};
+  for (const f of Object.values(atlas.files)) languages[f.lang] = (languages[f.lang] ?? 0) + 1;
+  let dirs = 0;
+  let symbols = 0;
+  for (const n of atlas.nodes) {
+    if (n.kind === 'dir') dirs++;
+    else if (n.kind === 'symbol') symbols++;
+  }
+  return { files: Object.keys(atlas.files).length, dirs, symbols, edges, languages };
+}
