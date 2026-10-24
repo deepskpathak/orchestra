@@ -283,6 +283,7 @@ async function cmdEvolve(): Promise<void> {
   const out = await evolve(store, runner(), (m) => console.log(`♫ ${m}`));
   console.log(`♫ ${out.promoted ? `PROMOTED ${out.candidate}` : `kept ${out.incumbent}`}: ${out.reason}`);
   if (out.candidateScore !== null) console.log(`  eval: ${out.incumbent} ${out.incumbentScore} vs ${out.candidate} ${out.candidateScore}`);
+  if (out.monitorFireRate) console.log(`  integrity monitor fire rate (flags per run): ${out.incumbent} ${out.monitorFireRate.incumbent.toFixed(2)}, ${out.candidate} ${out.monitorFireRate.candidate.toFixed(2)}`);
   if (out.infraFailureRate) console.log(`  infra failure rate: ${out.incumbent} ${(out.infraFailureRate.incumbent * 100).toFixed(0)}%, ${out.candidate} ${(out.infraFailureRate.candidate * 100).toFixed(0)}%`);
 }
 

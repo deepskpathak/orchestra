@@ -94,6 +94,18 @@ export function resetTo(cwd: string, ref: string): void {
   git(cwd, 'clean', '-qfd');
 }
 
+export function existsAtRef(cwd: string, ref: string, file: string): boolean {
+  return tryGit(cwd, 'cat-file', '-e', `${ref}:${file}`).ok;
+}
+
+// Overwrite (or recreate) files in the working tree with their content at `ref`. Files absent at
+// `ref` are left alone. Returns the files restored. Callers resetTo() afterwards to undo.
+export function restoreFromRef(cwd: string, ref: string, files: string[]): string[] {
+  const present = files.filter((f) => existsAtRef(cwd, ref, f));
+  for (const f of present) git(cwd, 'checkout', ref, '--', f);
+  return present;
+}
+
 export function head(cwd: string): string {
   return git(cwd, 'rev-parse', 'HEAD');
 }

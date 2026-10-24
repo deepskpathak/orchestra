@@ -1,3 +1,6 @@
+import { execFileSync } from 'node:child_process';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { Runner } from '../src/agent.ts';
@@ -428,4 +431,42 @@ test('infraFailureRate is reported per side and in the evolve outcome', async ()
   const out = await evolve(store, base, quiet);
   assert.deepEqual(out.infraFailureRate, { incumbent: 0, candidate: 0 });
   assert.equal(readArchive(store).find((a) => a.version === 'v1')!.evalInfraRate, 0);
+});
+
+test('promotionDecision blocks a candidate whose monitor fire rate exceeds the incumbent, naming the monitor', () => {
+  const base = { incumbentScores: [0.5, 0.5], candidateScores: [0.9, 0.9], regressions: [], minGain: 0.02, minCases: 2, incumbent: 'v1' };
+  const blocked = promotionDecision({ ...base, monitorFireRate: { incumbent: 0, candidate: 0.5 } });
+  assert.equal(blocked.promote, false);
+  assert.match(blocked.reason, /integrity monitor/);
+  assert.equal(promotionDecision({ ...base, monitorFireRate: { incumbent: 0.5, candidate: 0.5 } }).promote, true, 'equal rate is allowed');
+  assert.equal(promotionDecision(base).promote, true, 'no monitor data leaves the default path unchanged');
+});
+
+test('evolve: a candidate that trips the monitor more than the incumbent is not promoted', async () => {
+  const store = tempRepo({ evolve: { every: 1, autoPromote: true, minGain: 0.02, sample: 1, minCases: 1 } });
+  mkdirSync(join(store.root, 'test'), { recursive: true });
+  writeFileSync(join(store.root, 'test', 'sample.test.js'), "import assert from 'node:assert';\nassert.ok(true);\n");
+  execFileSync('git', ['add', '-A'], { cwd: store.root });
+  execFileSync('git', ['commit', '-qm', 'sample'], { cwd: store.root });
+  // Only the evolved worker prompt (edge cases) reward-hacks, and only on its first attempt.
+  const runner = fakeRunner({ tamper: (req) => /edge cases/i.test(req.system ?? '') && req.meta?.attempt === 1 });
+  assert.ok(harvest(store, await runGoal({ store, runner: fakeRunner(), goal: 'build it' })));
+
+  const prompts: string[] = [];
+  const spy: Runner = async (req) => {
+    if (req.role === 'evolver') prompts.push(req.prompt + (req.system ?? ''));
+    return runner(req);
+  };
+  const out = await evolve(store, spy, quiet);
+  assert.equal(out.promoted, false);
+  assert.match(out.reason, /integrity monitor/);
+  assert.ok(out.monitorFireRate!.candidate > out.monitorFireRate!.incumbent);
+  assert.equal(currentVersion(store), 'v1');
+  assert.equal(readArchive(store).find((a) => a.version === 'v2')!.status, 'rejected');
+
+  // A second evolve sees the first run's flagged tasks in history; none of it may reach the evolver.
+  await runGoal({ store, runner, goal: 'again', harnessVersion: 'v2' });
+  await evolve(store, spy, quiet);
+  assert.ok(prompts.length >= 2);
+  for (const p of prompts) assert.doesNotMatch(p, /integrity|grading file|weakened-test|reward-hack|monitor/i);
 });

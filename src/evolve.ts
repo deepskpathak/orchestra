@@ -9,6 +9,7 @@ import { join } from 'node:path';
 import { extractJson, type Runner } from './agent.ts';
 import { runGoal } from './conductor.ts';
 import { git } from './git.ts';
+import { fireRateByVersion, MONITOR_MARK } from './integrity.ts';
 import {
   EVOLVABLE_FILES,
   createVariant,
@@ -102,6 +103,7 @@ export interface EvalResult {
   cost: number;
   infraFailureRate: number; // infrastructure-failed replays / replays attempted
   inconclusive?: string;
+  monitorFireRate?: number; // integrity-monitor flags per replayed run; kept out of every evolver prompt
 }
 
 const INFRA_ERROR = /usage limit|session limit|rate limit|overloaded|quota|credit|not logged in|\/login|authentication|ECONN|ETIMEDOUT|ENOTFOUND|network/i;
@@ -115,6 +117,7 @@ interface CaseOutcome {
   ok: boolean;
   score: number;
   cost: number;
+  flags?: number; // integrity-monitor flags raised across the replay's tasks
   inconclusive?: string;
 }
 
@@ -149,7 +152,7 @@ async function evalCase(store: Store, runner: Runner, version: string, c: EvalCa
     score = scored.score;
   }
   deleteRunBranches(store, run);
-  return { ok, score: ok ? score : 0, cost };
+  return { ok, score: ok ? score : 0, cost, flags: run.tasks.reduce((n, t) => n + (t.integrityFlags?.length ?? 0), 0) };
 }
 
 // Accumulates per-version results across (possibly interleaved) replays.
@@ -159,7 +162,12 @@ class EvalTally {
   cost = 0;
   attempts = 0;
   infraFailures = 0;
+  monitor: { harnessVersion: string; flags: number }[] = [];
   inconclusive?: string;
+  version: string;
+  constructor(version = '') {
+    this.version = version;
+  }
 
   add(c: EvalCase, o: CaseOutcome): void {
     this.attempts++;
@@ -169,20 +177,22 @@ class EvalTally {
       this.inconclusive = o.inconclusive;
       return;
     }
+    this.monitor.push({ harnessVersion: this.version, flags: o.flags ?? 0 });
     this.passed[c.id] = o.ok;
     this.detail[c.id] = o.score;
   }
 
   result(): EvalResult {
     const vals = Object.values(this.detail);
-    const base = { detail: this.detail, passed: this.passed, cost: round(this.cost), infraFailureRate: this.attempts ? round(this.infraFailures / this.attempts) : 0 };
+    const rate = fireRateByVersion(this.monitor)[0]?.rate;
+    const base = { detail: this.detail, passed: this.passed, cost: round(this.cost), infraFailureRate: this.attempts ? round(this.infraFailures / this.attempts) : 0, ...(rate === undefined ? {} : { monitorFireRate: round(rate) }) };
     if (this.inconclusive) return { score: 0, ...base, inconclusive: this.inconclusive };
     return { score: vals.length ? round(vals.reduce((a, b) => a + b, 0) / vals.length) : 0, ...base };
   }
 }
 
 export async function evaluate(store: Store, runner: Runner, version: string, cases: EvalCase[], onRun?: (r: Run) => void, scorer: Scorer = loadScorer()): Promise<EvalResult> {
-  const tally = new EvalTally();
+  const tally = new EvalTally(version);
   for (const c of cases) {
     tally.add(c, await evalCase(store, runner, version, c, onRun, scorer));
     if (tally.inconclusive) break;
@@ -194,8 +204,8 @@ export async function evaluate(store: Store, runner: Runner, version: string, ca
 // infrastructure (rate limits, model changes) hits both sides alike. The first infrastructure
 // failure ends both sides as inconclusive.
 export async function evaluatePair(store: Store, runner: Runner, incumbent: string, candidate: string, cases: EvalCase[], onRun?: (r: Run) => void, scorer: Scorer = loadScorer()): Promise<{ incumbent: EvalResult; candidate: EvalResult }> {
-  const inc = new EvalTally();
-  const cand = new EvalTally();
+  const inc = new EvalTally(incumbent);
+  const cand = new EvalTally(candidate);
   for (const c of cases) {
     // Candidate first within each pair, then incumbent.
     cand.add(c, await evalCase(store, runner, candidate, c, onRun, scorer));
@@ -276,6 +286,7 @@ export interface EvolveOutcome {
   incumbentScore: number | null;
   promoted: boolean;
   reason: string;
+  monitorFireRate?: { incumbent: number; candidate: number }; // integrity-monitor flags per replayed run
   infraFailureRate?: { incumbent: number; candidate: number }; // set when candidate and incumbent were replayed
 }
 
@@ -286,6 +297,7 @@ export interface PromotionInput {
   minGain: number;
   minCases: number;
   incumbent?: string;
+  monitorFireRate?: { incumbent: number; candidate: number }; // integrity-monitor flags per run
 }
 
 export interface PromotionDecision {
@@ -305,6 +317,10 @@ export function promotionDecision(i: PromotionInput): PromotionDecision {
   const out = (promote: boolean, reason: string): PromotionDecision => ({ promote, reason, gain: round(gain), spread: round(spread) });
   if (n < i.minCases) return out(false, `only ${n} eval cases, need at least ${i.minCases}`);
   if (i.regressions.length) return out(false, `regressed on ${i.regressions.join(', ')}`);
+  const mon = i.monitorFireRate;
+  if (mon && mon.candidate > mon.incumbent) {
+    return out(false, `integrity monitor fire rate ${mon.candidate.toFixed(3)} per run exceeds incumbent ${mon.incumbent.toFixed(3)}: candidate edits grading files or weakens tests more often`);
+  }
   const bar = Math.max(i.minGain, spread);
   if (!(gain > bar)) return out(false, `gain ${gain.toFixed(3)} not above ${spread > i.minGain ? 'spread' : 'minGain'} ${bar.toFixed(3)}`);
   return out(true, `+${gain.toFixed(3)} over ${i.incumbent ?? 'incumbent'} with no regressions (spread ${spread.toFixed(3)})`);
@@ -317,7 +333,9 @@ export async function evolve(store: Store, runner: Runner, log: (msg: string) =>
   const m = metrics(store);
   const recentIssues = goalRuns(store)
     .slice(-5)
+    // Monitor output must never reach the evolver, or it could learn to evade the monitor.
     .flatMap((r) => r.tasks.flatMap((t) => [...t.notes, ...(t.status === 'failed' ? [`${t.id} FAILED: ${t.verdict?.summary ?? ''}`] : [])]))
+    .filter((n) => !n.includes(MONITOR_MARK))
     .slice(-40);
   const files = EVOLVABLE_FILES.map((f) => `--- ${f} ---\n${existsSync(store.path('harness', incumbent, f)) ? readFileSync(store.path('harness', incumbent, f), 'utf8') : ''}`).join('\n\n');
   const rejected = readArchive(store)
@@ -446,6 +464,7 @@ export async function evolve(store: Store, runner: Runner, log: (msg: string) =>
   updateArchive(store, candidate, { evalScore: cand.score, evalDetail: cand.detail, evalInfraRate: cand.infraFailureRate });
 
   const regressions = cases.filter((c) => inc.passed[c.id] && !cand.passed[c.id]).map((c) => c.id);
+  const monitor = { incumbent: inc.monitorFireRate ?? 0, candidate: cand.monitorFireRate ?? 0 };
   const decision = promotionDecision({
     incumbentScores: cases.map((c) => inc.detail[c.id] ?? 0),
     candidateScores: cases.map((c) => cand.detail[c.id] ?? 0),
@@ -453,6 +472,7 @@ export async function evolve(store: Store, runner: Runner, log: (msg: string) =>
     minGain: cfg.evolve.minGain,
     minCases: cfg.evolve.minCases,
     incumbent,
+    monitorFireRate: monitor,
   });
   const better = decision.promote;
   const reason = decision.reason;
@@ -460,11 +480,11 @@ export async function evolve(store: Store, runner: Runner, log: (msg: string) =>
   if (better && cfg.evolve.autoPromote) {
     promote(store, candidate);
     log(`Promoted ${candidate}: ${reason}`);
-    return { candidate, incumbent, candidateScore: cand.score, incumbentScore: inc.score, promoted: true, reason, infraFailureRate: infra };
+    return { candidate, incumbent, candidateScore: cand.score, incumbentScore: inc.score, promoted: true, reason, infraFailureRate: infra, monitorFireRate: monitor };
   }
   updateArchive(store, candidate, { status: better ? 'candidate' : 'rejected' });
   log(`${better ? 'Kept (autoPromote off)' : 'Rejected'} ${candidate}: ${reason}`);
-  return { candidate, incumbent, candidateScore: cand.score, incumbentScore: inc.score, promoted: false, reason, infraFailureRate: infra };
+  return { candidate, incumbent, candidateScore: cand.score, incumbentScore: inc.score, promoted: false, reason, infraFailureRate: infra, monitorFireRate: monitor };
 }
 
 function inconclusive(candidate: string, incumbent: string, error: string, rates?: string): EvolveOutcome {

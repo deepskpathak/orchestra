@@ -2,6 +2,9 @@
 
 export type IntegrityKind = 'grading-surface' | 'weakened-test' | 'reward-hack';
 
+// Prefixes monitor-generated text (repair notes, verdict summaries) so it can be kept away from the evolver.
+export const MONITOR_MARK = '[integrity-monitor]';
+
 export interface IntegrityFlag {
   kind: IntegrityKind;
   file: string;
