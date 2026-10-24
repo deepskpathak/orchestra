@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import type { AgentRequest, Runner } from '../src/agent.ts';
 import { runGoal } from '../src/conductor.ts';
@@ -44,6 +45,21 @@ test('wrapper missing or silent: not ok (fail closed)', () => {
   assert.match(missing.failures[0], /could not start/);
   assert.equal(preflightSandbox(policy, 'srt', () => result(''), opts).ok, false);
   assert.equal(preflightSandbox(policy, 'srt', () => { throw new Error('boom'); }, opts).ok, false);
+});
+
+test('srt probes get a srt-shaped settings file and claude probes the Claude shape', () => {
+  const read = (backend: 'srt' | 'claude') => {
+    let shape: any;
+    const exec: ProbeExec = (_c, args) => {
+      const f = args[args.indexOf('--settings') + 1];
+      if (f && !shape) shape = JSON.parse(readFileSync(f, 'utf8'));
+      return result(BLOCKED);
+    };
+    preflightSandbox(policy, backend, exec, opts);
+    return shape;
+  };
+  assert.ok(read('srt').filesystem.denyRead);
+  assert.equal(read('claude').sandbox.enabled, true);
 });
 
 test('probes run through the srt wrapper and scripts never contain a literal marker', () => {

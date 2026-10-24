@@ -116,8 +116,24 @@ export function claudeSandboxSettings(policy: SandboxPolicy): Record<string, unk
   };
 }
 
+// srt (sandbox-runtime) settings file, a different shape from Claude Code's: top-level `network`
+// and `filesystem` keys, paths as plain strings (no Read()/Edit() rule syntax). As recalled from the
+// sandbox-runtime README and not verified against an installed srt: network.allowedDomains and
+// filesystem.{denyRead,allowWrite,denyWrite}. Glob entries (**/.env) may be ignored on some
+// platforms; the guard hook and the pre-flight read probe are the backstop for that.
+export function srtSandboxSettings(policy: SandboxPolicy): Record<string, unknown> {
+  return {
+    network: { allowedDomains: [...policy.network.allowedHosts], deniedDomains: [] },
+    filesystem: {
+      denyRead: [...policy.read.deny],
+      allowWrite: [...policy.write.allow],
+      denyWrite: [...policy.write.deny],
+    },
+  };
+}
+
 // argv for spawning through srt: `srt --settings <file> <command> [args...]` (inferred from the
-// sandbox-runtime README; the settings file is the Claude settings written by the caller).
+// sandbox-runtime README; the settings file must be the srt shape from srtSandboxSettings).
 export function srtArgs(_policy: SandboxPolicy, settingsPath: string, command: string, args: string[]): string[] {
   return ['srt', '--settings', settingsPath, command, ...args];
 }
@@ -200,7 +216,7 @@ export function preflightSandbox(policy: SandboxPolicy, backend: 'srt' | 'claude
     // The canary lives in a dir added to the deny-read list, so a worker-visible tmp path is still denied.
     const probePolicy: SandboxPolicy = { ...policy, read: { deny: [...policy.read.deny, dir] } };
     const settings = join(dir, 'settings.json');
-    writeFileSync(settings, JSON.stringify(claudeSandboxSettings(probePolicy), null, 2) + '\n');
+    writeFileSync(settings, JSON.stringify(backend === 'srt' ? srtSandboxSettings(probePolicy) : claudeSandboxSettings(probePolicy), null, 2) + '\n');
     const host = PROBE_HOSTS.find((h) => !policy.network.allowedHosts.includes(h)) ?? PROBE_HOSTS[0];
 
     const wrap = (script: string): { command: string; args: string[] } => {

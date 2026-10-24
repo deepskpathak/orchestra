@@ -73,7 +73,12 @@ test('sandbox srt spawns srt with the claude args after it', async () => {
   const i = c.args.indexOf('claude');
   assert.ok(i > 0);
   assert.deepEqual(c.args.slice(i + 1), buildArgs(req));
-  assert.equal(c.args[c.args.indexOf('--settings') + 1], join(dir, '.claude', 'settings.local.json'));
+  const file = c.args[c.args.indexOf('--settings') + 1];
+  assert.equal(file, join(dir, '.claude', 'settings.local.json'));
+  const s = JSON.parse(readFileSync(file, 'utf8'));
+  assert.ok(s.network.allowedDomains.includes('api.anthropic.com'));
+  assert.ok(s.filesystem.allowWrite.includes(dir));
+  assert.equal(s.sandbox, undefined);
 });
 
 test('worker env passed to spawn has no push or publish tokens', async () => {

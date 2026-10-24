@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { buildSandboxPolicy, claudeSandboxSettings, detectSandbox, scrubWorkerEnv, srtArgs } from '../src/sandbox.ts';
+import { buildSandboxPolicy, claudeSandboxSettings, detectSandbox, scrubWorkerEnv, srtArgs, srtSandboxSettings } from '../src/sandbox.ts';
 
 const fake = (platform: string, ...present: string[]) => ({ platform, which: (c: string) => present.includes(c) });
 const HIDDEN = ['', 'r', '.orchestra', 'scen'].join('/');
@@ -61,6 +61,17 @@ test('claudeSandboxSettings is fail-closed and serialisable', () => {
   assert.ok(s.permissions.deny.includes('Edit(//r/.git/hooks/**)'));
   assert.ok(s.permissions.deny.includes('Read(**/.env)'));
   assert.ok(!s.permissions.deny.some((d: string) => /^(Read|Edit)\(\/[^/]/.test(d)), 'no single-slash absolute rule');
+  assert.deepEqual(JSON.parse(JSON.stringify(s)), s);
+});
+
+test('srtSandboxSettings is the srt shape, not the Claude shape', () => {
+  const s = srtSandboxSettings(policy()) as any;
+  assert.deepEqual(s.network.allowedDomains, ['api.anthropic.com', 'registry.npmjs.org']);
+  assert.deepEqual(s.filesystem.allowWrite, ['/w/t1', '/tmp/o', '/r/.git']);
+  assert.deepEqual(s.filesystem.denyWrite, ['/r/.git/hooks', '/r/.git/config']);
+  assert.ok(s.filesystem.denyRead.includes('/home/u/.ssh'));
+  assert.equal(s.sandbox, undefined);
+  assert.equal(s.permissions, undefined);
   assert.deepEqual(JSON.parse(JSON.stringify(s)), s);
 });
 

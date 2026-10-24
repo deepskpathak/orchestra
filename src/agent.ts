@@ -8,7 +8,7 @@ import { dirname, join } from 'node:path';
 import { PACKAGE_ROOT } from './harness.ts';
 import { countToolUse } from './exploration.ts';
 import { containerEnvNames, dockerArgs, DEFAULT_IMAGE } from './container.ts';
-import { claudeSandboxSettings, srtArgs, type SandboxPolicy } from './sandbox.ts';
+import { claudeSandboxSettings, srtArgs, srtSandboxSettings, type SandboxPolicy } from './sandbox.ts';
 import type { Role, WorkerOutcome } from './types.ts';
 
 // Opt-in OS sandbox for one agent call. 'srt' wraps the claude command; 'claude' relies on Claude Code's
@@ -118,7 +118,7 @@ export function buildArgs(req: AgentRequest): string[] {
 
 // Merge sandbox settings into <cwd>/.claude/settings.local.json, keeping every existing key.
 // Objects merge recursively, arrays are unioned, and our values win for scalars (fail-closed).
-export function writeSandboxSettings(cwd: string, policy: SandboxPolicy): string {
+export function writeSandboxSettings(cwd: string, policy: SandboxPolicy, backend: 'srt' | 'claude' = 'claude'): string {
   const file = join(cwd, '.claude', 'settings.local.json');
   let existing: Record<string, unknown> = {};
   if (existsSync(file)) {
@@ -130,7 +130,9 @@ export function writeSandboxSettings(cwd: string, policy: SandboxPolicy): string
     }
   }
   mkdirSync(dirname(file), { recursive: true });
-  writeFileSync(file, JSON.stringify(mergeSettings(existing, claudeSandboxSettings(policy)), null, 2) + '\n');
+  // srt reads its own shape (top-level network/filesystem); Claude Code reads sandbox/permissions.
+  const ours = backend === 'srt' ? srtSandboxSettings(policy) : claudeSandboxSettings(policy);
+  writeFileSync(file, JSON.stringify(mergeSettings(existing, ours), null, 2) + '\n');
   return file;
 }
 
@@ -163,7 +165,7 @@ export function buildCommand(req: AgentRequest): { command: string; args: string
     return { command, args: [...rest, 'claude', ...args] };
   }
   if (req.sandbox) {
-    const settings = writeSandboxSettings(req.cwd, req.sandbox.policy);
+    const settings = writeSandboxSettings(req.cwd, req.sandbox.policy, req.sandbox.backend);
     if (req.sandbox.backend === 'srt') {
       const [command, ...rest] = srtArgs(req.sandbox.policy, settings, 'claude', args);
       return { command, args: rest };
