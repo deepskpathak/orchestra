@@ -115,3 +115,79 @@ test('summarize: pass@1 and pass^3 per arm', () => {
   assert.equal(b.passHat3, null);
   assert.equal(a.meanCostUsd, 1);
 });
+
+// ---------- ablation arms and the matched-cost baseline (W2.3, W2.4) ----------
+
+import { ABLATION_ARMS, SINGLE_SESSION_ARM, ablationTable, matchedBudget, renderAblationTable } from '../src/bench.ts';
+
+test('built-in arms: full plus five ablations and the evolver pinned to v1', () => {
+  assert.deepEqual(ABLATION_ARMS.map((a) => a.name), ['full', '-scenarios', '-repair', '-learnings', '-contrastive', '-evolver']);
+  assert.equal(ABLATION_ARMS.find((a) => a.name === '-evolver')!.harness, 'v1');
+  assert.equal(ABLATION_ARMS.find((a) => a.name === 'full')!.harness, 'incumbent');
+  assert.equal(SINGLE_SESSION_ARM.singleSession, true);
+});
+
+test('bench --ablations arms: single-session budget equals the full arm mean cost, one worker call, same hidden check', async () => {
+  const store = tempRepo();
+  const calls: AgentRequest[] = [];
+  const inner = fakeRunner();
+  const runner: Runner = async (req) => {
+    if (!req.meta?.run) calls.push(req);
+    return inner(req);
+  };
+  const arms = [ABLATION_ARMS[0], ABLATION_ARMS[2], SINGLE_SESSION_ARM];
+  const { rows, summary } = await runBench({ store, runner, goals: ['calc-sub', 'calc-div'], repeats: 1, arms, benchId: 'ba' });
+  const full = rows.filter((r) => r.arm === 'full');
+  const mean = full.reduce((a, r) => a + r.costUsd, 0) / full.length;
+  assert.ok(mean > 0);
+  const single = rows.filter((r) => r.arm === 'single-session');
+  assert.equal(single.length, 2);
+  for (const r of single) assert.ok(Math.abs(r.budgetUsd! - mean) < 1e-9);
+  assert.deepEqual(summary.map((s) => s.arm), ['full', '-repair', 'single-session']);
+  const sessions = calls.filter((c) => c.role === 'worker' && c.meta?.attempt === 1 && !c.meta.task);
+  assert.equal(sessions.length, 2);
+  for (const c of sessions) {
+    assert.ok(Math.abs(c.budgetUsd - mean) < 1e-9);
+    assert.ok(!/checks|oracles/.test(c.prompt));
+  }
+});
+
+test('matchedBudget: falls back when the compared arm has no cost', () => {
+  const row = (arm: string, costUsd: number): BenchRow => ({ arm, goal: 'g', taskType: 't', humanMinutes: 1, repeat: 1, runId: 'r', harness: 'v1', checkPass: true, judgeSatisfaction: null, taskVerdicts: {}, costUsd, wallMs: 1 });
+  const arms = [{ name: 'full' }, { name: 'x' }, SINGLE_SESSION_ARM];
+  assert.equal(matchedBudget([row('full', 1), row('full', 3)], SINGLE_SESSION_ARM, arms, 9), 2);
+  assert.equal(matchedBudget([row('full', 0)], SINGLE_SESSION_ARM, arms, 9), 9);
+  assert.equal(matchedBudget([row('x', 5)], { name: 's', singleSession: true, compareTo: 'x' }, arms, 9), 5);
+});
+
+test('ablationTable: rows per arm with paired gain, CI clustered by goal, and the single-session row', () => {
+  const rows: BenchRow[] = [];
+  const add = (arm: string, goal: string, repeat: number, checkPass: boolean, extra: Partial<BenchRow> = {}) =>
+    rows.push({ arm, goal, taskType: 't', humanMinutes: 1, repeat, runId: 'r', harness: 'v1', checkPass, judgeSatisfaction: null, taskVerdicts: {}, costUsd: 0.5, wallMs: 1, ...extra });
+  const names = ['full', '-scenarios', '-repair', '-learnings', '-contrastive', '-evolver', 'single-session'];
+  for (let g = 0; g < 8; g++) {
+    for (let rep = 1; rep <= 3; rep++) {
+      for (const n of names) {
+        // full always passes; -repair always fails; others pass except goal 0
+        const pass = n === 'full' ? true : n === '-repair' ? false : g !== 0;
+        add(n, `g${g}`, rep, pass, n === 'single-session' ? { budgetUsd: 0.5 } : {});
+      }
+    }
+  }
+  const t = ablationTable(rows);
+  assert.deepEqual(t.map((r) => r.arm), names);
+  const ref = t[0];
+  assert.equal(ref.gain, null);
+  assert.equal(ref.passHat3, 1);
+  const repair = t.find((r) => r.arm === '-repair')!;
+  assert.equal(repair.gain, -1);
+  assert.ok(repair.ci && repair.ci[1] <= -1 + 1e-9);
+  const scen = t.find((r) => r.arm === '-scenarios')!;
+  assert.ok(Math.abs(scen.gain! + 1 / 8) < 1e-9);
+  assert.ok(scen.ci && scen.ci[0] < scen.gain! && scen.ci[1] > scen.gain!);
+  assert.equal(t.find((r) => r.arm === 'single-session')!.budgetUsd, 0.5);
+  const text = renderAblationTable(t);
+  for (const n of names) assert.ok(text.includes(n), n);
+  assert.match(text, /95% CI/);
+  assert.match(text, /budget \$0\.500 matched/);
+});
