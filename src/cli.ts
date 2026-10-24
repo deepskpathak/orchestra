@@ -30,8 +30,9 @@ Usage:
   orchestra serve --tui [runId]  Interactive terminal dashboard (no browser, opens no port); alias: orchestra tui
   orchestra watch [runId]        Full-screen live dashboard (q to quit)
   orchestra status [runId]       One-shot board of the current or given run
-  orchestra stats                Factory health per harness version (self-evaluation)
-  orchestra evolve               Propose, evaluate, and maybe promote a better harness
+  orchestra stats                Factory health per harness version, plus the eval infra failure rate
+  orchestra evolve               Propose, evaluate (clean-room, interleaved), and maybe promote a better harness;
+                                 prints the infra failure rate of the eval replays
   orchestra learnings [--domain <slug>]
                                  Show what the factory has learned (all, or one domain; "global" for cross-domain lessons)
   orchestra evals                List Factory Eval cases
@@ -273,6 +274,8 @@ function cmdStats(args: string[]): void {
   const color = args.includes('--color') || (isTTY() && !args.includes('--plain'));
   console.log(renderStats(metrics(store), readArchive(store), currentVersion(store), color));
   console.log(`\nFactory Eval cases: ${listEvals(store).length}   versions: ${listVersions(store).join(', ')}`);
+  const rates = readArchive(store).filter((a) => a.evalInfraRate !== undefined);
+  if (rates.length) console.log(`Eval infra failure rate: ${rates.map((a) => `${a.version} ${(a.evalInfraRate! * 100).toFixed(0)}%`).join('   ')}`);
 }
 
 async function cmdEvolve(): Promise<void> {
@@ -280,6 +283,7 @@ async function cmdEvolve(): Promise<void> {
   const out = await evolve(store, runner(), (m) => console.log(`♫ ${m}`));
   console.log(`♫ ${out.promoted ? `PROMOTED ${out.candidate}` : `kept ${out.incumbent}`}: ${out.reason}`);
   if (out.candidateScore !== null) console.log(`  eval: ${out.incumbent} ${out.incumbentScore} vs ${out.candidate} ${out.candidateScore}`);
+  if (out.infraFailureRate) console.log(`  infra failure rate: ${out.incumbent} ${(out.infraFailureRate.incumbent * 100).toFixed(0)}%, ${out.candidate} ${(out.infraFailureRate.candidate * 100).toFixed(0)}%`);
 }
 
 function cmdLearnings(args: string[]): void {

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { Runner } from '../src/agent.ts';
 import { runGoal } from '../src/conductor.ts';
-import { evaluate, evolutionDue, evolve, harvest, listEvals, metrics, promotionDecision } from '../src/evolve.ts';
+import { evaluate, evaluatePair, evolutionDue, evolve, harvest, listEvals, metrics, promotionDecision } from '../src/evolve.ts';
 import { fakeRunner } from '../src/fake.ts';
 import { EVOLVABLE_FILES, createVariant, currentVersion, loadHarness, readArchive } from '../src/harness.ts';
 import { loadScorer } from '../src/scorer.ts';
@@ -367,4 +367,65 @@ test('evolver prompt never contains scorer file contents', async () => {
   for (const text of [s.judge, ...s.checklist.split('\n')].map((t) => t.trim()).filter(Boolean)) {
     for (const p of prompts) assert.ok(!p.includes(text), `evolver saw scorer text: ${text.slice(0, 40)}`);
   }
+});
+
+// ---- Clean-room, interleaved eval trials ----
+
+test('eval replays interleave candidate and incumbent, never two batches', async () => {
+  const store = tempRepo();
+  const base = fakeRunner();
+  harvest(store, await runGoal({ store, runner: base, goal: 'build it' }));
+  harvest(store, await runGoal({ store, runner: base, goal: 'build it again' }));
+  const v2 = createVariant(store, 'v1', { 'planner.md': 'You are the PLANNER. Be brief.' }, 'x');
+  const seen: string[] = [];
+  const ids = new Set<string>();
+  await evaluatePair(store, base, 'v1', v2, listEvals(store), (r) => {
+    if (!ids.has(r.id)) {
+      ids.add(r.id);
+      seen.push(r.harness);
+    }
+  });
+  assert.deepEqual(seen, [v2, 'v1', v2, 'v1']);
+});
+
+test('eval runs get no learnings and each its own fresh worktree at the case base commit', async () => {
+  const store = tempRepo();
+  const base = fakeRunner();
+  const first = await runGoal({ store, runner: base, goal: 'build it' });
+  const c = harvest(store, first)!;
+  const { writeLearnings } = await import('../src/learnings.ts');
+  writeLearnings(store, [{ role: 'planner', lesson: 'SECRET-LESSON-XYZ', evidence: [{ run: first.id }], hits: 0 }], first.id);
+  const prompts: string[] = [];
+  const cwds: string[] = [];
+  const spy: Runner = async (req) => {
+    prompts.push(req.prompt + (req.system ?? ''));
+    if (req.cwd) cwds.push(req.cwd);
+    return base(req);
+  };
+  const bases = new Map<string, string | undefined>();
+  await evaluate(store, spy, 'v1', [c, c], (r) => bases.set(r.id, r.baseRef));
+  assert.equal(bases.size, 2, 'two replays, two distinct run ids');
+  assert.ok([...bases.values()].every((b) => b === c.base), 'each replay starts at the case base commit');
+  assert.ok(prompts.length > 0);
+  assert.ok(prompts.every((p) => !p.includes('SECRET-LESSON-XYZ')), 'eval prompts carry no lessons');
+  const integrations = [...new Set(cwds.filter((d) => d.includes('_integration')))];
+  assert.equal(integrations.length, 2, 'each replay has its own worktree');
+  // A goal run (not eval) still sees the lesson, so the bypass is eval-only.
+  const seen: string[] = [];
+  await runGoal({ store, runner: async (req) => (seen.push(req.prompt), base(req)), goal: 'another' });
+  assert.ok(seen.some((p) => p.includes('SECRET-LESSON-XYZ')));
+});
+
+test('infraFailureRate is reported per side and in the evolve outcome', async () => {
+  const store = tempRepo({ evolve: { every: 1, autoPromote: true, minGain: 0.02, sample: 1, minCases: 1 } });
+  const base = fakeRunner();
+  const c = harvest(store, await runGoal({ store, runner: base, goal: 'build it' }))!;
+  const clean = await evaluate(store, base, 'v1', [c]);
+  assert.equal(clean.infraFailureRate, 0);
+  const broken: Runner = async (req) => (req.prompt.startsWith('FROZEN SCORER REPLAY') ? { ok: false, text: '', error: 'rate limit hit', costUsd: 0, turns: 1, durationMs: 1 } : base(req));
+  const bad = await evaluate(store, broken, 'v1', [c, c]);
+  assert.equal(bad.infraFailureRate, 1, 'aborts on first infra failure: 1 of 1 attempted');
+  const out = await evolve(store, base, quiet);
+  assert.deepEqual(out.infraFailureRate, { incumbent: 0, candidate: 0 });
+  assert.equal(readArchive(store).find((a) => a.version === 'v1')!.evalInfraRate, 0);
 });

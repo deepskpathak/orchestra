@@ -86,6 +86,9 @@ The Factory Eval is a set of regression cases stored as JSON files in the `evals
 - `orchestra evals` lists each case with its short base commit, check and goal, or says none exist yet.
 - To score a harness version, each case is replayed as an eval run. A case passes if the run is `done` and the `check` (if any) passes on the integration branch. The case score is the run satisfaction, or 0 on failure. The version score is the mean across cases.
 - Eval runs delete their `orchestra/<run>/*` branches afterwards.
+- **Clean-room trials.** Every replay gets its own fresh worktree cut from the case's `base` commit (unique run id, nothing reused), reads no learnings (the planner and worker prompts show `(none yet)` for eval runs, so lessons accumulated on past goals cannot leak into the comparison) and carries no cache between trials. Branches sit in the same repository, so history beyond the base commit is not hidden.
+- **Interleaved.** The candidate and incumbent replay the same case back to back (candidate, incumbent, candidate, incumbent...) instead of as two batches, so drift in the infrastructure hits both sides alike.
+- **Infra failure rate.** Replays that die of infrastructure (usage limit, auth, network) are inconclusive. `EvalResult.infraFailureRate` is infra-failed replays divided by replays attempted, per side. The first infra failure ends the pair, so a non-zero rate means the comparison was inconclusive.
 
 ## Evolution: `orchestra evolve`
 
@@ -101,7 +104,7 @@ One evolution cycle (`evolve()` in `src/evolve.ts`):
 4. **Decide.** The candidate wins only if its score beats the incumbent by at least `evolve.minGain` and no case that the incumbent passed fails for the candidate.
 5. **Promote or record.** If it wins and `evolve.autoPromote` is true, it is promoted. Otherwise the archive status becomes `candidate` (kept, autoPromote off) or `rejected`.
 
-The command prints whether it promoted or kept the incumbent, with the reason and both eval scores. Evaluation reruns past goals, so one cycle costs roughly `sample x 2` runs plus the evolver call.
+The command prints whether it promoted or kept the incumbent, with the reason and both eval scores, then the infra failure rate of the incumbent and the candidate replays. `orchestra stats` also lists the infra failure rate of each version's last full evaluation. Evaluation reruns past goals, so one cycle costs roughly `sample x 2` runs plus the evolver call.
 
 The `evolve` settings live in `config.json`, with defaults `every: 3`, `autoPromote: true`, `minGain: 0.02`, `sample: 5`, `minCases: 5`, `candidates: 1`. A `sample` below `minCases` is raised to `minCases`, so an old `config.json` that pins a small value cannot block promotion. With fewer than `minCases` eval cases, `evolve` keeps the candidate for later and spends no eval runs. If an eval run dies of infrastructure (usage limit, auth, network), the result is inconclusive: the candidate stays a candidate and no score is recorded.
 
