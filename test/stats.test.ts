@@ -82,3 +82,50 @@ test('default gain rule is unchanged but still reports ci, pass@1 and pass^3', (
   assert.equal(d.passHat3, undefined);
   assert.match(d.reason, /pass\^3 n\/a/);
 });
+
+// ---- W9.0 exploration and footprint ----
+import { countToolUse, explorationMetrics, footprintAccuracy, plannedFiles, renderExploration } from '../src/exploration.ts';
+import { fakeRunner } from '../src/fake.ts';
+
+test('countToolUse tallies mixed tool_use blocks by name and ignores other messages', () => {
+  const counts: Record<string, number> = {};
+  countToolUse({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Read' }, { type: 'text', text: 'hi' }, { type: 'tool_use', name: 'Grep' }] } }, counts);
+  countToolUse({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Read' }, { type: 'tool_use', name: 'Bash' }] } }, counts);
+  countToolUse({ type: 'user', message: { content: [{ type: 'tool_use', name: 'Glob' }] } }, counts);
+  countToolUse({ type: 'result' }, counts);
+  assert.deepEqual(counts, { Read: 2, Grep: 1, Bash: 1 });
+});
+
+test('fake runner reports toolCounts', async () => {
+  const res = await fakeRunner()({ role: 'planner', prompt: '', system: '', cwd: '.', model: 'm', budgetUsd: 1 });
+  assert.deepEqual(res.toolCounts, { Glob: 1, Read: 1 });
+});
+
+test('footprint precision and recall, with n/a for empty sets', () => {
+  assert.deepEqual(footprintAccuracy(['a', 'b'], ['b', 'c', 'd']), { precision: 0.5, recall: 1 / 3 });
+  assert.deepEqual(footprintAccuracy([], ['a']), { precision: undefined, recall: 0 });
+  assert.deepEqual(footprintAccuracy(['a'], []), { precision: 0, recall: undefined });
+  assert.deepEqual(footprintAccuracy([], []), { precision: undefined, recall: undefined });
+});
+
+test('plannedFiles matches only listed repo paths', () => {
+  const files = ['src/a.ts', 'src/b.ts', 'README.md'];
+  assert.deepEqual(plannedFiles('Edit `src/a.ts`, then (README.md). Not src/c.ts or a.ts.', files), ['src/a.ts', 'README.md']);
+});
+
+test('explorationMetrics aggregates per version and role, legacy rows do not crash', () => {
+  const base = { t: 0, run: 'r', kind: 'goal' as const, model: 'm', ok: true, durationMs: 0 };
+  const m = explorationMetrics([
+    { ...base, harness: 'v1', role: 'worker', costUsd: 1, turns: 4, inputTokens: 10, cacheReadTokens: 5, toolCounts: { Read: 3, Grep: 1 } },
+    { ...base, harness: 'v1', role: 'worker', costUsd: 1, turns: 2 },
+    { ...base, harness: 'v1', role: 'worker', costUsd: 0, turns: 0, outcome: 'merged', footprint: { planned: ['a'], changed: ['a', 'b'] } },
+    { ...base, harness: 'v1', role: 'worker', costUsd: 0, turns: 0, outcome: 'merged', footprint: { planned: [], changed: ['a'] } },
+  ]);
+  assert.equal(m.roles.length, 1);
+  assert.deepEqual([m.roles[0].calls, m.roles[0].turns, m.roles[0].read, m.roles[0].grep, m.roles[0].glob], [2, 6, 3, 1, 0]);
+  assert.equal(m.footprint[0].precision, 1);
+  assert.equal(m.footprint[0].recall, 0.25);
+  const text = renderExploration(m);
+  assert.ok(!text.includes('NaN'));
+  assert.ok(renderExploration(explorationMetrics([])).includes('no agent calls'));
+});

@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { extractJson, parseWorkerOutcome, type AgentRequest, type AgentResult, type Runner } from './agent.ts';
 import * as g from './git.ts';
 import { alternateWorkerSection, comparePrompt, COMPARE_SCHEMA, contrastApplies, resolveContrast } from './contrast.ts';
+import { plannedFiles } from './exploration.ts';
 import { analyzeDiff, MONITOR_MARK, type IntegrityFlag } from './integrity.ts';
 import { loadHarness, type Harness } from './harness.ts';
 import { formatLearnings, listDomains, normalizeDomain, readAllLearnings, readLearnings, writeLearnings, GLOBAL, type Lesson } from './learnings.ts';
@@ -786,6 +787,7 @@ export class Conductor {
     const cfg = this.store.config();
     const ip = this.integration.path;
     const before = g.head(ip);
+    const footprint = this.footprint(task);
     const m = g.merge(ip, task.branch!, `Merge ${task.id}: ${task.title}`);
     if (!m.ok) {
       this.ledgerOutcome(task, 'conflict');
@@ -802,9 +804,21 @@ export class Conductor {
     }
     task.status = 'merged';
     task.endedAt = Date.now();
-    this.ledgerOutcome(task, 'merged');
+    this.ledgerOutcome(task, 'merged', footprint);
     this.emit('task.merged', `${task.id} merged (attempt ${task.attempts})`, undefined, task.id);
     this.save();
+  }
+
+  // Passive: planned files are repo paths named in the task text; changed files come from the task branch diff.
+  private footprint(task: Task): { planned: string[]; changed: string[] } | undefined {
+    try {
+      const planned = plannedFiles([task.title, task.description, ...task.acceptance].join('\n'), g.trackedFiles(this.integration.path, 100_000));
+      const changed = g.changedFiles(task.worktree!, g.mergeBase(task.worktree!, 'HEAD', this.integration.branch));
+      return { planned, changed };
+    } catch (e) {
+      this.emit('log', `${task.id} footprint unavailable: ${(e as Error).message.split('\n')[0]}`, undefined, task.id);
+      return undefined;
+    }
   }
 
   private repairOrFail(task: Task, issues: string[]): void {
@@ -961,13 +975,14 @@ export class Conductor {
       outputTokens: res.usage?.outputTokens,
       cacheReadTokens: res.usage?.cacheReadTokens,
       cacheWriteTokens: res.usage?.cacheWriteTokens,
+      toolCounts: res.toolCounts,
     });
     this.emit('agent.end', `${role}${task ? ` ${task.id}` : ''} ${res.ok ? 'finished' : `error: ${res.error}`} ($${res.costUsd.toFixed(2)}, ${Math.round(res.durationMs / 1000)}s)`, undefined, task?.id, role);
     this.save();
     return res;
   }
 
-  private ledgerOutcome(task: Task, outcome: string): void {
+  private ledgerOutcome(task: Task, outcome: string, footprint?: { planned: string[]; changed: string[] }): void {
     this.store.ledger({
       t: Date.now(),
       run: this.run.id,
@@ -983,6 +998,7 @@ export class Conductor {
       turns: 0,
       outcome,
       score: task.verdict?.judgeError ? undefined : task.verdict?.score,
+      ...(footprint ? { footprint } : {}),
     });
   }
 

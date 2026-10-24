@@ -148,6 +148,8 @@ export interface LedgerRow {
   outputTokens?: number;
   cacheReadTokens?: number;
   cacheWriteTokens?: number;
+  toolCounts?: Record<string, number>; // tool_use blocks by tool name; absent on legacy rows
+  footprint?: { planned: string[]; changed: string[] }; // on merged outcome rows: planned vs changed files
   outcome?: string; // e.g. "pass", "fail", "merged", "conflict"
   score?: number;
 }
