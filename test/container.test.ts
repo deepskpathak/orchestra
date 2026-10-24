@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { buildCommand, type AgentRequest } from '../src/agent.ts';
 import { resolveSandbox } from '../src/cli.ts';
-import { containerEnvNames, dockerArgs } from '../src/container.ts';
+import { containerEnvNames, dockerArgs, hostUser, validNetwork } from '../src/container.ts';
 import { PACKAGE_ROOT } from '../src/harness.ts';
 import { buildSandboxPolicy, scrubWorkerEnv } from '../src/sandbox.ts';
 import { tempRepo } from './helpers.ts';
@@ -23,6 +23,38 @@ test('dockerArgs: network none, mounts, workdir, env names only', () => {
   assert.ok(!a.some((x) => /GH_TOKEN|NPM_TOKEN/.test(x)));
   assert.ok(!a.includes('--runtime=runsc'));
   assert.ok(dockerArgs({ ...input, gvisor: true }).includes('--runtime=runsc'));
+});
+
+test('dockerArgs: user and network are configurable, default stays none', () => {
+  const a = dockerArgs({ ...input, user: '1000:1000', network: 'orch-egress' });
+  assert.ok(a.includes('--network=orch-egress'));
+  assert.ok(!a.includes('--network=none'));
+  assert.equal(a[a.indexOf('--user') + 1], '1000:1000');
+  assert.ok(a.includes(`HOME=${input.tmpDir}`));
+  const d = dockerArgs(input);
+  assert.ok(!d.includes('--user'));
+  assert.ok(d.includes('--network=none'));
+  assert.equal(validNetwork('orch-egress'), true);
+  assert.equal(validNetwork('container:abc'), true);
+  assert.equal(validNetwork('--privileged'), false);
+  assert.equal(validNetwork(''), false);
+  const h = hostUser();
+  if (typeof process.getuid === 'function') assert.equal(h, `${process.getuid()}:${process.getgid!()}`);
+});
+
+test('buildCommand docker passes the host user and the configured network', () => {
+  const policy = buildSandboxPolicy({ worktree: '/wt/T1', tmpDir: '/tmp', home: '/h', hiddenScenarioDir: '/r/h', gitCommonDir: '/repo/.git' });
+  const req: AgentRequest = { role: 'worker', prompt: 'p', system: 's', cwd: '/wt/T1', model: 'm', budgetUsd: 1, sandbox: { policy, backend: 'docker', docker: { network: 'orch-egress' } } };
+  const { command, args } = buildCommand(req);
+  assert.equal(command, 'docker');
+  assert.ok(args.includes('--network=orch-egress'));
+  if (hostUser()) assert.equal(args[args.indexOf('--user') + 1], hostUser());
+});
+
+test('resolveSandbox docker: --sandbox-network is validated and carried', () => {
+  const probe = { backend: 'none' as const, srt: false, claude: false, docker: true, reason: 'r' };
+  assert.equal(resolveSandbox(['--sandbox', 'docker', '--sandbox-network', 'orch-egress'], probe).network, 'orch-egress');
+  assert.equal(resolveSandbox(['--sandbox', 'docker'], probe).network, undefined);
 });
 
 test('containerEnvNames keeps model env only', () => {

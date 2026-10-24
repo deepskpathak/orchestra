@@ -34,7 +34,7 @@ export interface ConductorOptions {
   ablate?: Ablation;
   onUpdate?: (run: Run) => void;
   // Opt-in OS sandbox for write-capable roles (worker). Unset keeps spawning exactly as before.
-  sandbox?: { backend: 'srt' | 'claude' | 'docker'; allowedHosts?: string[]; image?: string; gvisor?: boolean };
+  sandbox?: { backend: 'srt' | 'claude' | 'docker'; allowedHosts?: string[]; image?: string; gvisor?: boolean; network?: string };
   // Unattended: strip push and publish credentials from every agent env, even without a sandbox object.
   unattended?: boolean;
   // Injectable exec for the sandbox pre-flight probes (tests). Defaults to spawnSync.
@@ -975,7 +975,7 @@ export class Conductor {
       });
     const res = preflightSandbox(this.workerPolicy(this.integration.path), opt.backend, exec, {
       cwd: this.integration.path,
-      docker: { image: opt.image, gvisor: opt.gvisor },
+      docker: { image: opt.image, gvisor: opt.gvisor, network: opt.network },
     });
     for (const w of res.warnings) this.emit('log', `Sandbox pre-flight warning: ${w}`);
     if (!res.ok) throw new Error(`Sandbox pre-flight failed, refusing to dispatch workers: ${res.failures.join('; ')}`);
@@ -988,7 +988,7 @@ export class Conductor {
     if (this.scrubEnv) out.env = scrubWorkerEnv(process.env);
     if (this.sandboxOpt && role === 'worker') {
       const policy = this.workerPolicy(cwd);
-      out.sandbox = { policy, backend: this.sandboxOpt.backend, settingsDir: this.store.path('sandbox'), ...(this.sandboxOpt.backend === 'docker' ? { docker: { image: this.sandboxOpt.image, gvisor: this.sandboxOpt.gvisor } } : {}) };
+      out.sandbox = { policy, backend: this.sandboxOpt.backend, settingsDir: this.store.path('sandbox'), ...(this.sandboxOpt.backend === 'docker' ? { docker: { image: this.sandboxOpt.image, gvisor: this.sandboxOpt.gvisor, network: this.sandboxOpt.network } } : {}) };
     }
     return out;
   }

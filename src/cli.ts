@@ -15,6 +15,7 @@ import { fakeRunner } from './fake.ts';
 import { excludeOrchestra } from './git.ts';
 import { guardMain } from './guard.ts';
 import { GLOBAL, listDomains, readLearnings } from './learnings.ts';
+import { validNetwork } from './container.ts';
 import { detectSandbox, type SandboxBackend } from './sandbox.ts';
 import { PACKAGE_ROOT, currentVersion, packageVersion, listVersions, promote, readArchive, seedHarness } from './harness.ts';
 import { DEFAULT_PROJECT_CONFIG, Store, findRepoRoot } from './store.ts';
@@ -37,6 +38,7 @@ Usage:
       --sandbox docker           Opt-in container backend for untrusted repos: docker run --rm --network=none.
                                  Needs docker; --network=none also blocks the model API (see docs/isolation.md)
       --sandbox-image <image>    Image for --sandbox docker (default orchestra-worker:latest; must contain claude)
+      --sandbox-network <net>    Docker network for --sandbox docker (default none, which also blocks the model API)
       --gvisor                   With --sandbox docker, add --runtime=runsc
       --unattended               Refuse to start unless a sandbox backend (srt, bwrap+socat or sandbox-exec) is
                                  available; strips push and publish tokens from agent env
@@ -157,7 +159,7 @@ export function probeSandbox(env: Record<string, string | undefined> = process.e
 export function resolveSandbox(
   args: string[],
   probe: SandboxProbe = probeSandbox(),
-): { backend: 'srt' | 'claude' | 'docker' | null; unattended: boolean; image?: string; gvisor?: boolean } {
+): { backend: 'srt' | 'claude' | 'docker' | null; unattended: boolean; image?: string; gvisor?: boolean; network?: string } {
   const unattended = args.includes('--unattended');
   const mode = flag(args, '--sandbox') ?? (unattended ? 'auto' : 'off');
   if (!SANDBOX_MODES.includes(mode)) die(`--sandbox must be one of: ${SANDBOX_MODES.join(', ')} (got "${mode}")`);
@@ -166,7 +168,9 @@ export function resolveSandbox(
   if (mode === 'off') return { backend: null, unattended };
   if (mode === 'docker') {
     if (!probe.docker) die('--sandbox docker requested but docker was not found on PATH. Install docker (or use --sandbox srt|claude).');
-    return { backend: 'docker', unattended, image: flag(args, '--sandbox-image'), gvisor: args.includes('--gvisor') };
+    const network = flag(args, '--sandbox-network');
+    if (network !== undefined && !validNetwork(network)) die(`--sandbox-network must be a docker network name or mode (got "${network}")`);
+    return { backend: 'docker', unattended, image: flag(args, '--sandbox-image'), gvisor: args.includes('--gvisor'), ...(network !== undefined ? { network } : {}) };
   }
   if (mode === 'srt' || mode === 'claude') {
     if (!(mode === 'srt' ? probe.srt : probe.claude)) die(`--sandbox ${mode} requested but it is not available (${probe.reason}). ${need}.`);
@@ -183,7 +187,7 @@ export function resolveSandbox(
 // Positionals that make up the goal. The value-taking flags are removed together with their value by
 // position, so a goal word that happens to equal a flag value ("turn off the cache --sandbox off") stays.
 export function goalFromArgs(args: string[]): string {
-  const valueFlags = new Set(['--sandbox', '--sandbox-image']);
+  const valueFlags = new Set(['--sandbox', '--sandbox-image', '--sandbox-network']);
   const words: string[] = [];
   for (let i = 0; i < args.length; i++) {
     if (valueFlags.has(args[i])) i++;
@@ -198,6 +202,7 @@ async function cmdRun(args: string[]): Promise<void> {
   const withWeb = args.includes('--serve');
   const sandboxVal = flag(args, '--sandbox');
   const imageVal = flag(args, '--sandbox-image');
+  const networkVal = flag(args, '--sandbox-network');
   const goal = goalFromArgs(args);
   if (!goal) die('Usage: orchestra run "<goal>"');
   const store = storeOrDie();
@@ -206,7 +211,7 @@ async function cmdRun(args: string[]): Promise<void> {
   if (detach) {
     const log = store.path('daemon.log');
     const fd = openSync(log, 'a');
-    const child = spawn(process.execPath, [join(PACKAGE_ROOT, 'bin', 'orchestra.ts'), 'run', goal, ...(noEvolve ? ['--no-evolve'] : []), ...(sandboxVal ? ['--sandbox', sandboxVal] : []), ...(imageVal ? ['--sandbox-image', imageVal] : []), ...(args.includes('--gvisor') ? ['--gvisor'] : []), ...(iso.unattended ? ['--unattended'] : [])], {
+    const child = spawn(process.execPath, [join(PACKAGE_ROOT, 'bin', 'orchestra.ts'), 'run', goal, ...(noEvolve ? ['--no-evolve'] : []), ...(sandboxVal ? ['--sandbox', sandboxVal] : []), ...(imageVal ? ['--sandbox-image', imageVal] : []), ...(networkVal ? ['--sandbox-network', networkVal] : []), ...(args.includes('--gvisor') ? ['--gvisor'] : []), ...(iso.unattended ? ['--unattended'] : [])], {
       cwd: store.root,
       detached: true,
       stdio: ['ignore', fd, fd],
@@ -235,7 +240,7 @@ async function cmdRun(args: string[]): Promise<void> {
     runner: r,
     goal,
     onUpdate: (u) => (latest = u),
-    sandbox: iso.backend ? { backend: iso.backend, allowedHosts: store.config().sandbox?.allowedHosts, image: iso.image, gvisor: iso.gvisor } : undefined,
+    sandbox: iso.backend ? { backend: iso.backend, allowedHosts: store.config().sandbox?.allowedHosts, image: iso.image, gvisor: iso.gvisor, network: iso.network } : undefined,
     unattended: iso.unattended,
   });
   clearInterval(tick);

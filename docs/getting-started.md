@@ -80,7 +80,7 @@ Orchestra plans a task graph, builds tasks in parallel git worktrees, verifies e
 - `--serve` also starts the read-only web dashboard while the run is live.
 - `--no-evolve` skips the automatic self-improvement check after the run.
 - `--sandbox auto|srt|claude|off` (default `off`) confines workers with an OS sandbox: writes only to the worktree and temp, no reads of `~/.ssh` and other credential directories, `.env*` or the hidden scenarios, network limited to the model API plus `sandbox.allowedHosts` from `.orchestra/config.json`. `srt` wraps the worker in `srt` with a settings file generated under `.orchestra/sandbox/` (outside the worktree); `claude` passes fail-closed `sandbox` settings inline via `--settings` (nothing is written into the worktree; needs `bwrap` and `socat` on Linux, `sandbox-exec` on macOS); `auto` picks whichever is installed and warns if none is. Commit, merge and PR creation stay in the orchestrator.
-- `--sandbox docker` (with optional `--sandbox-image <image>` and `--gvisor`) runs workers in `docker run --rm --network=none`; opt-in for untrusted repos, see [isolation.md](isolation.md) for the model API caveat.
+- `--sandbox docker` (with optional `--sandbox-image <image>`, `--sandbox-network <net>` and `--gvisor`) runs workers in `docker run --rm --network=none` as your uid:gid by default; opt-in for untrusted repos, see [isolation.md](isolation.md) for the model API caveat.
 - `--unattended` refuses to start (exit 1, before any agent call) unless a sandbox backend is available, and strips git-hosting, registry and cloud credentials from agent environments. It cannot be combined with `--sandbox off`.
 
 In Claude Code, use `/orchestra:run <goal>` instead.

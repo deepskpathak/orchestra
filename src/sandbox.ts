@@ -7,7 +7,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join, sep } from 'node:path';
-import { DEFAULT_IMAGE, dockerArgs } from './container.ts';
+import { DEFAULT_IMAGE, DEFAULT_NETWORK, dockerArgs, hostUser } from './container.ts';
 
 export type SandboxBackend = 'srt' | 'claude' | 'none';
 
@@ -178,7 +178,7 @@ export type ProbeExec = (command: string, args: string[], opts: { cwd: string; t
 
 export interface PreflightOptions {
   cwd: string; // a worktree the worker could use
-  docker?: { image?: string; gvisor?: boolean };
+  docker?: { image?: string; gvisor?: boolean; network?: string };
   timeoutMs?: number;
 }
 
@@ -259,6 +259,8 @@ export function preflightSandbox(policy: SandboxPolicy, backend: 'srt' | 'claude
           envNames: [],
           gitCommonDir: policy.gitCommonDir,
           gvisor: opts.docker?.gvisor,
+          network: opts.docker?.network,
+          user: hostUser(),
         });
         return { command, args: [...args, ...inner] };
       }
@@ -282,18 +284,27 @@ export function preflightSandbox(policy: SandboxPolicy, backend: 'srt' | 'claude
       else if (!out.includes(BLOCKED)) failures.push(`${name} probe inconclusive: wrapper exited ${r.status} with no result, treating the sandbox as not working`);
     };
 
-    // Positive control: the same fetch, unsandboxed. A blocked result inside the sandbox only means
-    // something if the host can reach the probe target at all.
-    const netScript = networkScript(host);
-    let control = '';
-    try {
-      const r = exec('node', ['-e', netScript], { cwd: opts.cwd, timeoutMs });
-      control = r.error ? '' : `${r.stdout}\n${r.stderr}`;
-    } catch {
-      control = '';
+    const dockerNet = backend === 'docker' ? (opts.docker?.network ?? DEFAULT_NETWORK) : null;
+    if (dockerNet === 'none') {
+      warnings.push(`docker network is none: the worker cannot reach ${MODEL_API_HOST}, so a claude worker will fail unless the image provides its own route. Set --sandbox-network to a network that reaches the model API (docs/isolation.md)`);
+    } else if (dockerNet) {
+      // The "must be blocked" probe would be open by design on a network the user chose.
+      warnings.push(`docker network is "${dockerNet}": docker does not enforce the host allow-list, so the network probe is skipped and outbound access is whatever that network allows`);
     }
-    if (control.includes(OPEN)) probe('network', netScript);
-    else warnings.push(`network probe inconclusive: the unsandboxed control to ${host} also failed (no connectivity from this host), so the sandbox's network block is NOT verified`);
+    if (dockerNet === null || dockerNet === 'none') {
+      // Positive control: the same fetch, unsandboxed. A blocked result inside the sandbox only means
+      // something if the host can reach the probe target at all.
+      const netScript = networkScript(host);
+      let control = '';
+      try {
+        const r = exec('node', ['-e', netScript], { cwd: opts.cwd, timeoutMs });
+        control = r.error ? '' : `${r.stdout}\n${r.stderr}`;
+      } catch {
+        control = '';
+      }
+      if (control.includes(OPEN)) probe('network', netScript);
+      else warnings.push(`network probe inconclusive: the unsandboxed control to ${host} also failed (no connectivity from this host), so the sandbox's network block is NOT verified`);
+    }
     if (canary) probe('read', readScript(canary));
     else warnings.push('read probe skipped: no host directory outside the docker mounts is writable; docker read isolation rests on not mounting secrets');
   } finally {

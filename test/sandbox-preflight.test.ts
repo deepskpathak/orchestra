@@ -24,7 +24,10 @@ const fake = (net: string, read: string): ProbeExec => (c, args) => {
 
 test('both probes blocked: ok', () => {
   for (const backend of ['srt', 'claude', 'docker'] as const) {
-    assert.deepEqual(preflightSandbox(policy, backend, fake(BLOCKED, BLOCKED), opts), { ok: true, failures: [], warnings: [] });
+    const r = preflightSandbox(policy, backend, fake(BLOCKED, BLOCKED), opts);
+    assert.deepEqual([r.ok, r.failures], [true, []]);
+    // docker defaults to network none, which always warns about the model API
+    assert.equal(r.warnings.length, backend === 'docker' ? 1 : 0);
   }
 });
 
@@ -88,6 +91,21 @@ test('srt probes get a srt-shaped settings file and claude probes the Claude sha
   assert.equal(read('claude').sandbox.enabled, true);
 });
 
+test('docker network none warns that the model API is unreachable; a chosen network skips the probe', () => {
+  const calls: string[] = [];
+  const exec: ProbeExec = (c, a) => (calls.push(c + ' ' + a.join(' ')), result(c === 'node' ? OPEN : BLOCKED));
+  const none = preflightSandbox(policy, 'docker', exec, opts);
+  assert.equal(none.ok, true);
+  assert.ok(none.warnings.some((w) => /network is none.*api\.anthropic\.com/.test(w)));
+  calls.length = 0;
+  const custom = preflightSandbox(policy, 'docker', exec, { ...opts, docker: { network: 'orch-egress' } });
+  assert.equal(custom.ok, true);
+  assert.ok(custom.warnings.some((w) => /orch-egress.*allow-list/.test(w)));
+  assert.ok(!calls.some((c) => c.includes('fetch(')), 'no network probe on a user-chosen network');
+  assert.ok(calls.every((c) => !c.startsWith('node ')), 'no control either');
+  assert.ok(calls.some((c) => c.includes('--network=orch-egress')));
+});
+
 test('docker read canary lives outside every mounted path; srt canary stays in the denied tmp dir', () => {
   const canaryOf = (backend: 'srt' | 'docker') => {
     let path = '';
@@ -111,7 +129,7 @@ test('docker read probe is skipped with a warning when no unmounted dir is usabl
   const r = preflightSandbox(mounted, 'docker', (_c, args) => (calls.push(args.join(' ')), result(_c === 'node' ? OPEN : BLOCKED)), opts);
   assert.equal(r.ok, true);
   assert.equal(calls.length, 2, 'control + docker network probe, no read probe');
-  assert.match(r.warnings[0], /read probe skipped/);
+  assert.ok(r.warnings.some((w) => /read probe skipped/.test(w)));
 });
 
 test('probes run through the srt wrapper and scripts never contain a literal marker', () => {

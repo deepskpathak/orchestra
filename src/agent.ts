@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { PACKAGE_ROOT } from './harness.ts';
 import { countToolUse } from './exploration.ts';
-import { containerEnvNames, dockerArgs, DEFAULT_IMAGE } from './container.ts';
+import { containerEnvNames, dockerArgs, hostUser, DEFAULT_IMAGE } from './container.ts';
 import { claudeSandboxSettings, srtArgs, srtSandboxSettings, type SandboxPolicy } from './sandbox.ts';
 import type { Role, WorkerOutcome } from './types.ts';
 
@@ -20,7 +20,7 @@ import type { Role, WorkerOutcome } from './types.ts';
 export interface AgentSandbox {
   policy: SandboxPolicy;
   backend: 'srt' | 'claude' | 'docker';
-  docker?: { image?: string; gvisor?: boolean }; // docker backend only
+  docker?: { image?: string; gvisor?: boolean; network?: string }; // docker backend only
   settingsDir?: string; // srt only: a directory the worker cannot write to; defaults to a fresh temp dir
 }
 
@@ -147,6 +147,8 @@ export function buildCommand(req: AgentRequest): { command: string; args: string
       envNames: containerEnvNames(req.env ?? {}),
       gitCommonDir: policy.gitCommonDir,
       gvisor: docker?.gvisor,
+      network: docker?.network,
+      user: hostUser(),
     });
     return { command, args: [...rest, 'claude', ...args] };
   }
