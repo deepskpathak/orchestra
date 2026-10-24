@@ -1,0 +1,9 @@
+{
+  "id": "calc-div",
+  "fixture": "calc",
+  "goal": "divide(a, b) in src/calc.js must throw a RangeError when b is zero instead of returning Infinity.",
+  "taskType": "bugfix",
+  "humanMinutes": 8,
+  "check": "checks/calc-div.mjs",
+  "oracle": "oracles/calc-div"
+}

@@ -1,0 +1,9 @@
+{
+  "id": "calc-sub",
+  "fixture": "calc",
+  "goal": "Add and export a sub(a, b) function to src/calc.js that returns a minus b.",
+  "taskType": "feature",
+  "humanMinutes": 5,
+  "check": "checks/calc-sub.mjs",
+  "oracle": "oracles/calc-sub"
+}

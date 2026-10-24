@@ -84,6 +84,7 @@ Set `ORCHESTRA_RUNNER=fake` to use the simulator instead of real Claude sessions
 | `orchestra serve --tui [runId]` | Interactive terminal dashboard, no browser and no port (alias: `orchestra tui`) |
 | `orchestra watch [runId]` | Full-screen live dashboard (q to quit) |
 | `orchestra status [runId]` | One-shot board of the current or given run |
+| `orchestra bench` | Run the fixed benchmark suite (arms x goals x repeats, hidden checks); `--verify-oracles` validates the suite. See [docs/bench.md](docs/bench.md) |
 | `orchestra stats` | Factory health per harness version, plus outcome metrics (merge acceptance, edits before landing, revert rate, cost per accepted merge, success by task length) |
 | `orchestra evolve` | Propose, evaluate, and maybe promote a better harness |
 | `orchestra learnings [--domain <slug>]` | Show what the factory has learned in this repo (`--domain` filters to one domain, `global` for cross-domain lessons) |
@@ -93,7 +94,7 @@ Set `ORCHESTRA_RUNNER=fake` to use the simulator instead of real Claude sessions
 | `orchestra demo` | Simulated run in a temp repo (no tokens spent) |
 | `orchestra statusline` | Statusline command for Claude Code (reads JSON on stdin) |
 
-Inside Claude Code, the plugin adds `/orchestra:setup`, `/orchestra:run`, `/orchestra:serve`, `/orchestra:status`, `/orchestra:stats`, and `/orchestra:evolve`.
+Inside Claude Code, the plugin adds `/orchestra:setup`, `/orchestra:run`, `/orchestra:serve`, `/orchestra:status`, `/orchestra:stats`, `/orchestra:bench`, and `/orchestra:evolve`.
 
 ## Documentation
 
