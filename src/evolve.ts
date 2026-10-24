@@ -132,7 +132,8 @@ async function evalCase(store: Store, runner: Runner, version: string, c: EvalCa
   }
   // Promotion scores come from the frozen scorer. run.satisfaction is the candidate's own
   // judge and stays advisory (repair notes), so a harness cannot grade itself into promotion.
-  let ok = run.status === 'done';
+  // A run that finished without an integration branch produced nothing to score: that is a failed replay.
+  let ok = run.status === 'done' && !!run.integrationBranch;
   let checkPassed: boolean | null = null;
   if (ok && c.check && run.integrationBranch) {
     checkPassed = checkBranch(store, run.integrationBranch, c.check);
