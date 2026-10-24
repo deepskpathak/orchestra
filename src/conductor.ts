@@ -984,7 +984,7 @@ export class Conductor {
       const policy = this.workerPolicy(cwd);
       // The generated settings must not be committed into the task branch.
       g.excludePath(this.store.root, '.claude/settings.local.json');
-      out.sandbox = { policy, backend: this.sandboxOpt.backend, ...(this.sandboxOpt.backend === 'docker' ? { docker: { image: this.sandboxOpt.image, gvisor: this.sandboxOpt.gvisor } } : {}) };
+      out.sandbox = { policy, backend: this.sandboxOpt.backend, settingsDir: this.store.path('sandbox'), ...(this.sandboxOpt.backend === 'docker' ? { docker: { image: this.sandboxOpt.image, gvisor: this.sandboxOpt.gvisor } } : {}) };
     }
     return out;
   }

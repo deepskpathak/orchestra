@@ -3,7 +3,9 @@
 // all state lives in git and .orchestra, never in a long conversation.
 
 import { spawn, spawnSync } from 'node:child_process';
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { appendFileSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { PACKAGE_ROOT } from './harness.ts';
 import { countToolUse } from './exploration.ts';
@@ -11,12 +13,15 @@ import { containerEnvNames, dockerArgs, DEFAULT_IMAGE } from './container.ts';
 import { claudeSandboxSettings, srtArgs, srtSandboxSettings, type SandboxPolicy } from './sandbox.ts';
 import type { Role, WorkerOutcome } from './types.ts';
 
-// Opt-in OS sandbox for one agent call. 'srt' wraps the claude command; 'claude' relies on Claude Code's
-// own sandbox settings. Either way the settings land in the worktree's .claude/settings.local.json.
+// Opt-in OS sandbox for one agent call. 'srt' wraps the claude command and reads a settings file we
+// write outside the worker-writable tree (settingsDir); 'claude' passes the sandbox block inline in
+// --settings. Nothing is written into the worktree, so the worker cannot persist settings across
+// calls and a judge session in the same worktree does not auto-load the worker sandbox.
 export interface AgentSandbox {
   policy: SandboxPolicy;
   backend: 'srt' | 'claude' | 'docker';
   docker?: { image?: string; gvisor?: boolean }; // docker backend only
+  settingsDir?: string; // srt only: a directory the worker cannot write to; defaults to a fresh temp dir
 }
 
 export interface AgentRequest {
@@ -75,12 +80,15 @@ export interface AgentResult {
 export type Runner = (req: AgentRequest) => Promise<AgentResult>;
 
 // Guard hook injected into every agent session. Blocks holdout access, network, pushes.
-function guardSettings(): string {
+// For the claude backend the sandbox block rides in the same inline --settings JSON, built fresh from
+// the policy on every call (nothing is read back from the worktree).
+function guardSettings(sandbox?: AgentSandbox): string {
   const cmd = `node "${join(PACKAGE_ROOT, 'bin', 'orchestra.ts')}" guard`;
   return JSON.stringify({
     hooks: {
       PreToolUse: [{ matcher: '*', hooks: [{ type: 'command', command: cmd, timeout: 10 }] }],
     },
+    ...(sandbox?.backend === 'claude' ? claudeSandboxSettings(sandbox.policy) : {}),
   });
 }
 
@@ -102,7 +110,7 @@ export function buildArgs(req: AgentRequest): string[] {
     '--setting-sources',
     'project,local',
     '--settings',
-    guardSettings(),
+    guardSettings(req.sandbox),
     // Nobody is watching a worker; anything that would prompt is denied instead of hanging.
     '--permission-prompts',
     'none',
@@ -116,35 +124,13 @@ export function buildArgs(req: AgentRequest): string[] {
   return args;
 }
 
-// Merge sandbox settings into <cwd>/.claude/settings.local.json, keeping every existing key.
-// Objects merge recursively, arrays are unioned, and our values win for scalars (fail-closed).
-export function writeSandboxSettings(cwd: string, policy: SandboxPolicy, backend: 'srt' | 'claude' = 'claude'): string {
-  const file = join(cwd, '.claude', 'settings.local.json');
-  let existing: Record<string, unknown> = {};
-  if (existsSync(file)) {
-    try {
-      const parsed = JSON.parse(readFileSync(file, 'utf8'));
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) existing = parsed;
-    } catch {
-      // Unreadable settings are replaced: the sandbox block must be present.
-    }
-  }
-  mkdirSync(dirname(file), { recursive: true });
-  // srt reads its own shape (top-level network/filesystem); Claude Code reads sandbox/permissions.
-  const ours = backend === 'srt' ? srtSandboxSettings(policy) : claudeSandboxSettings(policy);
-  writeFileSync(file, JSON.stringify(mergeSettings(existing, ours), null, 2) + '\n');
+// Fresh srt settings file from the policy, outside the worktree. Never merged with existing content.
+export function writeSrtSettings(cwd: string, policy: SandboxPolicy, settingsDir?: string): string {
+  const dir = settingsDir ?? mkdtempSync(join(tmpdir(), 'orchestra-srt-'));
+  mkdirSync(dir, { recursive: true });
+  const file = join(dir, `srt-${createHash('sha1').update(cwd).digest('hex').slice(0, 12)}.json`);
+  writeFileSync(file, JSON.stringify(srtSandboxSettings(policy), null, 2) + '\n');
   return file;
-}
-
-function mergeSettings(a: any, b: any): any {
-  if (Array.isArray(a) && Array.isArray(b)) return [...new Set([...a, ...b])];
-  const isObj = (v: unknown) => Boolean(v) && typeof v === 'object' && !Array.isArray(v);
-  if (isObj(a) && isObj(b)) {
-    const out: Record<string, unknown> = { ...a };
-    for (const [k, v] of Object.entries(b)) out[k] = k in out ? mergeSettings(out[k], v) : v;
-    return out;
-  }
-  return b;
 }
 
 export type SpawnFn = typeof spawn;
@@ -164,12 +150,10 @@ export function buildCommand(req: AgentRequest): { command: string; args: string
     });
     return { command, args: [...rest, 'claude', ...args] };
   }
-  if (req.sandbox) {
-    const settings = writeSandboxSettings(req.cwd, req.sandbox.policy, req.sandbox.backend);
-    if (req.sandbox.backend === 'srt') {
-      const [command, ...rest] = srtArgs(req.sandbox.policy, settings, 'claude', args);
-      return { command, args: rest };
-    }
+  if (req.sandbox?.backend === 'srt') {
+    const settings = writeSrtSettings(req.cwd, req.sandbox.policy, req.sandbox.settingsDir);
+    const [command, ...rest] = srtArgs(req.sandbox.policy, settings, 'claude', args);
+    return { command, args: rest };
   }
   return { command: 'claude', args };
 }

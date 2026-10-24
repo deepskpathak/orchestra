@@ -47,26 +47,32 @@ test('without sandbox the spawn is plain claude with process.env', async () => {
   assert.equal(existsSync(join(dir, '.claude')), false);
 });
 
-test('sandbox claude writes fail-closed settings and preserves existing keys', () => {
+test('sandbox claude passes fail-closed settings inline and never touches the worktree', () => {
   const dir = mkdtempSync(join(tmpdir(), 'orch-sb-'));
+  // Hostile pre-existing worker/repo settings must not influence what we pass.
   mkdirSync(join(dir, '.claude'));
-  writeFileSync(join(dir, '.claude', 'settings.local.json'), JSON.stringify({ model: 'x', permissions: { allow: ['Bash(ls)'], deny: ['Read(zzz)'] } }));
-  const cmd = buildCommand({ ...baseReq(dir), sandbox: { policy: policyFor(dir), backend: 'claude' } });
+  const before = JSON.stringify({ sandbox: { excludedCommands: ['curl'] }, permissions: { allow: ['Bash(*)'] }, hooks: { x: 1 } });
+  writeFileSync(join(dir, '.claude', 'settings.local.json'), before);
+  const req = { ...baseReq(dir), sandbox: { policy: policyFor(dir), backend: 'claude' as const } };
+  const cmd = buildCommand(req);
   assert.equal(cmd.command, 'claude');
-  const s = JSON.parse(readFileSync(join(dir, '.claude', 'settings.local.json'), 'utf8'));
-  assert.equal(s.model, 'x');
-  assert.deepEqual(s.permissions.allow, ['Bash(ls)']);
-  assert.ok(s.permissions.deny.includes('Read(zzz)'));
+  assert.deepEqual(cmd.args, buildArgs(req));
+  assert.equal(readFileSync(join(dir, '.claude', 'settings.local.json'), 'utf8'), before);
+  const s = JSON.parse(cmd.args[cmd.args.indexOf('--settings') + 1]);
+  assert.ok(s.hooks.PreToolUse, 'guard hook still present');
   assert.ok(s.permissions.deny.some((d: string) => d.startsWith('Read(//home/u/.ssh')));
+  assert.equal(s.permissions.allow, undefined);
+  assert.equal(s.sandbox.excludedCommands, undefined);
   assert.equal(s.sandbox.enabled, true);
   assert.equal(s.sandbox.allowUnsandboxedCommands, false);
   assert.equal(s.sandbox.failIfUnavailable, true);
 });
 
-test('sandbox srt spawns srt with the claude args after it', async () => {
+test('sandbox srt spawns srt with the claude args after it and a settings file outside the worktree', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'orch-sb-'));
+  const sdir = mkdtempSync(join(tmpdir(), 'orch-sb-settings-'));
   const { fn, calls } = fakeSpawn();
-  const req = { ...baseReq(dir), sandbox: { policy: policyFor(dir), backend: 'srt' as const } };
+  const req = { ...baseReq(dir), sandbox: { policy: policyFor(dir), backend: 'srt' as const, settingsDir: sdir } };
   await makeClaudeRunner(fn)(req);
   const c = calls[0];
   assert.equal(c.command, 'srt');
@@ -74,11 +80,16 @@ test('sandbox srt spawns srt with the claude args after it', async () => {
   assert.ok(i > 0);
   assert.deepEqual(c.args.slice(i + 1), buildArgs(req));
   const file = c.args[c.args.indexOf('--settings') + 1];
-  assert.equal(file, join(dir, '.claude', 'settings.local.json'));
+  assert.ok(file.startsWith(sdir));
+  assert.equal(existsSync(join(dir, '.claude')), false);
   const s = JSON.parse(readFileSync(file, 'utf8'));
   assert.ok(s.network.allowedDomains.includes('api.anthropic.com'));
   assert.ok(s.filesystem.allowWrite.includes(dir));
   assert.equal(s.sandbox, undefined);
+  // Written fresh each call, no merge with stale content.
+  writeFileSync(file, '{"stale":true}');
+  buildCommand(req);
+  assert.equal(JSON.parse(readFileSync(file, 'utf8')).stale, undefined);
 });
 
 test('worker env passed to spawn has no push or publish tokens', async () => {
