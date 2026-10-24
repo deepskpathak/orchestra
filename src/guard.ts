@@ -1,5 +1,8 @@
-// PreToolUse guard injected into every agent session. Hard rules, enforced by the harness
-// rather than by prompt: holdout scenarios stay hidden, no network, no publishing, no secrets.
+// PreToolUse guard injected into every agent session. A deny-list backstop (defence in depth),
+// enforced by the harness rather than by prompt: holdout scenarios stay hidden, no publishing,
+// no secrets, and obvious network commands are refused. It matches command text and paths, so
+// python, node, git remotes or DNS can bypass it. The real boundary is the OS sandbox or
+// container (src/sandbox.ts, src/container.ts); see docs/architecture.md.
 
 import { join, resolve, sep } from 'node:path';
 import { PACKAGE_ROOT } from './harness.ts';

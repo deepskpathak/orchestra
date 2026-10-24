@@ -79,7 +79,7 @@ Passing tasks enter a queue that merges one at a time onto the integration branc
 
 ### 3.6 Safety rails
 
-An agent hook in `src/guard.ts` (run as `orchestra guard`) is injected into every agent session. It denies access to the hidden scenarios, writes to the harness, evals and archive, network commands, `git push`, `npm publish` and secret files, and it fails closed on unreadable input (`docs/self-improvement.md`, "Guard rails"). Workers also run with isolated agent settings and per-role and per-run budgets (`CHANGELOG.md` 0.1.0, `harness/v1/config.json`). Workers share one machine and there are no containers yet (`README.md`, Status).
+An agent hook in `src/guard.ts` (run as `orchestra guard`) is injected into every agent session. It denies access to the hidden scenarios, writes to the harness, evals and archive, network commands, `git push`, `npm publish` and secret files, and it fails closed on unreadable input (`docs/self-improvement.md`, "Guard rails"). Workers also run with isolated agent settings and per-role and per-run budgets (`CHANGELOG.md` 0.1.0, `harness/v1/config.json`). The hook is a backstop. The isolation boundary is the opt-in OS sandbox or docker backend (`docs/architecture.md`, "Boundary model"; `docs/isolation.md`). By default workers share one machine unsandboxed.
 
 ## 4 Verification
 
@@ -200,7 +200,7 @@ We propose, but have not run, the following protocol. Each step uses existing co
 - **Judge is an LLM.** Verdicts can be wrong, and the quality of hidden scenarios depends on the planner. The fast path removes the hidden-scenario requirement for small goals (`docs/configuration.md`).
 - **Small eval sets.** The gate refuses to promote below `evolve.minCases` and requires a gain above the observed spread, but the repo's own notes say small sets are noisy (`docs/research/cost-accuracy-speed.md`).
 - **Cost.** Evolution reruns past goals and costs roughly `sample x 2` runs plus the evolver call (`README.md`, Status). Multi-candidate adds `k x screen` each cycle. The research notes report that the Opus-tier planner and judge dominated cost in one measured run (`docs/research/cost-accuracy-speed.md`).
-- **No containers.** Workers share one machine (`README.md`, Status). The guard hook blocks listed commands and paths, but a hook is a deny list, not isolation.
+- **Isolation is opt-in and platform dependent.** By default workers share one machine. The OS sandbox (`--sandbox`, `--unattended`) and the docker backend are the real boundary; the guard hook is a deny list that `python`, `node`, git remotes or DNS can bypass, kept as defence in depth. `srt` is a research preview, and setup varies by OS (Linux needs unprivileged user namespaces for `bwrap`). `--unattended` refuses to start without a backend, but attended runs without one fall back to the hook alone. A pre-flight self-test aborts if a blocked host or denied path is reachable. The docker backend has not been run against a real daemon in this repo's tests, and `--network=none` also blocks the model API (`docs/isolation.md`).
 - **Serialized merges.** The merge queue is one at a time, which bounds throughput.
 - **Eval is local.** Factory Eval cases come from the user's own successful goals, so they cover only past work types.
 - **Contrastive repair is narrow.** It applies only on repair attempts, by default only without a test command, and one pair per task by default.
@@ -220,7 +220,7 @@ A research review and an ordered plan that addresses the limitations in section 
 
 Drawn from `README.md`, `CHANGELOG.md`, `PLAN.md` and `docs/research/cost-accuracy-speed.md`:
 
-- **Containers for workers.** Replace shared-machine execution (`README.md`, Status).
+- **Make isolation the default.** The sandbox and docker backend exist but are opt-in (`docs/isolation.md`).
 - **Cheaper evolution.** Evolution costs about `sample x 2` runs per cycle. Screening in 0.6.0 is a step. Further options are tuning `evolve.sample`, `evolve.every` and `evolve.candidates`, as `README.md` suggests.
 - **Run the evaluation protocol** in [section 7.2](#72-proposed-evaluation-protocol-for-real-runs) and publish results, including negative ones.
 - **Evolvable surface.** Skills and executable scripts are out of scope today (`docs/self-improvement.md`).
