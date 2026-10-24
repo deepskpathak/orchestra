@@ -394,9 +394,21 @@ async function cmdDemo(): Promise<void> {
   await cmdRun(['Build a tiny CLI with config loading and docs']);
 }
 
+// Value of `--name value`. A present flag must be followed by a value, not by another flag or the end of argv.
 function flag(args: string[], name: string): string | undefined {
   const i = args.indexOf(name);
-  return i >= 0 ? args[i + 1] : undefined;
+  if (i < 0) return undefined;
+  const v = args[i + 1];
+  if (v === undefined || v.startsWith('--')) die(`${name} needs a value`);
+  return v;
+}
+
+// Integer flag with a default; rejects anything that is not a whole number (Number('abc') would be NaN).
+function intFlag(args: string[], name: string, fallback: number): number {
+  const v = flag(args, name);
+  if (v === undefined) return fallback;
+  if (!/^-?\d+$/.test(v.trim())) die(`${name} must be an integer, got "${v}"`);
+  return Number(v);
 }
 
 async function cmdBench(args: string[]): Promise<void> {
@@ -420,9 +432,9 @@ async function cmdBench(args: string[]): Promise<void> {
       console.log(`imported ${r.imported} human grade(s) (${r.total} total)\n\n${renderCalibration(storeCalibration(store))}`);
       return;
     }
-    const size = Number(flag(args, '--sample') ?? 50);
+    const size = intFlag(args, '--sample', 50);
     if (!Number.isInteger(size) || size < 1) die('--sample must be a positive integer');
-    const seed = Number(flag(args, '--seed') ?? 1);
+    const seed = intFlag(args, '--seed', 1);
     const { file, items } = writeSample(store, size, seed);
     if (!items.length) die('no bench results yet; run `orchestra bench` first');
     console.log(`wrote ${items.length} verdict(s) to ${file}\nSet humanPass to true or false on each line, then run: orchestra bench calibrate --import <file>`);
@@ -439,7 +451,7 @@ async function cmdBench(args: string[]): Promise<void> {
     return;
   }
   const store = storeOrDie();
-  const repeats = Number(flag(args, '--repeats') ?? 1);
+  const repeats = intFlag(args, '--repeats', 1);
   if (!Number.isInteger(repeats) || repeats < 1) die('--repeats must be a positive integer');
   const named = flag(args, '--arms')?.split(',').filter(Boolean);
   const arms = args.includes('--ablations') ? [...ABLATION_ARMS, SINGLE_SESSION_ARM] : loadArms(suite, named);
