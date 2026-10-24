@@ -13,6 +13,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Sandbox: `srt --settings` now gets a file in srt's own shape (top-level `network.allowedDomains`, `filesystem.allowWrite/denyRead/denyWrite`) instead of the Claude Code shape. The `claude` backend keeps the Claude shape. Key names follow the sandbox-runtime README as recalled and are unverified against an installed srt.
 - Sandbox: settings are no longer written to the worker-writable `<worktree>/.claude/settings.local.json` and merged with whatever was there. The `claude` backend passes the sandbox block inline in `--settings`, built fresh from the policy; the `srt` backend gets a fresh file under `.orchestra/sandbox/`, which the worker cannot write. Repo or worker content can no longer persist `excludedCommands`, `allow` rules or hooks into the sandbox settings. Residual: Claude Code still merges the repo's own project settings by design, so a hostile repo `sandbox.excludedCommands` is not stripped under the `claude` backend; prefer `srt` or `docker` for untrusted repos.
 - Sandbox: judge sessions (same task worktree as the worker) no longer inherit the worker's sandbox settings, because no `settings.local.json` is left in the worktree any more. The `.git/info/exclude` entry for it is dropped. A test checks that no session cwd contains the file.
+- Conductor: the git common dir for the worker sandbox policy is resolved once per run instead of running `git rev-parse` on every agent call.
 
 ### Added
 

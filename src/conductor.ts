@@ -945,14 +945,19 @@ export class Conductor {
 
   // ---------- plumbing ----------
 
+  // The common git dir is the same for every worktree of the repo; resolve it once per run.
+  private gitCommonDirMemo?: string;
+  private gitCommonDir(): string {
+    return (this.gitCommonDirMemo ??= resolve(this.store.root, g.git(this.store.root, 'rev-parse', '--git-common-dir')));
+  }
+
   private workerPolicy(cwd: string) {
-    const root = this.store.root;
     return buildSandboxPolicy({
       worktree: cwd,
       tmpDir: tmpdir(),
       home: homedir(),
       hiddenScenarioDir: this.store.path('holdout'),
-      gitCommonDir: resolve(root, g.git(root, 'rev-parse', '--git-common-dir')),
+      gitCommonDir: this.gitCommonDir(),
       allowedHosts: this.sandboxOpt?.allowedHosts,
     });
   }

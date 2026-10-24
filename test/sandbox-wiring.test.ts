@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
@@ -157,6 +157,18 @@ test('sandboxed run leaves no settings in any session cwd, so judges are not san
     assert.ok(seen.every((r) => !r.localSettings), 'no .claude/settings.local.json in any cwd');
     assert.ok(seen.filter((r) => r.role !== 'worker').every((r) => !r.sandboxed));
   }
+});
+
+test('worker policy resolves the git common dir once, not per agent call', async () => {
+  const { Conductor } = await import('../src/conductor.ts');
+  const { fakeRunner } = await import('../src/fake.ts');
+  const store = tempRepo();
+  const c: any = new Conductor({ store, runner: fakeRunner({ stepMs: 0 }), goal: 'x', sandbox: { backend: 'claude' } } as any);
+  const first = c.workerPolicy('/wt/a').gitCommonDir;
+  assert.ok(first.endsWith('.git'));
+  // With the repo unreadable, a second call can only succeed from the memo.
+  rmSync(join(store.root, '.git', 'HEAD'));
+  assert.equal(c.workerPolicy('/wt/b').gitCommonDir, first);
 });
 
 test('resolveSandbox: modes and defaults', () => {
