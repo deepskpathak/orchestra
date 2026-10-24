@@ -30,8 +30,9 @@ Usage:
   orchestra serve --tui [runId]  Interactive terminal dashboard (no browser, opens no port); alias: orchestra tui
   orchestra watch [runId]        Full-screen live dashboard (q to quit)
   orchestra status [runId]       One-shot board of the current or given run
-  orchestra stats                Factory health per harness version (self-evaluation)
-  orchestra evolve               Propose, evaluate, and maybe promote a better harness
+  orchestra stats                Factory health per harness version, plus the eval infra failure rate
+  orchestra evolve               Propose, evaluate (clean-room, interleaved), and maybe promote a better harness;
+                                 prints the infra failure rate of the eval replays
   orchestra learnings [--domain <slug>]
                                  Show what the factory has learned (all, or one domain; "global" for cross-domain lessons)
   orchestra evals                List Factory Eval cases
@@ -156,11 +157,16 @@ async function cmdRun(args: string[]): Promise<void> {
   process.exitCode = run.status === 'done' ? 0 : 1;
 }
 
-function summary(run: Run): string {
+export function summary(run: Run): string {
   const merged = run.tasks.filter((t) => t.status === 'merged').length;
   const lines = [
     `♫ run ${run.id} ${run.status.toUpperCase()}: ${merged}/${run.tasks.length} tasks merged, satisfaction ${(run.satisfaction ?? 0).toFixed(2)}, cost $${run.costUsd.toFixed(2)}`,
   ];
+  const human = run.tasks.filter((t) => t.status === 'needs_human');
+  const failed = run.tasks.filter((t) => t.status === 'failed').length;
+  const blocked = run.tasks.filter((t) => t.status === 'blocked').length;
+  if (human.length || failed || blocked) lines.push(`  ${failed} failed, ${blocked} blocked, ${human.length} need a human`);
+  for (const t of human) lines.push(`  ? ${t.id} needs a human: ${t.humanReason ?? 'no reason recorded'}`);
   if (run.error) lines.push(`  ${run.error}`);
   if (merged && run.integrationBranch) lines.push(`  review: git log --oneline ${run.baseRef?.slice(0, 8)}..${run.integrationBranch}`, `  land:   git merge ${run.integrationBranch}`);
   return lines.join('\n');
@@ -269,6 +275,8 @@ function cmdStats(args: string[]): void {
   const color = args.includes('--color') || (isTTY() && !args.includes('--plain'));
   console.log(renderStats(metrics(store), readArchive(store), currentVersion(store), color));
   console.log(`\nFactory Eval cases: ${listEvals(store).length}   versions: ${listVersions(store).join(', ')}`);
+  const rates = readArchive(store).filter((a) => a.evalInfraRate !== undefined);
+  if (rates.length) console.log(`Eval infra failure rate: ${rates.map((a) => `${a.version} ${(a.evalInfraRate! * 100).toFixed(0)}%`).join('   ')}`);
 }
 
 async function cmdEvolve(): Promise<void> {
@@ -276,6 +284,8 @@ async function cmdEvolve(): Promise<void> {
   const out = await evolve(store, runner(), (m) => console.log(`♫ ${m}`));
   console.log(`♫ ${out.promoted ? `PROMOTED ${out.candidate}` : `kept ${out.incumbent}`}: ${out.reason}`);
   if (out.candidateScore !== null) console.log(`  eval: ${out.incumbent} ${out.incumbentScore} vs ${out.candidate} ${out.candidateScore}`);
+  if (out.monitorFireRate) console.log(`  integrity monitor fire rate (flags per run): ${out.incumbent} ${out.monitorFireRate.incumbent.toFixed(2)}, ${out.candidate} ${out.monitorFireRate.candidate.toFixed(2)}`);
+  if (out.infraFailureRate) console.log(`  infra failure rate: ${out.incumbent} ${(out.infraFailureRate.incumbent * 100).toFixed(0)}%, ${out.candidate} ${(out.infraFailureRate.candidate * 100).toFixed(0)}%`);
 }
 
 function cmdLearnings(args: string[]): void {

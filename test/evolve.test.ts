@@ -1,10 +1,14 @@
+import { execFileSync } from 'node:child_process';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { Runner } from '../src/agent.ts';
 import { runGoal } from '../src/conductor.ts';
-import { evolutionDue, evolve, harvest, listEvals, metrics, promotionDecision } from '../src/evolve.ts';
+import { evaluate, evaluatePair, evolutionDue, evolve, harvest, listEvals, metrics, promotionDecision } from '../src/evolve.ts';
 import { fakeRunner } from '../src/fake.ts';
-import { createVariant, currentVersion, loadHarness, readArchive } from '../src/harness.ts';
+import { EVOLVABLE_FILES, createVariant, currentVersion, loadHarness, readArchive } from '../src/harness.ts';
+import { fitDiff, loadScorer, scorerPrompt } from '../src/scorer.ts';
 import { tempRepo } from './helpers.ts';
 import { DEFAULT_PROJECT_CONFIG } from '../src/store.ts';
 
@@ -301,4 +305,181 @@ test('too few cases with candidates:3 keeps every candidate and spends no eval r
   const entries = readArchive(store).filter((a) => a.version !== 'v1');
   assert.equal(entries.length, 3);
   assert.ok(entries.every((a) => a.status === 'candidate'));
+});
+
+// ---- Frozen promotion scorer ----
+
+test('eval score comes from the frozen scorer, not the candidate run satisfaction', async () => {
+  const store = tempRepo();
+  const base = fakeRunner();
+  const run = await runGoal({ store, runner: base, goal: 'build it' });
+  const c = harvest(store, run)!;
+  assert.ok((run.satisfaction ?? 0) > 0.7, 'the run itself reports high satisfaction');
+  const scorerCalls: string[] = [];
+  const failing: Runner = async (req) => {
+    if (req.prompt.startsWith('FROZEN SCORER REPLAY')) {
+      scorerCalls.push(req.prompt);
+      return { ok: true, text: '', costUsd: 0, turns: 1, durationMs: 1, structured: { pass: false, score: 0.99, summary: 'reward hacked' } };
+    }
+    return base(req);
+  };
+  const res = await evaluate(store, failing, 'v1', [c]);
+  assert.equal(res.detail[c.id], 0);
+  assert.equal(res.passed[c.id], false);
+  assert.equal(res.score, 0);
+  assert.equal(scorerCalls.length, 1);
+  assert.ok(!/satisfaction/i.test(scorerCalls[0]), 'self-reported satisfaction is withheld from the scorer');
+
+  const ok = await evaluate(store, base, 'v1', [c]);
+  assert.equal(ok.passed[c.id], true);
+  assert.ok(ok.detail[c.id] > 0.8);
+});
+
+test('a scorer call that fails closes to zero, an infra failure is inconclusive', async () => {
+  const store = tempRepo();
+  const base = fakeRunner();
+  const c = harvest(store, await runGoal({ store, runner: base, goal: 'build it' }))!;
+  const broken = (error: string): Runner => async (req) => (req.prompt.startsWith('FROZEN SCORER REPLAY') ? { ok: false, text: '', error, costUsd: 0, turns: 1, durationMs: 1 } : base(req));
+  const crash = await evaluate(store, broken('boom'), 'v1', [c]);
+  assert.equal(crash.score, 0);
+  assert.equal(crash.inconclusive, undefined);
+  const infra = await evaluate(store, broken('rate limit hit'), 'v1', [c]);
+  assert.match(infra.inconclusive ?? '', /rate limit/);
+});
+
+test('scorer is pinned outside the evolvable harness and loads with model and version', () => {
+  assert.ok(!EVOLVABLE_FILES.some((f) => f.includes('scorer')));
+  const s = loadScorer();
+  assert.ok(s.model && s.version);
+  assert.ok(s.judge.length > 0 && s.checklist.length > 0);
+  assert.throws(() => createVariant(tempRepo(), 'v1', { 'scorer/judge.md': 'x' }, 'hack'), /may not edit/);
+});
+
+test('evolver prompt never contains scorer file contents', async () => {
+  const store = tempRepo({ evolve: { every: 1, autoPromote: true, minGain: 0.02, sample: 1, minCases: 1 } });
+  const base = fakeRunner();
+  harvest(store, await runGoal({ store, runner: base, goal: 'build it' }));
+  const prompts: string[] = [];
+  const spy: Runner = async (req) => {
+    if (req.role === 'evolver') prompts.push(`${req.system}\n${req.prompt}`);
+    return base(req);
+  };
+  await evolve(store, spy, quiet);
+  assert.ok(prompts.length > 0);
+  const s = loadScorer();
+  for (const text of [s.judge, ...s.checklist.split('\n')].map((t) => t.trim()).filter(Boolean)) {
+    for (const p of prompts) assert.ok(!p.includes(text), `evolver saw scorer text: ${text.slice(0, 40)}`);
+  }
+});
+
+// ---- Clean-room, interleaved eval trials ----
+
+test('eval replays interleave candidate and incumbent, never two batches', async () => {
+  const store = tempRepo();
+  const base = fakeRunner();
+  harvest(store, await runGoal({ store, runner: base, goal: 'build it' }));
+  harvest(store, await runGoal({ store, runner: base, goal: 'build it again' }));
+  const v2 = createVariant(store, 'v1', { 'planner.md': 'You are the PLANNER. Be brief.' }, 'x');
+  const seen: string[] = [];
+  const ids = new Set<string>();
+  await evaluatePair(store, base, 'v1', v2, listEvals(store), (r) => {
+    if (!ids.has(r.id)) {
+      ids.add(r.id);
+      seen.push(r.harness);
+    }
+  });
+  assert.deepEqual(seen, [v2, 'v1', v2, 'v1']);
+});
+
+test('eval runs get no learnings and each its own fresh worktree at the case base commit', async () => {
+  const store = tempRepo();
+  const base = fakeRunner();
+  const first = await runGoal({ store, runner: base, goal: 'build it' });
+  const c = harvest(store, first)!;
+  const { writeLearnings } = await import('../src/learnings.ts');
+  writeLearnings(store, [{ role: 'planner', lesson: 'SECRET-LESSON-XYZ', evidence: [{ run: first.id }], hits: 0 }], first.id);
+  const prompts: string[] = [];
+  const cwds: string[] = [];
+  const spy: Runner = async (req) => {
+    prompts.push(req.prompt + (req.system ?? ''));
+    if (req.cwd) cwds.push(req.cwd);
+    return base(req);
+  };
+  const bases = new Map<string, string | undefined>();
+  await evaluate(store, spy, 'v1', [c, c], (r) => bases.set(r.id, r.baseRef));
+  assert.equal(bases.size, 2, 'two replays, two distinct run ids');
+  assert.ok([...bases.values()].every((b) => b === c.base), 'each replay starts at the case base commit');
+  assert.ok(prompts.length > 0);
+  assert.ok(prompts.every((p) => !p.includes('SECRET-LESSON-XYZ')), 'eval prompts carry no lessons');
+  const integrations = [...new Set(cwds.filter((d) => d.includes('_integration')))];
+  assert.equal(integrations.length, 2, 'each replay has its own worktree');
+  // A goal run (not eval) still sees the lesson, so the bypass is eval-only.
+  const seen: string[] = [];
+  await runGoal({ store, runner: async (req) => (seen.push(req.prompt), base(req)), goal: 'another' });
+  assert.ok(seen.some((p) => p.includes('SECRET-LESSON-XYZ')));
+});
+
+test('infraFailureRate is reported per side and in the evolve outcome', async () => {
+  const store = tempRepo({ evolve: { every: 1, autoPromote: true, minGain: 0.02, sample: 1, minCases: 1 } });
+  const base = fakeRunner();
+  const c = harvest(store, await runGoal({ store, runner: base, goal: 'build it' }))!;
+  const clean = await evaluate(store, base, 'v1', [c]);
+  assert.equal(clean.infraFailureRate, 0);
+  const broken: Runner = async (req) => (req.prompt.startsWith('FROZEN SCORER REPLAY') ? { ok: false, text: '', error: 'rate limit hit', costUsd: 0, turns: 1, durationMs: 1 } : base(req));
+  const bad = await evaluate(store, broken, 'v1', [c, c]);
+  assert.equal(bad.infraFailureRate, 1, 'aborts on first infra failure: 1 of 1 attempted');
+  const out = await evolve(store, base, quiet);
+  assert.deepEqual(out.infraFailureRate, { incumbent: 0, candidate: 0 });
+  assert.equal(readArchive(store).find((a) => a.version === 'v1')!.evalInfraRate, 0);
+});
+
+test('promotionDecision blocks a candidate whose monitor fire rate exceeds the incumbent, naming the monitor', () => {
+  const base = { incumbentScores: [0.5, 0.5], candidateScores: [0.9, 0.9], regressions: [], minGain: 0.02, minCases: 2, incumbent: 'v1' };
+  const blocked = promotionDecision({ ...base, monitorFireRate: { incumbent: 0, candidate: 1 } });
+  assert.equal(blocked.promote, false);
+  assert.match(blocked.reason, /integrity monitor/);
+  assert.equal(promotionDecision({ ...base, monitorFireRate: { incumbent: 0.5, candidate: 0.5 } }).promote, true, 'equal rate is allowed');
+  assert.equal(promotionDecision({ ...base, monitorFireRate: { incumbent: 0, candidate: 0.5 } }).promote, true, 'one extra flag is within the noise slack');
+  assert.equal(promotionDecision(base).promote, true, 'no monitor data leaves the default path unchanged');
+});
+
+test('evolve: a candidate that trips the monitor more than the incumbent is not promoted', async () => {
+  const store = tempRepo({ evolve: { every: 1, autoPromote: true, minGain: 0.02, sample: 1, minCases: 1 } });
+  mkdirSync(join(store.root, 'test'), { recursive: true });
+  writeFileSync(join(store.root, 'test', 'sample.test.js'), "import assert from 'node:assert';\nassert.ok(true);\n");
+  execFileSync('git', ['add', '-A'], { cwd: store.root });
+  execFileSync('git', ['commit', '-qm', 'sample'], { cwd: store.root });
+  // Only the evolved worker prompt (edge cases) reward-hacks, and only on its first attempt.
+  const runner = fakeRunner({ tamper: (req) => /edge cases/i.test(req.system ?? '') && req.meta?.attempt === 1 });
+  assert.ok(harvest(store, await runGoal({ store, runner: fakeRunner(), goal: 'build it' })));
+
+  const prompts: string[] = [];
+  const spy: Runner = async (req) => {
+    if (req.role === 'evolver') prompts.push(req.prompt + (req.system ?? ''));
+    return runner(req);
+  };
+  const out = await evolve(store, spy, quiet);
+  assert.equal(out.promoted, false);
+  assert.match(out.reason, /integrity monitor/);
+  assert.ok(out.monitorFireRate!.candidate > out.monitorFireRate!.incumbent);
+  assert.equal(currentVersion(store), 'v1');
+  assert.equal(readArchive(store).find((a) => a.version === 'v2')!.status, 'rejected');
+
+  // A second evolve sees the first run's flagged tasks in history; none of it may reach the evolver.
+  await runGoal({ store, runner, goal: 'again', harnessVersion: 'v2' });
+  await evolve(store, spy, quiet);
+  assert.ok(prompts.length >= 2);
+  for (const p of prompts) assert.doesNotMatch(p, /integrity|grading file|weakened-test|reward-hack|monitor/i);
+});
+
+test('scorer prompt keeps test-file diffs when a large src diff would exhaust the budget', () => {
+  const file = (path: string, n: number) => `diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n@@ -1 +1 @@\n${'+x\n'.repeat(n)}`;
+  const diff = file('src/a.ts', 30_000) + file('src/b.ts', 5_000) + file('test/a.test.ts', 50);
+  const out = fitDiff(diff);
+  assert.ok(out.length < 25_000);
+  assert.ok(out.includes('diff --git a/test/a.test.ts'), 'grading-surface file survives truncation');
+  assert.match(out, /diff truncated; cut or partial: .*src\/a\.ts/);
+  assert.equal(fitDiff('small'), 'small');
+  const p = scorerPrompt(loadScorer(), { goal: 'g', diff: 'd', checkPassed: null, integrityFlags: ['weakened-test in test/a.test.ts (1 assertion line(s) removed)'], cwd: '.' });
+  assert.match(p, /INTEGRITY MONITOR FLAGS[\s\S]*weakened-test/);
 });

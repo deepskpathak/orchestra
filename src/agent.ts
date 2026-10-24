@@ -6,7 +6,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { PACKAGE_ROOT } from './harness.ts';
-import type { Role } from './types.ts';
+import type { Role, WorkerOutcome } from './types.ts';
 
 export interface AgentRequest {
   role: Role;
@@ -197,6 +197,17 @@ export function extractJson(res: AgentResult): unknown {
   } catch {
     return undefined;
   }
+}
+
+// Worker outcome: structured {outcome:'flag_for_human', reason} or a text line `FLAG_FOR_HUMAN: <reason>`.
+export function parseWorkerOutcome(res: AgentResult): WorkerOutcome {
+  const s = res.structured as { outcome?: unknown; reason?: unknown } | undefined;
+  if (s && typeof s === 'object' && s.outcome === 'flag_for_human') {
+    return { outcome: 'flag_for_human', reason: typeof s.reason === 'string' && s.reason.trim() ? s.reason.trim() : 'no reason given' };
+  }
+  const m = res.text.match(/^\s*FLAG_FOR_HUMAN:[ \t]*(.*)$/m);
+  if (m) return { outcome: 'flag_for_human', reason: m[1].trim() || 'no reason given' };
+  return { outcome: 'done' };
 }
 
 // Quick preflight used by `orchestra doctor`: is the CLI present and authenticated?

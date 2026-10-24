@@ -2,15 +2,17 @@
 // learning, evolution) without spending tokens. Used by tests and `orchestra demo`.
 
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AgentRequest, AgentResult, Runner } from './agent.ts';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-export function fakeRunner(opts: { stepMs?: number; failFirstAttemptOf?: string[]; failAlways?: string[]; judgeFailTimes?: number; contrastPick?: 'A' | 'B'; contrastScores?: { a: number; b: number } } = {}): Runner {
+export function fakeRunner(opts: { stepMs?: number; failFirstAttemptOf?: string[]; failAlways?: string[]; flagForHuman?: string[]; flagOnRepair?: string[]; tamper?: (req: AgentRequest) => boolean; judgeFailTimes?: number; contrastPick?: 'A' | 'B'; contrastScores?: { a: number; b: number } } = {}): Runner {
   const step = opts.stepMs ?? 0;
   const failFirst = new Set(opts.failFirstAttemptOf ?? ['T2']);
+  const flagHuman = new Set(opts.flagForHuman ?? []);
+  const flagRepair = new Set(opts.flagOnRepair ?? []);
   const failAlways = new Set(opts.failAlways ?? []);
   let judgeFailsLeft = opts.judgeFailTimes ?? 0;
 
@@ -62,11 +64,32 @@ export function fakeRunner(opts: { stepMs?: number; failFirstAttemptOf?: string[
         writeFileSync(join(dir, `${task}.txt`), `task ${task} attempt ${attempt}${careful ? ' edge-cases-covered' : ''}\n`);
         // Contrastive worker B leaves a distinguishable artifact.
         if (req.meta?.variant === 'b') writeFileSync(join(dir, `${task}-b.txt`), `task ${task} alternate approach B\n`);
+        // Simulated reward hacking: drop the assertions from an existing test file.
+        const sample = join(req.cwd, 'test', 'sample.test.js');
+        if (opts.tamper && existsSync(sample)) {
+          if (opts.tamper(req)) {
+            writeFileSync(sample, readFileSync(sample, 'utf8').split('\n').filter((l) => !/assert/.test(l)).join('\n'));
+          } else {
+            // A repair attempt reverts the tampering: restore the oldest committed version of the file.
+            const commits = execFileSync('git', ['log', '--format=%H', '--', 'test/sample.test.js'], { cwd: req.cwd, encoding: 'utf8' }).trim().split('\n');
+            writeFileSync(sample, execFileSync('git', ['show', `${commits[commits.length - 1]}:test/sample.test.js`], { cwd: req.cwd, encoding: 'utf8' }));
+          }
+        }
         execFileSync('git', ['add', '-A'], { cwd: req.cwd });
         execFileSync('git', ['commit', '-qm', `${task}: attempt ${attempt}`], { cwd: req.cwd });
+        if (flagHuman.has(task) || (flagRepair.has(task) && Number(attempt) > 1)) {
+          return done({ outcome: 'flag_for_human', reason: `Spec and tests contradict each other for ${task}` }, `FLAG_FOR_HUMAN: Spec and tests contradict each other for ${task}`, 0.2);
+        }
         return done(undefined, `Implemented ${task}`, 0.2);
       }
       case 'judge': {
+        if (req.prompt.startsWith('FROZEN SCORER REPLAY')) {
+          // Frozen scorer: judges the diff, never the replay's self-reported satisfaction.
+          await act('says: scoring replay');
+          const careful = /edge-cases-covered/.test(req.prompt);
+          const empty = /DIFF:\n\(empty\)/.test(req.prompt);
+          return done(empty ? { pass: false, score: 0.2, summary: 'No change' } : { pass: true, score: careful ? 0.95 : 0.85, summary: 'Meets goal' }, 'scored', 0.04);
+        }
         if (judgeFailsLeft > 0) {
           judgeFailsLeft -= 1;
           return { ok: false, text: '', error: 'simulated judge crash', costUsd: 0.01, turns: 1, durationMs: step, usage: { inputTokens: 300, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 } };

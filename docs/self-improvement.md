@@ -86,6 +86,33 @@ The Factory Eval is a set of regression cases stored as JSON files in the `evals
 - `orchestra evals` lists each case with its short base commit, check and goal, or says none exist yet.
 - To score a harness version, each case is replayed as an eval run. A case passes if the run is `done` and the `check` (if any) passes on the integration branch. The case score is the run satisfaction, or 0 on failure. The version score is the mean across cases.
 - Eval runs delete their `orchestra/<run>/*` branches afterwards.
+- **Clean-room trials.** Every replay gets its own fresh worktree cut from the case's `base` commit (unique run id, nothing reused), reads no learnings (the planner and worker prompts show `(none yet)` for eval runs, so lessons accumulated on past goals cannot leak into the comparison) and carries no cache between trials. Branches sit in the same repository, so history beyond the base commit is not hidden.
+- **Interleaved.** The candidate and incumbent replay the same case back to back (candidate, incumbent, candidate, incumbent...) instead of as two batches, so drift in the infrastructure hits both sides alike.
+- **Infra failure rate.** Replays that die of infrastructure (usage limit, auth, network) are inconclusive. `EvalResult.infraFailureRate` is infra-failed replays divided by replays attempted, per side. The first infra failure ends the pair, so a non-zero rate means the comparison was inconclusive.
+
+## Frozen scorer
+
+Promotion scores come from a frozen scorer, not from the candidate harness's own judge. It lives in the top-level `scorer/` directory (`config.json` pinning `version`, `model` and `budgetUsd`, plus `judge.md` and `checklist.md`), outside `EVOLVABLE_FILES` and never shown to the evolver. `src/scorer.ts` loads it and `evaluate()` in `src/evolve.ts` uses it for every eval replay.
+
+- A replay scores 0 unless the case `check` passed (when the case has one) and the scorer's verdict passed. Otherwise the score is the scorer's 0 to 1 score. `run.satisfaction` from the candidate's judge is not used.
+- The candidate's judge still runs during the replay and its text can feed repair, but it has no say in promotion.
+- The agent guard denies writes to `scorer/`. Changing the scorer is a deliberate edit by you, and its version is part of `scorer/config.json`.
+- Scorer calls are recorded in the ledger as `eval` entries with the scorer model.
+
+## Integrity monitor
+
+`src/integrity.ts` is a pure function over a unified diff (no file or process IO). The conductor runs it on every worker diff and on eval replays, and stores the flags on `task.integrityFlags`.
+
+- **Grading surface.** Edits to test files, scenario files, CI workflows or `scorer/` are flagged.
+- **Weakened test.** A deleted test file, a net loss of assertion lines, or an added `skip`, `only` or `todo`.
+- **Reward hack.** Early success exits (`process.exit(0)`, `exit 0`), monkey-patching globals or assert helpers, branching on the test environment, and special-casing a literal input.
+- **Restore and repair.** If a task edits a grading file that existed at the base commit, the conductor re-runs the `testCommand` with the original files restored and grades on that. The task fails the attempt with an automatic repair note (prefixed `[integrity-monitor]`) telling the worker to revert the change, or to stop with `FLAG_FOR_HUMAN` if a test change is truly required. Newly added tests are normal work and do not trigger this.
+- **Promotion blocking.** Each replay counts its flags. `promotionDecision` rejects a candidate whose monitor fire rate (flags per replayed run) is higher than the incumbent's, and the rates appear on the `EvalResult` and in the archive.
+- **Hidden from the evolver.** Monitor text and rates are filtered out of every evolver prompt, so the evolver cannot optimize against the monitor.
+
+## Hand the task to a human: `FLAG_FOR_HUMAN`
+
+A worker that finds the spec and the tests contradict each other ends with `FLAG_FOR_HUMAN: <reason>` instead of bending the tests. This is a stop condition, not a failure: the task becomes `needs_human` with the reason stored, gets no repair retries, and is reported separately in the run summary and dashboards. This removes the pressure that repeated failures put on a worker to cheat. See [architecture](architecture.md#the-attempt-and-retry-loop).
 
 ## Evolution: `orchestra evolve`
 
@@ -101,7 +128,7 @@ One evolution cycle (`evolve()` in `src/evolve.ts`):
 4. **Decide.** The candidate wins only if its score beats the incumbent by at least `evolve.minGain` and no case that the incumbent passed fails for the candidate.
 5. **Promote or record.** If it wins and `evolve.autoPromote` is true, it is promoted. Otherwise the archive status becomes `candidate` (kept, autoPromote off) or `rejected`.
 
-The command prints whether it promoted or kept the incumbent, with the reason and both eval scores. Evaluation reruns past goals, so one cycle costs roughly `sample x 2` runs plus the evolver call.
+The command prints whether it promoted or kept the incumbent, with the reason and both eval scores, then the infra failure rate of the incumbent and the candidate replays. `orchestra stats` also lists the infra failure rate of each version's last full evaluation. Evaluation reruns past goals, so one cycle costs roughly `sample x 2` runs plus the evolver call.
 
 The `evolve` settings live in `config.json`, with defaults `every: 3`, `autoPromote: true`, `minGain: 0.02`, `sample: 5`, `minCases: 5`, `candidates: 1`. A `sample` below `minCases` is raised to `minCases`, so an old `config.json` that pins a small value cannot block promotion. With fewer than `minCases` eval cases, `evolve` keeps the candidate for later and spends no eval runs. If an eval run dies of infrastructure (usage limit, auth, network), the result is inconclusive: the candidate stays a candidate and no score is recorded.
 
@@ -146,7 +173,8 @@ Rails are enforced in code, not only in prompts:
 
 - **Evolvable set.** The evolver can only edit the 8 files `planner.md`, `worker.md`, `judge.md`, `librarian.md`, `config.json`, `tools.md`, `style.md` and `checklist.md`. Any other file name is rejected (`EVOLVABLE_FILES` in `src/harness.ts`). It cannot edit `evolver.md`.
 - **No lowered bar.** A `config.json` with a lower `passThreshold` than its parent is rejected, as is one missing a model for any role. A `checklist.md` that drops a line the parent had is rejected too.
-- **Measured gain only.** Promotion needs `minGain` and zero regressions on the sampled eval cases.
+- **Measured gain only.** Promotion needs `minGain` and zero regressions on the sampled eval cases, scored by the frozen scorer, and no rise in the integrity monitor fire rate.
+- **Frozen scorer.** `scorer/` is outside the evolvable set, and the guard blocks writes to it.
 - **Agent hook** (`src/guard.ts`, run as `orchestra guard`). Every agent session gets a PreToolUse hook that denies:
   - any access to the hidden holdout scenarios (visible to the judge only)
   - writes to the harness, evals or archive files (read, grep and glob stay allowed)

@@ -196,6 +196,7 @@ We propose, but have not run, the following protocol. Each step uses existing co
 ## 8 Limitations
 
 - **No empirical results.** There is no benchmark of Orchestra against a baseline in the repo. Claims here are about design, not performance.
+- **Candidate judge scores its own eval: addressed (M1).** Eval replays are now scored by a frozen scorer in `scorer/` plus the case `check`, never by the candidate harness's own judge. An integrity monitor and clean-room, interleaved trials back this up (`docs/self-improvement.md`). The scorer is still an LLM and shares a model family with the judge by default.
 - **Judge is an LLM.** Verdicts can be wrong, and the quality of hidden scenarios depends on the planner. The fast path removes the hidden-scenario requirement for small goals (`docs/configuration.md`).
 - **Small eval sets.** The gate refuses to promote below `evolve.minCases` and requires a gain above the observed spread, but the repo's own notes say small sets are noisy (`docs/research/cost-accuracy-speed.md`).
 - **Cost.** Evolution reruns past goals and costs roughly `sample x 2` runs plus the evolver call (`README.md`, Status). Multi-candidate adds `k x screen` each cycle. The research notes report that the Opus-tier planner and judge dominated cost in one measured run (`docs/research/cost-accuracy-speed.md`).
@@ -204,7 +205,6 @@ We propose, but have not run, the following protocol. Each step uses existing co
 - **Eval is local.** Factory Eval cases come from the user's own successful goals, so they cover only past work types.
 - **Contrastive repair is narrow.** It applies only on repair attempts, by default only without a test command, and one pair per task by default.
 - **Platform coupling.** Real runs need Claude Code with headless auth. Model tiers map through a capability table (`src/models.ts`), but the only provider shipped is Anthropic (`DEFAULT_PROVIDER`).
-- **Release metadata.** `README.md` Status says "Version 0.1" while `package.json` and `CHANGELOG.md` describe 0.6.0. We follow the latter.
 
 ## 9 Threats to validity
 
@@ -215,6 +215,8 @@ We propose, but have not run, the following protocol. Each step uses existing co
 **Construct.** (a) Satisfaction is the mean judge score, a proxy for correctness and intent, not a direct measure. (b) First-pass yield rewards getting it right early, which can favour easy decompositions. (c) Cost per merged task depends on how the planner splits goals. (d) A passing hidden scenario shows consistency with the planner's reading of the goal, which may itself differ from the user's intent.
 
 ## 10 Future work
+
+A research review and an ordered plan that addresses the limitations in section 8, and a newly found self-graded evaluation gap, are in [Closing the gaps](research/closing-the-gaps.md).
 
 Drawn from `README.md`, `CHANGELOG.md`, `PLAN.md` and `docs/research/cost-accuracy-speed.md`:
 

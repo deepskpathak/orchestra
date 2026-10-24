@@ -1,5 +1,7 @@
 // Shared domain types. Everything Orchestra persists is one of these shapes, as JSON.
 
+import type { IntegrityFlag } from './integrity.ts';
+
 export type Role = 'planner' | 'worker' | 'judge' | 'librarian' | 'evolver';
 
 export type TaskStatus =
@@ -10,7 +12,11 @@ export type TaskStatus =
   | 'merging' // waiting in the merge queue
   | 'merged' // landed on the integration branch
   | 'failed' // out of attempts
+  | 'needs_human' // worker flagged a spec/test contradiction; stops repair, not a failure
   | 'blocked'; // a dependency failed
+
+// What a worker session can end with besides plain completion.
+export type WorkerOutcome = { outcome: 'done' } | { outcome: 'flag_for_human'; reason: string };
 
 export interface CriterionResult {
   criterion: string;
@@ -49,6 +55,8 @@ export interface Task {
   worktree?: string;
   verdict?: Verdict;
   notes: string[]; // repair notes fed to the next attempt
+  integrityFlags?: IntegrityFlag[]; // grading-surface / reward-hack flags raised on this task's diffs (all attempts)
+  humanReason?: string; // why the worker flagged the task for a human (status needs_human)
   contrast?: ContrastRecord; // set when a contrastive repair pair ran
   costUsd: number;
   startedAt?: number;
@@ -104,6 +112,7 @@ export type EventKind =
   | 'task.merged'
   | 'task.contrast'
   | 'task.failed'
+  | 'task.needs_human'
   | 'agent.start'
   | 'agent.action'
   | 'agent.end'

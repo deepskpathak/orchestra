@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { buildArgs, extractJson, parseUsage, summarizeTool } from '../src/agent.ts';
-import { detectTestCommand } from '../src/cli.ts';
+import { detectTestCommand, summary } from '../src/cli.ts';
 import { decide } from '../src/guard.ts';
 import { metrics } from '../src/evolve.ts';
 import { fit, renderDashboard, renderStats, renderStatusLine, sparkline, visible } from '../src/tui/render.ts';
@@ -16,6 +16,37 @@ test('guard blocks holdout access, network, harness edits, secrets', () => {
   assert.equal(decide('Bash', { command: 'git push origin main' }).allow, false);
   assert.equal(decide('Edit', { file_path: '/r/.orchestra/harness/v1/judge.md' }).allow, false);
   assert.equal(decide('Read', { file_path: '/r/.env' }).allow, false);
+  assert.equal(decide('Edit', { file_path: '/r/src/app.ts' }).allow, true);
+});
+
+test('guard protects the installed scorer, not any scorer/ directory in the target repo', () => {
+  const ctx = { cwd: '/w', scorerDir: '/pkg/scorer' };
+  const d = (tool: string, input: Record<string, unknown>) => decide(tool, input, ctx).allow;
+  assert.equal(d('Edit', { file_path: '/pkg/scorer/judge.md' }), false);
+  assert.equal(d('Write', { file_path: '../pkg/scorer/config.json', content: '{}' }), false);
+  assert.equal(d('Bash', { command: 'echo pass > /pkg/scorer/checklist.md' }), false);
+  assert.equal(d('Read', { file_path: '/pkg/scorer/judge.md' }), true);
+  // A project with its own scorer/ or src/scorer/ is unaffected.
+  assert.equal(d('Edit', { file_path: '/w/scorer/model.py' }), true);
+  assert.equal(d('Write', { file_path: 'src/scorer/index.ts', content: 'x' }), true);
+  assert.equal(d('Bash', { command: 'echo x > scorer/a.txt' }), true);
+  // Prose mentioning the scorer is not a scorer write.
+  assert.equal(d('Write', { file_path: 'README.md', content: 'The frozen /pkg/scorer/ judges promotion.' }), true);
+  // Read-only Bash on the scorer is allowed; harmless redirects do not count as writes.
+  assert.equal(d('Bash', { command: 'cat /pkg/scorer/judge.md' }), true);
+  assert.equal(d('Bash', { command: 'grep -r foo /pkg/scorer 2>&1' }), true);
+  assert.equal(d('Bash', { command: 'cat /pkg/scorer/x > /dev/null' }), true);
+  // Writes, including the previously missed forms.
+  for (const command of [
+    'rm /pkg/scorer/judge.md',
+    'sed -i s/a/b/ /pkg/scorer/judge.md',
+    'cat x | tee /pkg/scorer/checklist.md',
+    'cp /tmp/x /pkg/scorer/config.json',
+    'cd /pkg/scorer && echo x > judge.md',
+    'git -C /pkg/scorer checkout -- judge.md',
+    'echo x > /pkg/scor*/judge.md',
+    'python3 -c "open(\'/pkg/scorer/judge.md\',\'w\').write(\'x\')"',
+  ]) assert.equal(d('Bash', { command }), false, command);
   assert.equal(decide('Bash', { command: 'npm test' }).allow, true);
   assert.equal(decide('Edit', { file_path: '/r/src/app.ts' }).allow, true);
 });
@@ -109,4 +140,35 @@ test('stats cache hit ratio: computed from usage, n/a for legacy rows', () => {
   const out = renderStats(legacy, archive, 'v1', false);
   assert.match(out, /cache hit ratio\s+v1 n\/a/);
   assert.doesNotMatch(out, /NaN/);
+});
+
+// Returns the semver-like versions a README claims as "Version X.Y[.Z]".
+function readmeVersions(text: string): string[] {
+  return [...text.matchAll(/\bVersion\s+v?(\d+\.\d+(?:\.\d+)?)/gi)].map((m) => m[1]);
+}
+
+// Claimed versions that differ from the package version (exact match required).
+function staleReadmeVersions(readme: string, pkgVersion: string): string[] {
+  return readmeVersions(readme).filter((v) => v !== pkgVersion);
+}
+
+test('README version claims match package.json', () => {
+  const pkg = JSON.parse(readFileSync(join(import.meta.dirname, '..', 'package.json'), 'utf8'));
+  const readme = readFileSync(join(import.meta.dirname, '..', 'README.md'), 'utf8');
+  assert.deepEqual(staleReadmeVersions(readme, pkg.version), []);
+});
+
+test('staleReadmeVersions flags mismatched README versions', () => {
+  assert.deepEqual(staleReadmeVersions('Status\n\nVersion 0.1. Tests.', '0.6.1'), ['0.1']);
+  assert.deepEqual(staleReadmeVersions('Version 0.6.0', '0.6.1'), ['0.6.0']);
+  // A partial X.Y claim is not accepted as equal to X.Y.Z.
+  assert.deepEqual(staleReadmeVersions('Version 0.6', '0.6.1'), ['0.6']);
+  assert.deepEqual(staleReadmeVersions('Version 0.6.1', '0.6.1'), []);
+  assert.deepEqual(staleReadmeVersions('No version stated', '0.6.1'), []);
+});
+
+test('run summary separates failed, blocked and needs-human tasks', () => {
+  const t = (id: string, status: string, extra: object = {}) => ({ id, title: id, status, ...extra });
+  const run = { id: 'r1', status: 'failed', satisfaction: 0.5, costUsd: 1, tasks: [t('T1', 'needs_human', { humanReason: 'spec vs test' }), t('T2', 'blocked'), t('T3', 'blocked'), t('T4', 'failed'), t('T5', 'merged')] } as unknown as Run;
+  assert.match(summary(run), /1 failed, 2 blocked, 1 need a human/);
 });

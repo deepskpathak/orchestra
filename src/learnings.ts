@@ -2,6 +2,7 @@
 // Stored per domain (learnings/<domain>.json) plus learnings/_global.json, each lesson backed by run evidence.
 
 import { existsSync, readdirSync } from 'node:fs';
+import { MONITOR_MARK } from './integrity.ts';
 import type { Store } from './store.ts';
 
 export interface Evidence {
@@ -173,7 +174,7 @@ export function summarizeLearnings(store: Store, top = 3): Record<string, { coun
     const byRole: Record<string, number> = {};
     for (const l of ls) byRole[l.role] = (byRole[l.role] ?? 0) + 1;
     const ranked = [...ls].sort((a, b) => b.hits + b.evidence.length - (a.hits + a.evidence.length));
-    out[d] = { count: ls.length, byRole, top: ranked.slice(0, top).map((l) => l.lesson) };
+    out[d] = { count: ls.length, byRole, top: ranked.filter((l) => !l.lesson.includes(MONITOR_MARK)).slice(0, top).map((l) => l.lesson) };
   }
   return out;
 }

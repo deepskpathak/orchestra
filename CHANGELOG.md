@@ -8,6 +8,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- M1 Integrity (W0.1, W1.1 to W1.5), which closes the self-graded eval gap:
+  - W0.1: the README Status section matches `package.json`, with a guard test.
+  - W1.1: a frozen promotion scorer in the top-level `scorer/` directory (pinned `config.json`, `judge.md`, `checklist.md`), outside the evolvable harness. Eval replays are scored by it plus the case `check`, not by the candidate's own judge. The guard blocks writes to the installed `scorer/`, and the evolver never sees it.
+  - W1.2 and W1.4: a pure integrity monitor (`src/integrity.ts`) flags edits to tests, scenarios, CI config and the scorer, weakened tests (removed assertions, skip/only/todo) and reward-hack patterns (early success exit, monkey-patching, special-casing inputs). When a task edits a grading file that existed at the base, grading re-runs the `testCommand` with the originals restored and the task goes to repair with an automatic note. Flags are stored on `task.integrityFlags`.
+  - Promotion is blocked when the candidate's monitor fire rate (flags per replayed run) exceeds the incumbent's by more than one flag. Monitor text is kept out of every evolver prompt.
+  - W1.3: the `flag_for_human` worker outcome (below).
+  - W1.5: clean-room, interleaved eval trials (fresh worktree per replay, no learnings, candidate and incumbent alternating) and a reported `infraFailureRate` per side.
+- `flag_for_human` worker outcome: a worker that finds the spec and tests contradict each other ends with `FLAG_FOR_HUMAN: <reason>`. The task stops with status `needs_human` (reason recorded, `task.needs_human` event), gets no repair retries, and is reported separately from failed tasks in the run summary, TUI and web dashboard.
+- Research paper `docs/research/closing-the-gaps.md`: a review of about 90 academic, industry and practitioner sources on evaluating, verifying, isolating and self-improving agentic software factories, and an ordered plan (8 workstreams, 6 milestones, stated hypotheses) to address the whitepaper's limitations. It also documents a gap: a candidate harness's own evolvable judge scores its Factory Eval runs.
 - Research note on repo context for agents (`docs/research/repo-context-atlas.md`): reviews code knowledge graphs, agentic RAG and existing tools, and proposes the opt-in Repo Atlas workstream W9 (#56).
 
 ## [0.6.1] - 2026-10-22

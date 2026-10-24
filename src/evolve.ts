@@ -9,6 +9,7 @@ import { join } from 'node:path';
 import { extractJson, type Runner } from './agent.ts';
 import { runGoal } from './conductor.ts';
 import { git } from './git.ts';
+import { fireRateByVersion, MONITOR_MARK } from './integrity.ts';
 import {
   EVOLVABLE_FILES,
   createVariant,
@@ -19,6 +20,7 @@ import {
   updateArchive,
 } from './harness.ts';
 import { summarizeLearnings } from './learnings.ts';
+import { loadScorer, scoreReplay, type Scorer } from './scorer.ts';
 import type { Store } from './store.ts';
 import type { Run } from './types.ts';
 
@@ -99,6 +101,9 @@ export interface EvalResult {
   detail: Record<string, number>;
   passed: Record<string, boolean>;
   cost: number;
+  infraFailureRate: number; // infrastructure-failed replays / replays attempted
+  inconclusive?: string;
+  monitorFireRate?: number; // integrity-monitor flags per replayed run; kept out of every evolver prompt
 }
 
 const INFRA_ERROR = /usage limit|session limit|rate limit|overloaded|quota|credit|not logged in|\/login|authentication|ECONN|ETIMEDOUT|ENOTFOUND|network/i;
@@ -108,25 +113,114 @@ export function isInfraFailure(run: Run): boolean {
   return run.status === 'failed' && INFRA_ERROR.test(run.error ?? '');
 }
 
-export async function evaluate(store: Store, runner: Runner, version: string, cases: EvalCase[], onRun?: (r: Run) => void): Promise<EvalResult> {
-  const detail: Record<string, number> = {};
-  const passed: Record<string, boolean> = {};
-  let cost = 0;
-  for (const c of cases) {
-    const run = await runGoal({ store, runner, goal: c.goal, harnessVersion: version, baseRef: c.base, kind: 'eval', onUpdate: onRun });
-    cost += run.costUsd;
-    if (isInfraFailure(run)) {
-      deleteRunBranches(store, run);
-      return { score: 0, detail, passed, cost: round(cost), inconclusive: run.error };
-    }
-    let ok = run.status === 'done';
-    if (ok && c.check && run.integrationBranch) ok = checkBranch(store, run.integrationBranch, c.check);
-    passed[c.id] = ok;
-    detail[c.id] = ok ? run.satisfaction ?? 0 : 0;
+interface CaseOutcome {
+  ok: boolean;
+  score: number;
+  cost: number;
+  flags?: number; // integrity-monitor flags raised across the replay's tasks
+  inconclusive?: string;
+}
+
+// One clean-room replay: runGoal gives every eval run its own fresh worktree cut from the case's
+// base commit (unique run id, nothing reused), and eval runs bypass the learnings store.
+async function evalCase(store: Store, runner: Runner, version: string, c: EvalCase, onRun: ((r: Run) => void) | undefined, scorer: Scorer): Promise<CaseOutcome> {
+  const run = await runGoal({ store, runner, goal: c.goal, harnessVersion: version, baseRef: c.base, kind: 'eval', onUpdate: onRun });
+  let cost = run.costUsd;
+  if (isInfraFailure(run)) {
     deleteRunBranches(store, run);
+    return { ok: false, score: 0, cost, inconclusive: run.error };
   }
-  const vals = Object.values(detail);
-  return { score: vals.length ? round(vals.reduce((a, b) => a + b, 0) / vals.length) : 0, detail, passed, cost: round(cost) };
+  // Promotion scores come from the frozen scorer. run.satisfaction is the candidate's own
+  // judge and stays advisory (repair notes), so a harness cannot grade itself into promotion.
+  // A run that finished without an integration branch produced nothing to score: that is a failed replay.
+  let ok = run.status === 'done' && !!run.integrationBranch;
+  let checkPassed: boolean | null = null;
+  if (ok && c.check && run.integrationBranch) {
+    checkPassed = checkBranch(store, run.integrationBranch, c.check);
+    ok = checkPassed;
+  }
+  let score = 0;
+  if (ok && run.integrationBranch) {
+    const diff = c.base ? git(store.root, 'diff', `${c.base}...${run.integrationBranch}`) : '';
+    const scored = await scoreReplay(scorer, runner, { goal: c.goal, diff, checkPassed, integrityFlags: run.tasks.flatMap((t) => (t.integrityFlags ?? []).map((f) => `${f.kind} in ${f.file} (${f.detail})`)), cwd: store.root, runId: run.id });
+    cost += scored.cost;
+    store.ledger({ t: Date.now(), run: run.id, kind: 'eval', harness: version, role: 'judge', model: scorer.model, ok: scored.ok, costUsd: scored.cost, durationMs: 0, turns: 0 });
+    if (!scored.ok && INFRA_ERROR.test(scored.error ?? '')) {
+      deleteRunBranches(store, run);
+      return { ok: false, score: 0, cost, inconclusive: scored.error };
+    }
+    ok = scored.ok && !!scored.verdict?.pass;
+    score = scored.score;
+  }
+  deleteRunBranches(store, run);
+  return { ok, score: ok ? score : 0, cost, flags: run.tasks.reduce((n, t) => n + (t.integrityFlags?.length ?? 0), 0) };
+}
+
+// Accumulates per-version results across (possibly interleaved) replays.
+class EvalTally {
+  detail: Record<string, number> = {};
+  passed: Record<string, boolean> = {};
+  cost = 0;
+  attempts = 0;
+  infraFailures = 0;
+  monitor: { harnessVersion: string; flags: number }[] = [];
+  inconclusive?: string;
+  version: string;
+  constructor(version = '') {
+    this.version = version;
+  }
+
+  add(c: EvalCase, o: CaseOutcome): void {
+    this.attempts++;
+    this.cost += o.cost;
+    if (o.inconclusive) {
+      this.infraFailures++;
+      this.inconclusive = o.inconclusive;
+      return;
+    }
+    this.monitor.push({ harnessVersion: this.version, flags: o.flags ?? 0 });
+    this.passed[c.id] = o.ok;
+    this.detail[c.id] = o.score;
+  }
+
+  result(): EvalResult {
+    const vals = Object.values(this.detail);
+    const rate = fireRateByVersion(this.monitor)[0]?.rate;
+    const base = { detail: this.detail, passed: this.passed, cost: round(this.cost), infraFailureRate: this.attempts ? round(this.infraFailures / this.attempts) : 0, ...(rate === undefined ? {} : { monitorFireRate: round(rate) }) };
+    if (this.inconclusive) return { score: 0, ...base, inconclusive: this.inconclusive };
+    return { score: vals.length ? round(vals.reduce((a, b) => a + b, 0) / vals.length) : 0, ...base };
+  }
+}
+
+export async function evaluate(store: Store, runner: Runner, version: string, cases: EvalCase[], onRun?: (r: Run) => void, scorer: Scorer = loadScorer()): Promise<EvalResult> {
+  const tally = new EvalTally(version);
+  for (const c of cases) {
+    tally.add(c, await evalCase(store, runner, version, c, onRun, scorer));
+    if (tally.inconclusive) break;
+  }
+  return tally.result();
+}
+
+// Replays candidate and incumbent interleaved per case (A,B,A,B...) so drift in the
+// infrastructure (rate limits, model changes) hits both sides alike. The first infrastructure
+// failure ends both sides as inconclusive.
+export async function evaluatePair(store: Store, runner: Runner, incumbent: string, candidate: string, cases: EvalCase[], onRun?: (r: Run) => void, scorer: Scorer = loadScorer()): Promise<{ incumbent: EvalResult; candidate: EvalResult }> {
+  const inc = new EvalTally(incumbent);
+  const cand = new EvalTally(candidate);
+  for (const c of cases) {
+    // Candidate first within each pair, then incumbent.
+    cand.add(c, await evalCase(store, runner, candidate, c, onRun, scorer));
+    if (cand.inconclusive) break;
+    inc.add(c, await evalCase(store, runner, incumbent, c, onRun, scorer));
+    if (inc.inconclusive) break;
+  }
+  const reason = cand.inconclusive ?? inc.inconclusive;
+  const out = { incumbent: inc.result(), candidate: cand.result() };
+  if (reason) {
+    out.incumbent.inconclusive = reason;
+    out.candidate.inconclusive = reason;
+  }
+  return out;
 }
 
 function checkBranch(store: Store, branch: string, check: string): boolean {
@@ -193,6 +287,8 @@ export interface EvolveOutcome {
   incumbentScore: number | null;
   promoted: boolean;
   reason: string;
+  monitorFireRate?: { incumbent: number; candidate: number }; // integrity-monitor flags per replayed run
+  infraFailureRate?: { incumbent: number; candidate: number }; // set when candidate and incumbent were replayed
 }
 
 export interface PromotionInput {
@@ -202,6 +298,7 @@ export interface PromotionInput {
   minGain: number;
   minCases: number;
   incumbent?: string;
+  monitorFireRate?: { incumbent: number; candidate: number }; // integrity-monitor flags per run
 }
 
 export interface PromotionDecision {
@@ -210,6 +307,10 @@ export interface PromotionDecision {
   gain: number;
   spread: number;
 }
+
+// One stray monitor flag (a heuristic false positive) must not veto a clearly better harness, so the
+// candidate may exceed the incumbent by this many flags before the monitor blocks promotion.
+export const MONITOR_SLACK_FLAGS = 1;
 
 // Pure promotion gate. With few cases a lucky run looks like a gain, so refuse below minCases,
 // and require the mean gain to beat the observed spread (stddev of per-case deltas).
@@ -221,6 +322,11 @@ export function promotionDecision(i: PromotionInput): PromotionDecision {
   const out = (promote: boolean, reason: string): PromotionDecision => ({ promote, reason, gain: round(gain), spread: round(spread) });
   if (n < i.minCases) return out(false, `only ${n} eval cases, need at least ${i.minCases}`);
   if (i.regressions.length) return out(false, `regressed on ${i.regressions.join(', ')}`);
+  const mon = i.monitorFireRate;
+  // Rates are flags per replayed run, so scale the difference back to a flag count (one run per case).
+  if (mon && (mon.candidate - mon.incumbent) * n > MONITOR_SLACK_FLAGS + 1e-9) {
+    return out(false, `integrity monitor fire rate ${mon.candidate.toFixed(3)} per run exceeds incumbent ${mon.incumbent.toFixed(3)} by more than ${MONITOR_SLACK_FLAGS} flag: candidate edits grading files or weakens tests more often`);
+  }
   const bar = Math.max(i.minGain, spread);
   if (!(gain > bar)) return out(false, `gain ${gain.toFixed(3)} not above ${spread > i.minGain ? 'spread' : 'minGain'} ${bar.toFixed(3)}`);
   return out(true, `+${gain.toFixed(3)} over ${i.incumbent ?? 'incumbent'} with no regressions (spread ${spread.toFixed(3)})`);
@@ -233,7 +339,9 @@ export async function evolve(store: Store, runner: Runner, log: (msg: string) =>
   const m = metrics(store);
   const recentIssues = goalRuns(store)
     .slice(-5)
+    // Monitor output must never reach the evolver, or it could learn to evade the monitor.
     .flatMap((r) => r.tasks.flatMap((t) => [...t.notes, ...(t.status === 'failed' ? [`${t.id} FAILED: ${t.verdict?.summary ?? ''}`] : [])]))
+    .filter((n) => !n.includes(MONITOR_MARK))
     .slice(-40);
   const files = EVOLVABLE_FILES.map((f) => `--- ${f} ---\n${existsSync(store.path('harness', incumbent, f)) ? readFileSync(store.path('harness', incumbent, f), 'utf8') : ''}`).join('\n\n');
   const rejected = readArchive(store)
@@ -351,15 +459,18 @@ export async function evolve(store: Store, runner: Runner, log: (msg: string) =>
   }
 
   log(`Evaluating ${incumbent} vs ${candidate} on ${cases.length} eval case(s)`);
-  const inc = await evaluate(store, runner, incumbent, cases, onRun);
-  if (inc.inconclusive) return inconclusive(candidate, incumbent, inc.inconclusive);
-  updateArchive(store, incumbent, { evalScore: inc.score, evalDetail: inc.detail });
-  const cand = await evaluate(store, runner, candidate, cases, onRun);
-  // Leave the candidate's archive entry as it was: a half-run evaluation must not mark it rejected.
-  if (cand.inconclusive) return inconclusive(candidate, incumbent, cand.inconclusive);
-  updateArchive(store, candidate, { evalScore: cand.score, evalDetail: cand.detail });
+  const pair = await evaluatePair(store, runner, incumbent, candidate, cases, onRun);
+  const inc = pair.incumbent;
+  const cand = pair.candidate;
+  const infra = { incumbent: inc.infraFailureRate, candidate: cand.infraFailureRate };
+  const rates = `infra failure rate: incumbent ${inc.infraFailureRate}, candidate ${cand.infraFailureRate}`;
+  // Leave the archive as it was: a half-run evaluation must not mark anything rejected.
+  if (inc.inconclusive) return inconclusive(candidate, incumbent, inc.inconclusive, rates);
+  updateArchive(store, incumbent, { evalScore: inc.score, evalDetail: inc.detail, evalInfraRate: inc.infraFailureRate });
+  updateArchive(store, candidate, { evalScore: cand.score, evalDetail: cand.detail, evalInfraRate: cand.infraFailureRate });
 
   const regressions = cases.filter((c) => inc.passed[c.id] && !cand.passed[c.id]).map((c) => c.id);
+  const monitor = { incumbent: inc.monitorFireRate ?? 0, candidate: cand.monitorFireRate ?? 0 };
   const decision = promotionDecision({
     incumbentScores: cases.map((c) => inc.detail[c.id] ?? 0),
     candidateScores: cases.map((c) => cand.detail[c.id] ?? 0),
@@ -367,6 +478,7 @@ export async function evolve(store: Store, runner: Runner, log: (msg: string) =>
     minGain: cfg.evolve.minGain,
     minCases: cfg.evolve.minCases,
     incumbent,
+    monitorFireRate: monitor,
   });
   const better = decision.promote;
   const reason = decision.reason;
@@ -374,15 +486,15 @@ export async function evolve(store: Store, runner: Runner, log: (msg: string) =>
   if (better && cfg.evolve.autoPromote) {
     promote(store, candidate);
     log(`Promoted ${candidate}: ${reason}`);
-    return { candidate, incumbent, candidateScore: cand.score, incumbentScore: inc.score, promoted: true, reason };
+    return { candidate, incumbent, candidateScore: cand.score, incumbentScore: inc.score, promoted: true, reason, infraFailureRate: infra, monitorFireRate: monitor };
   }
   updateArchive(store, candidate, { status: better ? 'candidate' : 'rejected' });
   log(`${better ? 'Kept (autoPromote off)' : 'Rejected'} ${candidate}: ${reason}`);
-  return { candidate, incumbent, candidateScore: cand.score, incumbentScore: inc.score, promoted: false, reason };
+  return { candidate, incumbent, candidateScore: cand.score, incumbentScore: inc.score, promoted: false, reason, infraFailureRate: infra, monitorFireRate: monitor };
 }
 
-function inconclusive(candidate: string, incumbent: string, error: string): EvolveOutcome {
-  return { candidate, incumbent, candidateScore: null, incumbentScore: null, promoted: false, reason: `inconclusive, infrastructure failure (${error}); candidate kept for later evaluation` };
+function inconclusive(candidate: string, incumbent: string, error: string, rates?: string): EvolveOutcome {
+  return { candidate, incumbent, candidateScore: null, incumbentScore: null, promoted: false, reason: `inconclusive, infrastructure failure (${error})${rates ? `; ${rates}` : ''}; candidate kept for later evaluation` };
 }
 
 // Should a completed run trigger evolution? Every N goal runs since the last harness change.

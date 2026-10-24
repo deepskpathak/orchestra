@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -392,6 +392,16 @@ test('contrastive: A wins, B worktree and branch removed', async () => {
   assert.doesNotMatch(files, /T2-b\.txt/);
 });
 
+test('contrastive: a worker flagging for a human removes the B worktree and branch', async () => {
+  const store = tempRepo({ concurrency: 1, contrastive });
+  const run = await runGoal({ store, runner: fakeRunner({ failFirstAttemptOf: ['T2'], flagOnRepair: ['T2'] }), goal: 'g' });
+  const t2 = run.tasks.find((t) => t.id === 'T2')!;
+  assert.equal(t2.status, 'needs_human');
+  assert.ok(!existsSync(store.path('worktrees', run.id, 'T2-b')));
+  const branches = execFileSync('git', ['branch', '--list', `orchestra/${run.id}/*`], { cwd: store.root, encoding: 'utf8' });
+  assert.doesNotMatch(branches, /T2-b/);
+});
+
 test('contrastive: a preferred attempt below passThreshold is not merged on preference alone', async () => {
   const store = tempRepo({ concurrency: 1, contrastive });
   const run = await runGoal({ store, runner: fakeRunner({ contrastPick: 'B', contrastScores: { a: 0.3, b: 0.5 }, failFirstAttemptOf: ['T1'] }), goal: 'g' });
@@ -427,4 +437,87 @@ test('contrastive: librarian prompt carries the judge reasons with run and task 
     },
   });
   assert.match(libPrompt, new RegExp(`contrast \\(run ${run.id}, task T2, attempt 2\\): picked B over A because Attempt B handled`));
+});
+
+test('flag_for_human stops after one attempt: needs_human, reason stored, event emitted, not a failure', async () => {
+  const store = tempRepo();
+  const run = await runGoal({ store, runner: fakeRunner({ flagForHuman: ['T1'], failFirstAttemptOf: [] }), goal: 'g' });
+  const by = Object.fromEntries(run.tasks.map((t) => [t.id, t]));
+  assert.equal(by.T1.status, 'needs_human');
+  assert.equal(by.T1.attempts, 1);
+  assert.match(by.T1.humanReason ?? '', /contradict/);
+  assert.equal(by.T3.status, 'blocked');
+  assert.equal(by.T2.status, 'merged');
+  const evs = store.events(run.id);
+  assert.equal(evs.filter((e) => e.kind === 'task.needs_human' && e.task === 'T1').length, 1);
+  assert.equal(evs.filter((e) => e.kind === 'task.repair' && e.task === 'T1').length, 0);
+  assert.equal(evs.filter((e) => e.kind === 'task.failed' && e.task === 'T1' && !/blocked/.test(e.msg)).length, 0);
+  assert.equal(run.status, 'failed');
+  assert.match(run.error ?? '', /1 need a human/);
+  assert.match(run.error ?? '', /\(0 failed, 2 blocked, 1 need a human\)/, 'a task blocked behind a flagged one is not counted as failed');
+});
+
+test('parseWorkerOutcome reads structured and text flags', async () => {
+  const { parseWorkerOutcome } = await import('../src/agent.ts');
+  const base = { ok: true, costUsd: 0, turns: 1, durationMs: 0 };
+  assert.deepEqual(parseWorkerOutcome({ ...base, text: 'did it' }), { outcome: 'done' });
+  assert.deepEqual(parseWorkerOutcome({ ...base, text: 'x\nFLAG_FOR_HUMAN: spec vs test' }), { outcome: 'flag_for_human', reason: 'spec vs test' });
+  assert.deepEqual(parseWorkerOutcome({ ...base, text: '', structured: { outcome: 'flag_for_human' } }), { outcome: 'flag_for_human', reason: 'no reason given' });
+});
+
+function addSampleTest(store: ReturnType<typeof tempRepo>): void {
+  mkdirSync(join(store.root, 'test'), { recursive: true });
+  writeFileSync(join(store.root, 'test', 'sample.test.js'), "import assert from 'node:assert';\nassert.equal(1, 1);\nassert.ok(true);\n");
+  execFileSync('git', ['add', '-A'], { cwd: store.root });
+  execFileSync('git', ['commit', '-qm', 'add sample test'], { cwd: store.root });
+}
+
+test('integrity monitor: a deleted assertion is flagged, graded on restored tests, noted for repair, persisted', async () => {
+  const store = tempRepo({ testCommand: 'grep -q "assert.ok" test/sample.test.js' });
+  addSampleTest(store);
+  const runner = fakeRunner({ failFirstAttemptOf: [], tamper: (req) => req.meta?.task === 'T1' && req.meta?.attempt === 1 });
+  const run = await runGoal({ store, runner, goal: 'g' });
+  const t1 = run.tasks.find((t) => t.id === 'T1')!;
+  assert.equal(t1.attempts, 2, 'tampered attempt 1 goes to repair, attempt 2 is clean');
+  assert.equal(t1.status, 'merged');
+
+  const repair = store.events(run.id).find((e) => e.kind === 'task.repair' && e.task === 'T1')!;
+  const issues = (repair.data as { issues: string[] }).issues;
+  assert.match(issues[0], /weakened-test in test\/sample\.test\.js/);
+  assert.match(issues[0], /assertion line\(s\) removed/);
+  // The tampered tree would fail this grep; the restored originals pass, and that is what graded.
+  assert.ok(store.events(run.id).some((e) => e.task === 'T1' && /tests with original grading files restored passed/.test(e.msg)));
+
+  const stored = store.loadRun(run.id)!.tasks.find((t) => t.id === 'T1')!;
+  assert.ok(stored.integrityFlags?.some((f) => f.kind === 'weakened-test' && f.file === 'test/sample.test.js'));
+  assert.equal(run.tasks.find((t) => t.id === 'T2')!.integrityFlags, undefined, 'clean tasks carry no flags');
+  // The tampered edit never reached the integration branch.
+  const sample = execFileSync('git', ['show', `${run.integrationBranch}:test/sample.test.js`], { cwd: store.root, encoding: 'utf8' });
+  assert.match(sample, /assert\.ok/);
+});
+
+test('integrity monitor: monitor wording never reaches the librarian prompt', async () => {
+  const store = tempRepo({ testCommand: 'grep -q "assert.ok" test/sample.test.js' });
+  addSampleTest(store);
+  const base = fakeRunner({ failFirstAttemptOf: [], tamper: (req) => req.meta?.task === 'T1' && req.meta?.attempt === 1 });
+  const librarian: string[] = [];
+  const runner: Runner = async (req) => {
+    if (req.role === 'librarian') librarian.push(req.prompt);
+    return base(req);
+  };
+  const run = await runGoal({ store, runner, goal: 'g' });
+  assert.ok(run.tasks.find((t) => t.id === 'T1')!.notes.some((n) => n.includes('[integrity-monitor]')), 'monitor note exists for repair');
+  assert.equal(librarian.length, 1);
+  assert.ok(!librarian[0]!.includes('integrity-monitor'));
+  assert.ok(!/grading files that must not be edited/.test(librarian[0]!));
+});
+
+test('integrity monitor: restored originals that still fail the tests are reported in the repair note', async () => {
+  const store = tempRepo({ testCommand: 'grep -q "never-there" test/sample.test.js' });
+  addSampleTest(store);
+  const runner = fakeRunner({ failFirstAttemptOf: [], tamper: (req) => req.meta?.task === 'T1' && req.meta?.attempt === 1 });
+  const run = await runGoal({ store, runner, goal: 'g' });
+  const repair = store.events(run.id).find((e) => e.kind === 'task.repair' && e.task === 'T1')!;
+  assert.ok(store.events(run.id).some((e) => e.task === 'T1' && /restored FAILED/.test(e.msg)));
+  assert.match((repair.data as { issues: string[] }).issues[0], /Tests on the original files failed/);
 });
