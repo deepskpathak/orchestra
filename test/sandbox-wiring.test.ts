@@ -118,6 +118,7 @@ test('conductor sandboxes workers only and scrubs env; off leaves requests untou
         goal: 'Add a thing',
         runner: (req) => (seen.push(req), inner(req)),
         sandbox: on ? { backend: 'claude', allowedHosts: ['registry.npmjs.org'] } : undefined,
+        preflightExec: (c) => ({ status: 0, stdout: c === 'node' ? 'ORCHESTRA_PROBE_OPEN' : 'ORCHESTRA_PROBE_BLOCKED', stderr: '' }),
       });
       assert.ok(seen.some((r) => r.role === 'worker'));
       for (const r of seen) {
