@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- Research note on repo context for agents (`docs/research/repo-context-atlas.md`): reviews code knowledge graphs, agentic RAG and existing tools, and proposes the opt-in Repo Atlas workstream W9 (#56).
+
 ## [0.6.1] - 2026-10-22
 
 ### Added
