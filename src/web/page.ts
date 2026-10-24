@@ -476,7 +476,7 @@ pre { margin: 0; padding: 10px 12px; max-height: 420px; overflow: auto; font: 12
       '<div class="stat"><span>Agents</span><b class="num">' + run.active.length + '</b></div>' +
       '<div class="stat"><span>Merged</span><b class="num">' + merged + ' / ' + total + '</b></div>' +
       (run.satisfaction != null ? '<div class="stat"><span>Satisfaction</span><b class="num">' + run.satisfaction.toFixed(2) + '</b></div>' : '') +
-      outcomeStats(state.info.outcomes);
+      outcomeStats((state.info || {}).outcomes);
 
     var pct = total ? merged / total : 0;
     $('ring-fg').setAttribute('stroke-dasharray', RING.toFixed(2));
@@ -998,6 +998,10 @@ pre { margin: 0; padding: 10px 12px; max-height: 420px; overflow: auto; font: 12
       // New runs appear while the page is open; refresh the picker and follow a newer current run.
       setInterval(function () {
         get('/api/info').then(function (i) {
+          // Keep info fresh so outcome stats (and limits) follow the repo, and repaint the hero when they change.
+          var outcomesChanged = JSON.stringify(i.outcomes) !== JSON.stringify((state.info || {}).outcomes);
+          state.info = i;
+          if (outcomesChanged && state.run) renderHero();
           var sel = $('runs');
           if (i.current && i.current !== sel.value && !sel.querySelector('option[value="' + i.current + '"]')) {
             loadRuns(i.current).then(function () { connect(i.current); });
