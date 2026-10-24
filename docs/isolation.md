@@ -27,6 +27,10 @@ reach it by itself. Orchestra does not guess a route. Either accept that (a work
 will fail), or provide the route yourself in the image, for example a local proxy reachable over a mounted unix
 socket. Package registries are blocked too, so install dependencies into the image beforehand.
 
+## Pre-flight self-test
+
+With `--sandbox` or `--unattended`, the conductor checks the sandbox once per run, before the first agent call. Inside the same wrapper workers get, it tries to reach a host that is not on the allow-list (`node -e fetch`, short timeout) and to read a canary file placed in a deny-read directory. Both must fail. If either succeeds, the wrapper cannot start, or the output is inconclusive, the run aborts with an error naming the probe and exits 1. The network probe is a deliberate outbound attempt that is expected to be blocked. With the sandbox off nothing runs. With `--sandbox docker` the canary directory is simply not mounted, and the network probe is blocked by `--network=none`.
+
 ## Boundary model
 
 The container (or the `srt`/`claude` OS sandbox) is the real control. The guard hook in `src/guard.ts` is a
