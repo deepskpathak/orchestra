@@ -496,6 +496,22 @@ test('integrity monitor: a deleted assertion is flagged, graded on restored test
   assert.match(sample, /assert\.ok/);
 });
 
+test('integrity monitor: monitor wording never reaches the librarian prompt', async () => {
+  const store = tempRepo({ testCommand: 'grep -q "assert.ok" test/sample.test.js' });
+  addSampleTest(store);
+  const base = fakeRunner({ failFirstAttemptOf: [], tamper: (req) => req.meta?.task === 'T1' && req.meta?.attempt === 1 });
+  const librarian: string[] = [];
+  const runner: Runner = async (req) => {
+    if (req.role === 'librarian') librarian.push(req.prompt);
+    return base(req);
+  };
+  const run = await runGoal({ store, runner, goal: 'g' });
+  assert.ok(run.tasks.find((t) => t.id === 'T1')!.notes.some((n) => n.includes('[integrity-monitor]')), 'monitor note exists for repair');
+  assert.equal(librarian.length, 1);
+  assert.ok(!librarian[0]!.includes('integrity-monitor'));
+  assert.ok(!/grading files that must not be edited/.test(librarian[0]!));
+});
+
 test('integrity monitor: restored originals that still fail the tests are reported in the repair note', async () => {
   const store = tempRepo({ testCommand: 'grep -q "never-there" test/sample.test.js' });
   addSampleTest(store);

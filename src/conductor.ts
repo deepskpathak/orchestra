@@ -863,8 +863,9 @@ export class Conductor {
         [
           `${t.id} ${t.title}: ${t.status}, attempts ${t.attempts}, cost $${t.costUsd.toFixed(2)}`,
           t.humanReason ? `  flagged for human: ${t.humanReason}` : '',
-          t.verdict ? `  final verdict ${t.verdict.score}: ${t.verdict.summary}` : '',
-          ...t.notes.map((n) => `  repair note: ${n.split('\n')[0]}`),
+          t.verdict && !t.verdict.summary.includes(MONITOR_MARK) ? `  final verdict ${t.verdict.score}: ${t.verdict.summary}` : '',
+          // Monitor wording must not reach the librarian: lessons feed the evolver, which could learn to evade it.
+          ...t.notes.filter((n) => !n.includes(MONITOR_MARK)).map((n) => `  repair note: ${n.split('\n')[0]}`),
           t.contrast ? `  contrast (run ${run.id}, task ${t.id}, attempt ${t.contrast.attempt}): ${t.contrast.picked ? `picked ${t.contrast.picked} over ${t.contrast.picked === 'A' ? 'B' : 'A'}` : 'no pick'} because ${t.contrast.reasons}` : '',
         ]
           .filter(Boolean)
@@ -874,6 +875,7 @@ export class Conductor {
     const events = store
       .events(run.id)
       .filter((e) => e.kind === 'task.repair' || e.kind === 'task.failed' || e.kind === 'task.needs_human')
+      .filter((e) => !e.msg.includes(MONITOR_MARK))
       .map((e) => `- ${e.msg}`)
       .join('\n');
     const existing = { domain: run.domain ?? GLOBAL, lessons: readLearnings(store, run.domain), global: run.domain ? readLearnings(store) : [] };
