@@ -1,5 +1,7 @@
 // Shared domain types. Everything Orchestra persists is one of these shapes, as JSON.
 
+import type { IntegrityFlag } from './integrity.ts';
+
 export type Role = 'planner' | 'worker' | 'judge' | 'librarian' | 'evolver';
 
 export type TaskStatus =
@@ -53,6 +55,7 @@ export interface Task {
   worktree?: string;
   verdict?: Verdict;
   notes: string[]; // repair notes fed to the next attempt
+  integrityFlags?: IntegrityFlag[]; // grading-surface / reward-hack flags raised on this task's diffs (all attempts)
   humanReason?: string; // why the worker flagged the task for a human (status needs_human)
   contrast?: ContrastRecord; // set when a contrastive repair pair ran
   costUsd: number;

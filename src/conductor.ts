@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { extractJson, parseWorkerOutcome, type AgentRequest, type AgentResult, type Runner } from './agent.ts';
 import * as g from './git.ts';
 import { alternateWorkerSection, comparePrompt, COMPARE_SCHEMA, contrastApplies, resolveContrast } from './contrast.ts';
+import { analyzeDiff, MONITOR_MARK, type IntegrityFlag } from './integrity.ts';
 import { loadHarness, type Harness } from './harness.ts';
 import { formatLearnings, listDomains, normalizeDomain, readAllLearnings, readLearnings, writeLearnings, GLOBAL, type Lesson } from './learnings.ts';
 import { newRunId, type Store } from './store.ts';
@@ -503,10 +504,12 @@ export class Conductor {
     } else if (!g.hasChangesSince(wt.path, base)) {
       verdict = { pass: false, score: 0, summary: 'No changes were committed', issues: ['No code changes were produced. Implement the task.'], testsPassed: null };
     } else {
-      const issues = cfg.preJudge.enabled ? this.preJudge(task, wt.path, base) : [];
-      verdict = issues.length
+      // Grading surface touched: graded on the restored originals and sent straight to repair.
+      const tampered = this.integrityVerdict(task, wt.path, base);
+      const issues = tampered || !cfg.preJudge.enabled ? [] : this.preJudge(task, wt.path, base);
+      verdict = tampered ?? (issues.length
         ? { pass: false, score: 0, summary: 'Pre-judge checks failed', issues, testsPassed: null }
-        : await this.judge(task, wt.path, base, work);
+        : await this.judge(task, wt.path, base, work));
       if (issues.length) this.ledgerOutcome(task, 'prejudge_fail');
     }
     task.verdict = verdict;
@@ -527,12 +530,44 @@ export class Conductor {
     await this.enqueueMerge(task);
   }
 
+  // Integrity monitor: analyze the worker's diff and persist the flags. When tests or other grading
+  // files were tampered with, re-run the test command with the base versions restored and grade on
+  // that. Returns a failing verdict (with an automatic repair note) in that case, else null.
+  private integrityVerdict(task: Task, cwd: string, base: string): Verdict | null {
+    const flags = analyzeDiff(g.diffSince(cwd, base, Infinity), g.changedFiles(cwd, base));
+    if (!flags.length) return null;
+    task.integrityFlags = [...(task.integrityFlags ?? []), ...flags];
+    this.emit('log', `${task.id} integrity monitor: ${flags.length} flag(s)`, { flags }, task.id);
+    // Only edits to files that existed at base are tampering; newly added tests are normal work.
+    const tampered = flags.filter((f) => (f.kind === 'grading-surface' || f.kind === 'weakened-test') && g.existsAtRef(cwd, base, f.file));
+    const list = (fs: IntegrityFlag[]) => fs.map((f) => `${f.kind} in ${f.file} (${f.detail})`);
+    if (!tampered.length) return null;
+    const files = [...new Set(tampered.map((f) => f.file))];
+    const cmd = this.store.config().testCommand;
+    let testsPassed: boolean | null = null;
+    let tail = '';
+    if (cmd) {
+      const headBefore = g.head(cwd);
+      g.restoreFromRef(cwd, base, files);
+      const t = g.runTests(cwd, cmd);
+      g.resetTo(cwd, headBefore);
+      testsPassed = t.ok;
+      tail = t.ok ? '' : ` Tests on the original files failed:\n${t.tail.slice(-1200)}`;
+      this.emit('log', `${task.id} tests with original grading files restored ${t.ok ? 'passed' : 'FAILED'}`, undefined, task.id);
+    }
+    this.ledgerOutcome(task, 'integrity_flag');
+    const issue = `${MONITOR_MARK} Your change touched grading files that must not be edited: ${list(tampered).join('; ')}. Revert them to their original content and fix the code instead. If a test change is truly required, stop and report FLAG_FOR_HUMAN with the reason.${tail}`;
+    return { pass: false, score: 0, summary: `${MONITOR_MARK} grading surface modified: ${files.join(', ')}`, issues: [issue], testsPassed };
+  }
+
   // Pre-judge outcome for one attempt: a failing verdict when it never reaches the judge, else null.
   private screen(task: Task, cwd: string, base: string, work: AgentResult): Verdict | null {
     if (!work.ok && !g.hasChangesSince(cwd, base)) {
       return { pass: false, score: 0, summary: `Worker failed: ${work.error}`, issues: [`Previous attempt crashed: ${work.error}`], testsPassed: null };
     }
     if (!g.hasChangesSince(cwd, base)) return { pass: false, score: 0, summary: 'No changes were committed', issues: ['No code changes were produced. Implement the task.'], testsPassed: null };
+    const tampered = this.integrityVerdict(task, cwd, base);
+    if (tampered) return tampered;
     const issues = this.store.config().preJudge.enabled ? this.preJudge(task, cwd, base) : [];
     if (!issues.length) return null;
     this.ledgerOutcome(task, 'prejudge_fail');

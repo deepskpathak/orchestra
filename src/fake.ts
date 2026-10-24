@@ -2,13 +2,13 @@
 // learning, evolution) without spending tokens. Used by tests and `orchestra demo`.
 
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AgentRequest, AgentResult, Runner } from './agent.ts';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-export function fakeRunner(opts: { stepMs?: number; failFirstAttemptOf?: string[]; failAlways?: string[]; flagForHuman?: string[]; judgeFailTimes?: number; contrastPick?: 'A' | 'B'; contrastScores?: { a: number; b: number } } = {}): Runner {
+export function fakeRunner(opts: { stepMs?: number; failFirstAttemptOf?: string[]; failAlways?: string[]; flagForHuman?: string[]; tamper?: (req: AgentRequest) => boolean; judgeFailTimes?: number; contrastPick?: 'A' | 'B'; contrastScores?: { a: number; b: number } } = {}): Runner {
   const step = opts.stepMs ?? 0;
   const failFirst = new Set(opts.failFirstAttemptOf ?? ['T2']);
   const flagHuman = new Set(opts.flagForHuman ?? []);
@@ -63,6 +63,17 @@ export function fakeRunner(opts: { stepMs?: number; failFirstAttemptOf?: string[
         writeFileSync(join(dir, `${task}.txt`), `task ${task} attempt ${attempt}${careful ? ' edge-cases-covered' : ''}\n`);
         // Contrastive worker B leaves a distinguishable artifact.
         if (req.meta?.variant === 'b') writeFileSync(join(dir, `${task}-b.txt`), `task ${task} alternate approach B\n`);
+        // Simulated reward hacking: drop the assertions from an existing test file.
+        const sample = join(req.cwd, 'test', 'sample.test.js');
+        if (opts.tamper && existsSync(sample)) {
+          if (opts.tamper(req)) {
+            writeFileSync(sample, readFileSync(sample, 'utf8').split('\n').filter((l) => !/assert/.test(l)).join('\n'));
+          } else {
+            // A repair attempt reverts the tampering: restore the oldest committed version of the file.
+            const commits = execFileSync('git', ['log', '--format=%H', '--', 'test/sample.test.js'], { cwd: req.cwd, encoding: 'utf8' }).trim().split('\n');
+            writeFileSync(sample, execFileSync('git', ['show', `${commits[commits.length - 1]}:test/sample.test.js`], { cwd: req.cwd, encoding: 'utf8' }));
+          }
+        }
         execFileSync('git', ['add', '-A'], { cwd: req.cwd });
         execFileSync('git', ['commit', '-qm', `${task}: attempt ${attempt}`], { cwd: req.cwd });
         if (flagHuman.has(task)) {
