@@ -486,17 +486,17 @@ Status: W1.1 to W1.5 done (M1).
 
 ## 6 Sequencing
 
-**Table 2. Milestones.** Each milestone depends on the ones before it.
+**Table 2. Milestones.** Each milestone depends on the ones before it. All milestones are implemented and merged to main as of 2026-10-25; every new capability is opt-in and default off. The hypotheses in section 7 (H1 to H8) are still to be measured with real runs.
 
 | Milestone | Contents | Why this order |
 |---|---|---|
-| M1 Integrity (done) | W0, W1.1 to W1.5 | Cheap. Closes the self-graded eval gap before any more evolution runs. |
-| M2 Measurement | W2.1 to W2.6, plus W9.0 (exploration and footprint metrics, inside W2.6) | Every later claim needs the bench, paired statistics and calibration. |
-| M3 Evolution | W3.1 to W3.7 | Needs the M2 bench cases and statistics for its splits, stopping rules and holdout. |
-| M4 Verification | W4.1 to W4.5 | Needs the M2 calibration to show each new check adds agreement with ground truth. |
-| M5 Isolation | W5.1 to W5.5 | Independent of the others; can run in parallel with M2 to M4. Required before any unattended use. |
-| W9a Repo context, core | W9.1 (atlas core, L0 map), W9.2 (planner footprints, L1 packs) | Opt-in. Runs in parallel with M5 and lands before M3 closes, because it changes the planner and worker prompt prefix that the evolver tunes. First real use of the M2 bench (hypotheses H6 to H8). If H6 fails, W9.3 and later are dropped. See `repo-context-atlas.md`. |
-| M6 Throughput and oversight | W6, W7, then W8; W9.3 (L2 query), W9.4 (L3 lesson graph, after W3.7), W9.5 (external inputs) | Optimise only what M2 shows is slow or costly. W6.1 reuses the footprint field from W9.2. W8 when W4.1 needs a second family. |
+| M1 Integrity (done, PR #64) | W0, W1.1 to W1.5 | Cheap. Closes the self-graded eval gap before any more evolution runs. |
+| M2 Measurement (done, PR #66) | W2.1 to W2.6, plus W9.0 (exploration and footprint metrics, inside W2.6) | Every later claim needs the bench, paired statistics and calibration. |
+| M3 Evolution (done, PR #69) | W3.1 to W3.7 | Needs the M2 bench cases and statistics for its splits, stopping rules and holdout. |
+| M4 Verification (done, PR #70) | W4.1 to W4.5 | Needs the M2 calibration to show each new check adds agreement with ground truth. |
+| M5 Isolation (done, PR #67) | W5.1 to W5.5 | Independent of the others; can run in parallel with M2 to M4. Required before any unattended use. |
+| W9a Repo context, core (done, PR #68) | W9.1 (atlas core, L0 map), W9.2 (planner footprints, L1 packs) | Opt-in. Runs in parallel with M5 and lands before M3 closes, because it changes the planner and worker prompt prefix that the evolver tunes. First real use of the M2 bench (hypotheses H6 to H8). If H6 fails, W9.3 and later are dropped. See `repo-context-atlas.md`. |
+| M6 Throughput and oversight (done, PR #71) | W6, W7, then W8; W9.3 (L2 query), W9.4 (L3 lesson graph, after W3.7), W9.5 (external inputs) | Optimise only what M2 shows is slow or costly. W6.1 reuses the footprint field from W9.2. W8 when W4.1 needs a second family. |
 
 ## 7 How the plan will be judged
 
