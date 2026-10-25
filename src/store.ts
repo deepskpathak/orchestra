@@ -1,8 +1,9 @@
 // Filesystem state under <repo>/.orchestra. All writes are atomic (write tmp, rename)
 // so the dashboard and statusline can read concurrently without seeing torn JSON.
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { basename, dirname, join, resolve } from 'node:path';
 import { DEFAULT_RISK_TIERS } from './oversight.ts';
 import type { LedgerRow, OrchestraEvent, ProjectConfig, Run } from './types.ts';
 
@@ -159,6 +160,20 @@ export function findRepoRoot(start: string): string | null {
     const up = dirname(dir);
     if (up === dir) return null;
     dir = up;
+  }
+}
+
+// Like findRepoRoot, but from inside a linked worktree (a task worktree under .orchestra/worktrees) it
+// returns the main checkout, where .orchestra/ lives. Falls back to the plain root when git cannot say.
+export function findMainCheckout(start: string): string | null {
+  const root = findRepoRoot(start);
+  if (!root) return null;
+  try {
+    if (!statSync(join(root, '.git')).isFile()) return root;
+    const common = resolve(root, execFileSync('git', ['rev-parse', '--git-common-dir'], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim());
+    return basename(common) === '.git' ? dirname(common) : root;
+  } catch {
+    return root;
   }
 }
 

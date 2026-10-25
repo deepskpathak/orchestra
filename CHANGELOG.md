@@ -33,6 +33,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- `orchestra atlas find|neighbors|impact|tests` now works from a task worktree, which is where the prompt hint tells agents to run it. The command resolves the main checkout (via `git rev-parse --git-common-dir`) for `.orchestra/` config and the atlas cache, and queries the worktree's own HEAD and modified files. Previously it died with "disabled" or "no atlas" because `.orchestra/` does not exist in a worktree.
 - Batch merge: new task worktrees (attempts, contrastive B, best-of-n samples, the mutation scratch tree) now branch from the last integration commit whose tests passed instead of the integration HEAD, so a task that starts while a batch is under test can no longer inherit a transient or rejected merge. The integration worktree is also reset to that commit if a batch throws.
 - Agentic judge: with `verification.agenticJudge.enabled` the planner request now asks for the optional scenario `check` command (previously nothing in the prompt mentioned it, so the executed-checks section was almost always empty). The ask is part of the request body, so it applies to existing harness copies too; with the agentic judge off the planner prompt is byte-identical. The shipped `harness/v1/planner.md` is unchanged.
 - Oracles: the differential probes now run against the commit the task started from (its base), not the run base commit, so changes landed by earlier tasks it depends on are no longer reported as `differential mismatch`.

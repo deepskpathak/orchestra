@@ -25,7 +25,7 @@ import { GLOBAL, lessonAblation, listDomains, readAllLearnings, readLearnings } 
 import { validNetwork } from './container.ts';
 import { detectSandbox, type SandboxBackend } from './sandbox.ts';
 import { PACKAGE_ROOT, currentVersion, packageVersion, listVersions, promote, readArchive, seedHarness } from './harness.ts';
-import { DEFAULT_PROJECT_CONFIG, Store, findRepoRoot } from './store.ts';
+import { DEFAULT_PROJECT_CONFIG, Store, findMainCheckout, findRepoRoot } from './store.ts';
 import { serve } from './web/server.ts';
 import { startTui } from './tui/app.ts';
 import { compactLine, renderDashboard, renderStats, renderStatusLine } from './tui/render.ts';
@@ -475,19 +475,21 @@ export function gitStatusPaths(root: string): string[] {
   }
 }
 
-function cmdAtlasQuery(root: string, sub: QueryCommand, arg: string | undefined, statusPaths: (root: string) => string[] = gitStatusPaths): void {
+// `root` is the main checkout (config and atlas cache); `cwd` is where the command ran, which inside a task
+// worktree is the commit to query and the tree whose modified files are marked stale.
+function cmdAtlasQuery(root: string, sub: QueryCommand, arg: string | undefined, statusPaths: (root: string) => string[] = gitStatusPaths, cwd: string = root): void {
   if (!arg) die(`Usage: orchestra atlas ${sub} <symbol-or-path>`);
   if (!new Store(root).config().context.atlas.enabled) die('The Repo Atlas is disabled. Set context.atlas.enabled to true in .orchestra/config.json, then run `orchestra atlas build`.');
   const dir = join(root, '.orchestra', 'atlas');
   if (!existsSync(dir) || !readdirSync(dir).some((f) => f.endsWith('.json'))) die('No atlas has been built. Run `orchestra atlas build` first.');
   let sha: string;
   try {
-    sha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    sha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
   } catch {
     die('No commits yet. Commit something first; the atlas is keyed by commit.');
   }
   const atlas = loadOrBuildAtlas(root, sha);
-  const r = runQuery(atlas, sub, arg, { stale: statusPaths(root) });
+  const r = runQuery(atlas, sub, arg, { stale: statusPaths(cwd) });
   console.log(r.text);
   if (!r.found) process.exitCode = 1;
 }
@@ -495,9 +497,10 @@ function cmdAtlasQuery(root: string, sub: QueryCommand, arg: string | undefined,
 function cmdAtlas(args: string[]): void {
   const sub = args[0];
   if ((QUERY_COMMANDS as readonly string[]).includes(sub ?? '')) {
-    const root = findRepoRoot(process.cwd());
+    // Agents run this inside their task worktree, where .orchestra/ does not exist: use the main checkout's.
+    const root = findMainCheckout(process.cwd());
     if (!root) die('Not inside a git repository.');
-    cmdAtlasQuery(root, sub as QueryCommand, args.slice(1).join(' ').trim() || undefined);
+    cmdAtlasQuery(root, sub as QueryCommand, args.slice(1).join(' ').trim() || undefined, gitStatusPaths, findRepoRoot(process.cwd()) ?? root);
     return;
   }
   if (sub !== 'build' && sub !== 'stats') die(sub ? `unknown atlas subcommand "${sub}". ${ATLAS_USAGE}` : ATLAS_USAGE);

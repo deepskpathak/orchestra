@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
 import { buildAtlas } from '../src/atlas.ts';
@@ -129,4 +129,29 @@ test('CLI: atlas find prints a tree when enabled and built, non-zero with a hint
   writeFileSync(join(repo, 'src', 'widget.ts'), 'export function makeWidget() { return 2; }\n');
   assert.ok(run('atlas', 'find', 'makeWidget').stdout.includes(STALE_MARK));
   assert.notEqual(run('atlas', 'find', 'zzzNothing').status, 0);
+});
+
+test('CLI: atlas find works from a linked task worktree, using the main checkout config and cache', () => {
+  const repo = tempRepo().root;
+  mkdirSync(join(repo, 'src'), { recursive: true });
+  writeFileSync(join(repo, 'src', 'widget.ts'), 'export function makeWidget() { return 1; }\n');
+  appendFileSync(join(repo, '.git', 'info', 'exclude'), '.orchestra/\n'); // as the conductor does
+  execFileSync('git', ['add', '-A'], { cwd: repo });
+  execFileSync('git', ['commit', '-qm', 'widget'], { cwd: repo });
+  mkdirSync(join(repo, '.orchestra'), { recursive: true });
+  writeFileSync(join(repo, '.orchestra', 'config.json'), JSON.stringify({ context: { atlas: { enabled: true } } }));
+  const cli = join(PACKAGE_ROOT, 'bin', 'orchestra.ts');
+  const inDir = (cwd: string, ...args: string[]) => spawnSync(process.execPath, [cli, ...args], { cwd, encoding: 'utf8', timeout: 30000 });
+  assert.equal(inDir(repo, 'atlas', 'build').status, 0);
+  // Where the conductor puts task worktrees: inside .orchestra of the main checkout, with a .git file and no .orchestra of its own.
+  const wt = join(repo, '.orchestra', 'worktrees', 'r1', 'T1');
+  execFileSync('git', ['worktree', 'add', '-q', '-b', 'orchestra/r1/T1', wt, 'HEAD'], { cwd: repo });
+  assert.equal(existsSync(join(wt, '.orchestra', 'config.json')), false);
+  const ok = inDir(wt, 'atlas', 'find', 'makeWidget');
+  assert.equal(ok.status, 0, ok.stderr);
+  assert.match(ok.stdout, /makeWidget \(function, line 1, exported\)/);
+  // Edits in the worktree, not in the main checkout, are what get marked stale.
+  writeFileSync(join(wt, 'src', 'widget.ts'), 'export function makeWidget() { return 2; }\n');
+  assert.ok(inDir(wt, 'atlas', 'find', 'makeWidget').stdout.includes(STALE_MARK));
+  assert.equal(inDir(repo, 'atlas', 'find', 'makeWidget').stdout.includes(STALE_MARK), false);
 });
