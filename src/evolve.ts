@@ -4,7 +4,7 @@
 // a measured gain with no regressions.
 
 import { agreementBlock, storeCalibration } from './calibration.ts';
-import { meanDefined, pairedDecision, passAt1, passHatK } from './stats.ts';
+import { meanDefined, pairedDecision, passAt1, passHatK, type PairedCase } from './stats.ts';
 import { spawnSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -14,6 +14,7 @@ import { git } from './git.ts';
 import { fireRateByVersion, MONITOR_MARK } from './integrity.ts';
 import {
   EVOLVABLE_FILES,
+  ROLES,
   createVariant,
   currentVersion,
   loadHarness,
@@ -21,7 +22,9 @@ import {
   readArchive,
   updateArchive,
 } from './harness.ts';
+import { needsHumanSignoff, splitEvals } from './evalsets.ts';
 import { summarizeLearnings } from './learnings.ts';
+import { BudgetTracker, costGate, roundsOf, sequentialDecision, utility } from './selection.ts';
 import { loadScorer, scoreReplay, type Scorer } from './scorer.ts';
 import type { Store } from './store.ts';
 import type { Run } from './types.ts';
@@ -396,6 +399,10 @@ export async function evolve(store: Store, runner: Runner, log: (msg: string) =>
     .map((a) => `- ${a.version} (score ${a.evalScore}): ${a.rationale}`);
 
   const k = Math.max(1, Math.floor(cfg.evolve.candidates ?? 1));
+  const allCases = listEvals(store);
+  const useSplits = !!cfg.evolve.splits?.enabled;
+  const sp = useSplits ? splitEvals(allCases, { feedback: cfg.evolve.splits!.feedback, validation: cfg.evolve.splits!.validation, holdout: cfg.evolve.splits!.holdout }) : null;
+  const budget = new BudgetTracker(cfg.evolve.budgetUsd);
   const prompt = [
     ...(k > 1 ? [`PROPOSE ${k} VARIANTS in one response. Each variant must target a different weakness; do not overlap edits.`] : []),
     `CURRENT HARNESS ${incumbent}:\n${files}`,
@@ -403,6 +410,8 @@ export async function evolve(store: Store, runner: Runner, log: (msg: string) =>
     `RECENT REPAIR NOTES AND FAILURES:\n${recentIssues.map((i) => `- ${i.split('\n')[0]}`).join('\n') || '(none)'}`,
     `PREVIOUSLY REJECTED VARIANTS (do not repeat):\n${rejected.join('\n') || '(none)'}`,
     `LEARNINGS SUMMARY (per domain):\n${JSON.stringify(summarizeLearnings(store))}`,
+    // With splits on the evolver sees feedback cases only; validation and holdout stay hidden.
+    ...(sp ? [`FEEDBACK CASES (the only eval cases you may study):\n${sp.feedback.map((c) => `- ${c.id}: ${c.goal}`).join('\n') || '(none)'}`] : []),
   ].join('\n\n');
 
   // One evolver call, always ledgered.
@@ -418,6 +427,7 @@ export async function evolve(store: Store, runner: Runner, log: (msg: string) =>
       tools: [],
       onAction: (a) => log(`evolver: ${a}`),
     });
+    budget.add(res.costUsd);
     store.ledger({ t: Date.now(), run: 'evolve', kind: 'eval', harness: incumbent, role: 'evolver', model: h.config.models.evolver, ok: res.ok, costUsd: res.costUsd, durationMs: res.durationMs, turns: res.turns });
     return { res, variants: res.ok ? parseVariants(extractJson(res)).filter((v) => v.files?.length) : [] };
   };
@@ -443,7 +453,7 @@ export async function evolve(store: Store, runner: Runner, log: (msg: string) =>
   let candidate = created[0].version;
 
   // A sample below minCases could never promote (a stale config.json can pin an old, smaller sample).
-  const cases = listEvals(store).slice(-Math.max(cfg.evolve.sample, cfg.evolve.minCases));
+  const cases = (sp ? sp.validation : allCases).slice(-Math.max(cfg.evolve.sample, cfg.evolve.minCases));
   if (!cases.length) {
     return { candidate, incumbent, candidateScore: null, incumbentScore: null, promoted: false, reason: 'No Factory Eval cases yet. Successful runs are harvested automatically; candidate kept for later evaluation.' };
   }
@@ -454,7 +464,75 @@ export async function evolve(store: Store, runner: Runner, log: (msg: string) =>
     return { candidate, incumbent, candidateScore: null, incumbentScore: null, promoted: false, reason };
   }
 
-  if (k > 1) {
+  const cascade = cfg.evolve.cascade?.enabled ? cfg.evolve.cascade : null;
+  let finalists = [candidate];
+  // Eval spend so far, to estimate the next replay for the budget cap.
+  let replays = 0;
+  let evalSpend = 0;
+  const spent = (r: EvalResult, n: number) => {
+    budget.add(r.cost);
+    evalSpend += r.cost;
+    replays += n;
+  };
+  const wouldCross = (n: number) => budget.wouldExceed(replays ? (evalSpend / replays) * n : 0);
+  const budgetStop = (where: string): EvolveOutcome => ({ candidate, incumbent, candidateScore: null, incumbentScore: null, promoted: false, reason: `budget cap $${budget.cap} reached (spent $${round(budget.spent)}) ${where}; candidate kept for later evaluation` });
+
+  if (cascade) {
+    // Step 1: smoke test. Guards and checklist intact, then one replay of the first case.
+    const smokeCase = cases[0];
+    const smoked: string[] = [];
+    const smokeFails: string[] = [];
+    for (const c of created) {
+      const broken = harnessIntegrity(store, incumbent, c.version);
+      if (broken) {
+        updateArchive(store, c.version, { status: 'rejected' });
+        smokeFails.push(`${c.version}: ${broken}`);
+        log(`Smoke test failed for ${c.version}: ${broken}`);
+        continue;
+      }
+      if (wouldCross(1)) return budgetStop('during the smoke test');
+      const r = await evaluate(store, runner, c.version, [smokeCase], onRun);
+      spent(r, 1);
+      if (r.inconclusive) return inconclusive(c.version, incumbent, r.inconclusive);
+      if (!r.passed[smokeCase.id]) {
+        updateArchive(store, c.version, { status: 'rejected' });
+        smokeFails.push(`${c.version}: failed smoke case ${smokeCase.id}`);
+        continue;
+      }
+      smoked.push(c.version);
+    }
+    if (!smoked.length) return { candidate, incumbent, candidateScore: null, incumbentScore: null, promoted: false, reason: `no candidate passed the smoke test (${smokeFails.join('; ')}); none evaluated further` };
+
+    // Step 2: minibatch. A candidate must beat its parent on the same cases.
+    const mb = cases.slice(-Math.min(Math.max(1, Math.floor(cascade.minibatch)), cases.length));
+    if (wouldCross(mb.length)) return budgetStop('before the minibatch');
+    const mInc = await evaluate(store, runner, incumbent, mb, onRun);
+    spent(mInc, mb.length);
+    if (mInc.inconclusive) return inconclusive(candidate, incumbent, mInc.inconclusive);
+    const cw = cfg.evolve.cost?.enabled ? cfg.evolve.cost : null;
+    const util = (r: EvalResult) => (cw ? utility({ score: r.score, costUsd: r.cost, durationMs: 0 }, cw) : r.score);
+    const cleared: { version: string; gain: number }[] = [];
+    for (const v of smoked) {
+      if (wouldCross(mb.length)) return budgetStop('during the minibatch');
+      const mc = await evaluate(store, runner, v, mb, onRun);
+      spent(mc, mb.length);
+      if (mc.inconclusive) return inconclusive(v, incumbent, mc.inconclusive);
+      const regressed = mb.some((e) => mInc.passed[e.id] && !mc.passed[e.id]);
+      const gain = util(mc) - util(mInc);
+      updateArchive(store, v, { screenScore: mc.score });
+      if (gain > 0 && !regressed) cleared.push({ version: v, gain });
+      else {
+        updateArchive(store, v, { status: 'rejected' });
+        log(`Minibatch: ${v} did not beat ${incumbent} (gain ${gain.toFixed(3)}${regressed ? ', regressed' : ''})`);
+      }
+    }
+    if (!cleared.length) {
+      return { candidate, incumbent, candidateScore: null, incumbentScore: null, promoted: false, reason: `no candidate cleared the minibatch of ${mb.length} case(s) against ${incumbent}; no full validation spent` };
+    }
+    // Step 3: full validation for the top finalists only.
+    finalists = cleared.sort((a, b) => b.gain - a.gain).slice(0, Math.max(1, Math.floor(cascade.finalists))).map((x) => x.version);
+    candidate = finalists[0];
+  } else if (k > 1) {
     // Screen cheaply: the newest min(2, sample) cases. Drop any candidate that fails a case the incumbent passes.
     const screen = cases.slice(-Math.max(1, Math.min(2, cfg.evolve.sample)));
     log(`Screening ${created.length} candidate(s) on ${screen.length} case(s)`);
@@ -504,44 +582,181 @@ export async function evolve(store: Store, runner: Runner, log: (msg: string) =>
     candidate = finalist.version;
   }
 
-  log(`Evaluating ${incumbent} vs ${candidate} on ${cases.length} eval case(s)`);
-  const pair = await evaluatePair(store, runner, incumbent, candidate, cases, onRun);
-  const inc = pair.incumbent;
-  const cand = pair.candidate;
-  const infra = { incumbent: inc.infraFailureRate, candidate: cand.infraFailureRate };
-  const rates = `infra failure rate: incumbent ${inc.infraFailureRate}, candidate ${cand.infraFailureRate}`;
-  // Leave the archive as it was: a half-run evaluation must not mark anything rejected.
-  if (inc.inconclusive) return inconclusive(candidate, incumbent, inc.inconclusive, rates);
-  updateArchive(store, incumbent, { evalScore: inc.score, evalDetail: inc.detail, evalInfraRate: inc.infraFailureRate });
-  updateArchive(store, candidate, { evalScore: cand.score, evalDetail: cand.detail, evalInfraRate: cand.infraFailureRate });
+  if (!cascade) finalists = [candidate];
 
-  const regressions = cases.filter((c) => inc.passed[c.id] && !cand.passed[c.id]).map((c) => c.id);
+  // Step 3 / classic evaluation. Without sequential testing or a budget cap this is a single evaluatePair over
+  // every case; otherwise it runs in rounds and may stop early (settled CI) or at the budget cap.
+  const seq = cfg.evolve.sequential?.enabled ? cfg.evolve.sequential : null;
+  const roundSize = seq ? Math.max(1, Math.floor(seq.roundSize)) : budget.unlimited ? cases.length : 1;
+  const validate = async (version: string) => {
+    const parts: { r: EvalResult; n: number }[] = [];
+    const evaluated: EvalCase[] = [];
+    let note = '';
+    let halted = false;
+    const rounds = roundsOf(cases, roundSize);
+    for (let ri = 0; ri < rounds.length; ri++) {
+      const rc = rounds[ri];
+      if (wouldCross(2 * rc.length)) {
+        halted = true;
+        break;
+      }
+      log(`Evaluating ${incumbent} vs ${version} on ${rc.length} eval case(s)${rounds.length > 1 ? ` (round ${ri + 1}/${rounds.length})` : ''}`);
+      const pr = await evaluatePair(store, runner, incumbent, version, rc, onRun);
+      spent(pr.incumbent, rc.length);
+      spent(pr.candidate, rc.length);
+      if (pr.incumbent.inconclusive) return { version, error: pr.incumbent.inconclusive, rates: `infra failure rate: incumbent ${pr.incumbent.infraFailureRate}, candidate ${pr.candidate.infraFailureRate}` };
+      parts.push({ r: pr.incumbent, n: rc.length }, { r: pr.candidate, n: rc.length });
+      evaluated.push(...rc);
+      if (seq && ri < rounds.length - 1) {
+        const sd = sequentialDecision(pairedCases(evaluated, parts), { roundSize, totalCases: cases.length, niMargin: cfg.evolve.niMargin ?? 0.05 });
+        if (sd.verdict !== 'continue') {
+          note = `sequential stop after ${evaluated.length} of ${cases.length} cases: ${sd.verdict}, ${sd.reason}`;
+          log(note);
+          break;
+        }
+      }
+    }
+    if (halted) return { version, halted: true as const, done: evaluated.length };
+    const incParts = parts.filter((_, x) => x % 2 === 0);
+    const candParts = parts.filter((_, x) => x % 2 === 1);
+    return { version, cases: evaluated, note, inc: combine(incParts), cand: combine(candParts) };
+  };
+
+  const judged: { version: string; cases: EvalCase[]; inc: EvalResult; cand: EvalResult; better: boolean; reason: string; gain: number; note: string }[] = [];
+  for (const v of finalists) {
+    const res = await validate(v);
+    if ('error' in res) return inconclusive(v, incumbent, res.error!, res.rates);
+    if ('halted' in res) return budgetStop(`after ${res.done} of ${cases.length} validation cases`);
+    const { inc, cand } = res;
+    // Leave the archive as it was on inconclusive: a half-run evaluation must not mark anything rejected.
+    updateArchive(store, incumbent, { evalScore: inc.score, evalDetail: inc.detail, evalInfraRate: inc.infraFailureRate });
+    updateArchive(store, v, { evalScore: cand.score, evalDetail: cand.detail, validationDetail: cand.detail, evalInfraRate: cand.infraFailureRate });
+    const regressions = res.cases.filter((c) => inc.passed[c.id] && !cand.passed[c.id]).map((c) => c.id);
+    const monitor = { incumbent: inc.monitorFireRate ?? 0, candidate: cand.monitorFireRate ?? 0 };
+    const decision = promotionDecision({
+      incumbentScores: res.cases.map((c) => inc.detail[c.id] ?? 0),
+      candidateScores: res.cases.map((c) => cand.detail[c.id] ?? 0),
+      regressions,
+      minGain: cfg.evolve.minGain,
+      // An early sequential stop judges fewer cases than the pool; the pool size was already checked above.
+      minCases: Math.min(cfg.evolve.minCases, res.cases.length),
+      incumbent,
+      monitorFireRate: monitor,
+      rule: cfg.evolve.promotionRule ?? 'gain',
+      niMargin: cfg.evolve.niMargin ?? 0.05,
+      sources: res.cases.map((c) => c.source ?? c.id),
+      taskTypes: res.cases.map((c) => c.taskType ?? 'unknown'),
+      candidatePassed: res.cases.map((c) => !!cand.passed[c.id]),
+    });
+    let better = decision.promote;
+    let reason = decision.reason;
+    // Checked first so a cost-inflating variant is rejected for its cost even when quality is merely equal.
+    if (cfg.evolve.cost?.enabled) {
+      const gate = costGate({ incumbent: { score: inc.score, costUsd: inc.cost }, candidate: { score: cand.score, costUsd: cand.cost }, maxCostRisePct: cfg.evolve.cost.maxCostRisePct, minGainForCost: cfg.evolve.cost.minGainForCost });
+      if (!gate.ok) {
+        better = false;
+        reason = `cost gate: ${gate.reason}`;
+      }
+    }
+    if (res.note) reason = `${reason}; ${res.note}`;
+    judged.push({ version: v, cases: res.cases, inc, cand, better, reason, gain: decision.gain, note: res.note });
+  }
+  // Best promotable finalist; otherwise the top-ranked one carries the outcome.
+  const chosen = judged.filter((j) => j.better).sort((a, b) => b.gain - a.gain)[0] ?? judged[0];
+  for (const j of judged) if (j !== chosen) updateArchive(store, j.version, { status: j.better ? 'candidate' : 'rejected' });
+  candidate = chosen.version;
+  const { inc, cand } = chosen;
+  const infra = { incumbent: inc.infraFailureRate, candidate: cand.infraFailureRate };
   const monitor = { incumbent: inc.monitorFireRate ?? 0, candidate: cand.monitorFireRate ?? 0 };
-  const decision = promotionDecision({
-    incumbentScores: cases.map((c) => inc.detail[c.id] ?? 0),
-    candidateScores: cases.map((c) => cand.detail[c.id] ?? 0),
-    regressions,
-    minGain: cfg.evolve.minGain,
-    minCases: cfg.evolve.minCases,
-    incumbent,
-    monitorFireRate: monitor,
-    rule: cfg.evolve.promotionRule ?? 'gain',
-    niMargin: cfg.evolve.niMargin ?? 0.05,
-    sources: cases.map((c) => c.source ?? c.id),
-    taskTypes: cases.map((c) => c.taskType ?? 'unknown'),
-    candidatePassed: cases.map((c) => !!cand.passed[c.id]),
-  });
-  const better = decision.promote;
-  const reason = decision.reason;
+  let better = chosen.better;
+  let reason = chosen.reason;
+  const result = (promoted: boolean): EvolveOutcome => ({ candidate, incumbent, candidateScore: cand.score, incumbentScore: inc.score, promoted, reason, infraFailureRate: infra, monitorFireRate: monitor });
+
+  if (better && sp) {
+    const threshold = cfg.evolve.splits!.signoffBelow;
+    if (needsHumanSignoff(allCases.length, threshold)) {
+      updateArchive(store, candidate, { status: 'candidate' });
+      reason = `${reason}; only ${allCases.length} eval cases in total (below ${threshold}), human sign-off required before promotion`;
+      log(`Kept ${candidate}: ${reason}`);
+      return result(false);
+    }
+    // The locked holdout is touched only here, to confirm a promotion.
+    if (sp.holdout.length) {
+      if (wouldCross(2 * sp.holdout.length)) return { ...result(false), reason: `${reason}; budget cap reached before holdout confirmation, candidate kept for later evaluation` };
+      const hp = await evaluatePair(store, runner, incumbent, candidate, sp.holdout, onRun);
+      spent(hp.incumbent, sp.holdout.length);
+      spent(hp.candidate, sp.holdout.length);
+      if (hp.incumbent.inconclusive) return { ...result(false), reason: `${reason}; holdout confirmation inconclusive, infrastructure failure (${hp.incumbent.inconclusive}); candidate kept for later evaluation` };
+      updateArchive(store, candidate, { holdoutScore: hp.candidate.score });
+      if (!(hp.candidate.score > hp.incumbent.score)) {
+        better = false;
+        updateArchive(store, candidate, { status: 'candidate' });
+        reason = `${reason}; not confirmed on the locked holdout (candidate ${hp.candidate.score} vs incumbent ${hp.incumbent.score})`;
+        log(`Kept ${candidate}: ${reason}`);
+        return result(false);
+      }
+      reason = `${reason}; confirmed on the locked holdout (${hp.candidate.score} vs ${hp.incumbent.score})`;
+    }
+  }
 
   if (better && cfg.evolve.autoPromote) {
     promote(store, candidate);
     log(`Promoted ${candidate}: ${reason}`);
-    return { candidate, incumbent, candidateScore: cand.score, incumbentScore: inc.score, promoted: true, reason, infraFailureRate: infra, monitorFireRate: monitor };
+    return result(true);
   }
   updateArchive(store, candidate, { status: better ? 'candidate' : 'rejected' });
   log(`${better ? 'Kept (autoPromote off)' : 'Rejected'} ${candidate}: ${reason}`);
-  return { candidate, incumbent, candidateScore: cand.score, incumbentScore: inc.score, promoted: false, reason, infraFailureRate: infra, monitorFireRate: monitor };
+  return result(false);
+}
+
+// Smoke-test half that needs no replay: the candidate must still carry every parent checklist line, keep the
+// pass threshold and name a model for every role (the same guards createVariant enforces at creation).
+export function harnessIntegrity(store: Store, parent: string, version: string): string | null {
+  try {
+    const prev = loadHarness(store, parent);
+    const next = loadHarness(store, version);
+    const kept = new Set(next.guidance.checklist.split('\n').map((l) => l.trim()));
+    for (const line of prev.guidance.checklist.split('\n').map((l) => l.trim())) {
+      if (line && !kept.has(line)) return `checklist line removed: ${line}`;
+    }
+    if (next.config.passThreshold < prev.config.passThreshold) return 'passThreshold lowered';
+    for (const role of ROLES) if (!next.config.models?.[role]) return `config.json missing models.${role}`;
+    return null;
+  } catch (err) {
+    return `harness unreadable: ${(err as Error).message}`;
+  }
+}
+
+// Merge per-round results of one side into a single EvalResult (rates weighted by cases per round).
+function combine(parts: { r: EvalResult; n: number }[]): EvalResult {
+  if (parts.length === 1) return parts[0].r;
+  const detail: Record<string, number> = {};
+  const passed: Record<string, boolean> = {};
+  let cost = 0;
+  let n = 0;
+  let infra = 0;
+  let mon = 0;
+  let monN = 0;
+  for (const { r, n: k } of parts) {
+    Object.assign(detail, r.detail);
+    Object.assign(passed, r.passed);
+    cost += r.cost;
+    n += k;
+    infra += r.infraFailureRate * k;
+    if (r.monitorFireRate !== undefined) {
+      mon += r.monitorFireRate * k;
+      monN += k;
+    }
+  }
+  const vals = Object.values(detail);
+  return { score: vals.length ? round(vals.reduce((a, b) => a + b, 0) / vals.length) : 0, detail, passed, cost: round(cost), infraFailureRate: n ? round(infra / n) : 0, ...(monN ? { monitorFireRate: round(mon / monN) } : {}) };
+}
+
+function pairedCases(evaluated: EvalCase[], parts: { r: EvalResult; n: number }[]): PairedCase[] {
+  const inc: Record<string, number> = {};
+  const cand: Record<string, number> = {};
+  parts.forEach((p, x) => Object.assign(x % 2 === 0 ? inc : cand, p.r.detail));
+  return evaluated.map((c) => ({ goal: c.source ?? c.id, taskType: c.taskType, incumbent: inc[c.id] ?? 0, candidate: cand[c.id] ?? 0 }));
 }
 
 function inconclusive(candidate: string, incumbent: string, error: string, rates?: string): EvolveOutcome {
