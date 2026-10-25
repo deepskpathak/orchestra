@@ -113,3 +113,23 @@ test('page poll refreshes state.info so outcome stats follow the repo, and toler
   assert.match(PAGE, /get\('\/api\/info'\)\.then\(function \(i\) \{[\s\S]*?state\.info = i;/);
   assert.match(PAGE, /outcomeStats\(\(state\.info \|\| \{\}\)\.outcomes\)/);
 });
+
+test('info carries oversight metrics alongside the existing fields, and the page renders them', async () => {
+  const { PAGE } = await import('../src/web/page.ts');
+  assert.match(PAGE, /oversightStats\(\(state\.info \|\| \{\}\)\.oversight\)/);
+  assert.match(PAGE, /Review minutes/);
+  const web = await serve({ store: seed(), port: 4442 });
+  try {
+    const info = JSON.parse((await get(web.url + '/api/info')).body);
+    assert.equal(info.current, 'r1');
+    assert.equal(typeof info.outcomes, 'object');
+    assert.equal(typeof info.maxAttempts, 'number');
+    assert.equal(info.oversight.total.runs, 1);
+    assert.equal(info.oversight.total.interruptions, 0);
+    assert.equal(info.oversight.total.reviewMinutes, 0);
+    assert.equal(info.oversight.total.conflictRate, null);
+    assert.equal(info.oversight.runs[0].runId, 'r1');
+  } finally {
+    await web.close();
+  }
+});

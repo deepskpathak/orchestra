@@ -9,6 +9,7 @@ import { approveTask } from './approve.ts';
 import { importGrades, readBenchRows, renderCalibration, renderCalibrationByMode, storeCalibration, storeCalibrationByMode, writeSample } from './calibration.ts';
 import { ABLATION_ARMS, SINGLE_SESSION_ARM, ablationTable, defaultReference, loadArms, referenceError, renderAblationTable, summarize, renderSummary, runBench, verifyOracles } from './bench.ts';
 import { atlasStats, loadOrBuildAtlas } from './atlas.ts';
+import { oversightSummary, renderOversight } from './dashboard-data.ts';
 import { QUERY_COMMANDS, parsePorcelain, runQuery, type QueryCommand } from './atlas-query.ts';
 import { runGoal } from './conductor.ts';
 import { explorationMetrics, renderExploration } from './exploration.ts';
@@ -55,7 +56,8 @@ Usage:
   orchestra approve <runId> <taskId> --by <name>
                                  Land a high-risk task held as awaiting_approval (oversight.riskTiers). The approver must be a
                                  human other than the run's requester (ORCHESTRA_REQUESTER or git user.name at run start)
-  orchestra stats                Factory health per harness version, plus the eval infra failure rate
+  orchestra stats [--json]       Factory health per harness version, plus the eval infra failure rate, oversight and throughput
+                                 metrics (interruptions, review minutes, edits, conflict rate, merge wait, cache-read share)
   orchestra evolve               Propose, evaluate (clean-room, interleaved), and maybe promote a better harness;
                                  prints the infra failure rate of the eval replays
   orchestra learnings [--domain <slug>]
@@ -413,11 +415,16 @@ function cmdStatus(args: string[]): void {
 function cmdStats(args: string[]): void {
   const store = storeOrDie();
   const color = args.includes('--color') || (isTTY() && !args.includes('--plain'));
+  if (args.includes('--json')) {
+    console.log(JSON.stringify({ versions: metrics(store), outcomes: collectOutcomes(store), oversight: oversightSummary(store) }, null, 2));
+    return;
+  }
   console.log(renderStats(metrics(store), readArchive(store), currentVersion(store), color));
   console.log(`\nFactory Eval cases: ${listEvals(store).length}   versions: ${listVersions(store).join(', ')}`);
   const rates = readArchive(store).filter((a) => a.evalInfraRate !== undefined);
   if (rates.length) console.log(`Eval infra failure rate: ${rates.map((a) => `${a.version} ${(a.evalInfraRate! * 100).toFixed(0)}%`).join('   ')}`);
   console.log(`\n${renderOutcomes(collectOutcomes(store))}`);
+  console.log(`\n${renderOversight(oversightSummary(store))}`);
   console.log(`\n${renderExploration(explorationMetrics(store.ledgerRows()))}`);
   console.log(`\n${renderCalibration(storeCalibration(store))}`);
   console.log(`\n${renderCalibrationByMode(storeCalibrationByMode(store))}`);
