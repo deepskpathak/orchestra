@@ -875,6 +875,21 @@ test('oracles: default model is the judge model, differential can be turned off'
   assert.ok(!t1.verdict!.issues.some((i) => /differential/.test(i)));
 });
 
+test('oracles: a failed or empty oracle session degrades to the normal judge instead of failing the task', async () => {
+  const base = fakeRunner({ failFirstAttemptOf: [], invariants: ['double(x) equals 2x'], oracleFiles: { 'invariants.test.mjs': ORACLE_TEST } });
+  const crashing: Runner = async (req) => (req.prompt.startsWith('ORACLE TESTS') ? { ok: false, text: '', costUsd: 0, turns: 1, durationMs: 1, error: 'oracle crash' } : base(req));
+  const empty = fakeRunner({ failFirstAttemptOf: [], invariants: ['double(x) equals 2x'] });
+  for (const [name, runner, log] of [['crash', crashing, /oracle session failed/], ['empty', empty, /wrote no files/]] as const) {
+    const store = noTestRepo({});
+    const run = await runGoal({ store, runner, goal: 'g' });
+    assert.equal(run.status, 'done', name);
+    const t1 = run.tasks.find((t) => t.id === 'T1')!;
+    assert.equal(t1.status, 'merged', name);
+    assert.ok(!t1.verdict!.issues.some((i) => /oracle/.test(i)), `${name}: ${t1.verdict!.issues.join('\n')}`);
+    assert.ok(store.events(run.id).some((e) => log.test(e.msg) && /no oracle evidence/.test(e.msg)), name);
+  }
+});
+
 test('oracles disabled: no oracle session and unchanged call counts', async () => {
   const count = async (cfg: Record<string, unknown>) => {
     const store = tempRepo(cfg);

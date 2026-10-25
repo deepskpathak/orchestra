@@ -16,7 +16,7 @@ import { plannedFiles } from './exploration.ts';
 import { buildContract, contractSha, unresolvedAmbiguities } from './contracts.ts';
 import { analyzeDiff, MONITOR_MARK, type IntegrityFlag } from './integrity.ts';
 import { mutationScore, runMutation } from './mutation.ts';
-import { runOracles, type OracleOutcome } from './oracle-run.ts';
+import { listOracleFiles, runOracles, type OracleOutcome } from './oracle-run.ts';
 import { loadHarness, type Harness } from './harness.ts';
 import { applyLessonEdits, editsFromResponse, expireDomain, formatLearnings, listDomains, normalizeDomain, readAllLearnings, readLearnings, GLOBAL } from './learnings.ts';
 import { buildSandboxPolicy, preflightSandbox, scrubWorkerEnv, type ProbeExec } from './sandbox.ts';
@@ -1068,7 +1068,17 @@ export class Conductor {
       },
       model,
     );
-    if (!res.ok) this.emit('log', `${task.id} oracle session failed (${res.error ?? 'error'}); grading with no oracle evidence`, undefined, task.id);
+    // No session or no files means no oracle evidence. Running anyway would report an empty independent
+    // result as a failure and sink a healthy task, so degrade to the normal judge instead.
+    if (!res.ok) {
+      this.emit('log', `${task.id} oracle session failed (${res.error ?? 'error'}); grading with no oracle evidence`, undefined, task.id);
+      return null;
+    }
+    const written = listOracleFiles(dir);
+    if (!written.tests.length && !written.probes.length) {
+      this.emit('log', `${task.id} oracle session wrote no files; grading with no oracle evidence`, undefined, task.id);
+      return null;
+    }
     const out = runOracles({
       repoRoot: this.store.root,
       baseRef: this.integration.base,
