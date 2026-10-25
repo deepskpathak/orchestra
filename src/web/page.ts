@@ -339,7 +339,7 @@ pre { margin: 0; padding: 10px 12px; max-height: 420px; overflow: auto; font: 12
   var $ = function (id) { return document.getElementById(id); };
   var RING = 2 * Math.PI * 52;
   var TONE = { pending: 'idle', running: 'run', repair: 'warn', judging: 'judge', merging: 'accent', merged: 'ok', failed: 'bad', blocked: 'bad', needs_human: 'warn',
-    planning: 'run', compounding: 'accent', done: 'ok' };
+    planning: 'run', compounding: 'accent', awaiting_approval: 'warn', done: 'ok' };
   var LABEL = { pending: 'Queued', running: 'Building', repair: 'Repairing', judging: 'Verifying', merging: 'Merging', merged: 'Merged', failed: 'Failed', blocked: 'Blocked', needs_human: 'Needs human' };
   var ROLE_TONE = { planner: 'accent', worker: 'run', judge: 'judge', librarian: 'ok', evolver: 'warn' };
   var ACTIVE = { running: 1, repair: 1, judging: 1, merging: 1 };
@@ -463,6 +463,15 @@ pre { margin: 0; padding: 10px 12px; max-height: 420px; overflow: auto; font: 12
         '<div class="stat"><span>Revert rate</span><b class="num">' + p(o.revertRate) + '</b></div>' +
         '<div class="stat"><span>Cost / accepted</span><b class="num">' + (o.costPerAcceptedUsd == null ? 'n/a' : usd(o.costPerAcceptedUsd)) + '</b></div>';
     }
+    function oversightStats(o) {
+      if (!o || !o.total) return '';
+      var t = o.total, p = function (x) { return x == null ? 'n/a' : (x * 100).toFixed(1) + '%'; };
+      return '<div class="stat"><span>Interruptions</span><b class="num">' + t.interruptions + '</b></div>' +
+        '<div class="stat"><span>Review minutes</span><b class="num">' + t.reviewMinutes + '</b></div>' +
+        '<div class="stat"><span>Edits before landing</span><b class="num">' + t.edits + '</b></div>' +
+        '<div class="stat"><span>Conflict rate</span><b class="num">' + p(t.conflictRate) + '</b></div>' +
+        '<div class="stat"><span>Cache-read share</span><b class="num">' + p(t.cacheReadShare) + '</b></div>';
+    }
     var total = run.tasks.length, merged = count(run, ['merged']);
     var flight = run.tasks.reduce(function (s, t) { return s + (WEIGHT[t.status] || 0); }, 0);
     var live = !run.endedAt && run.status !== 'done' && run.status !== 'failed';
@@ -477,7 +486,8 @@ pre { margin: 0; padding: 10px 12px; max-height: 420px; overflow: auto; font: 12
       '<div class="stat"><span>Merged</span><b class="num">' + merged + ' / ' + total + '</b></div>' +
       (run.satisfaction != null ? '<div class="stat"><span>Satisfaction</span><b class="num">' + run.satisfaction.toFixed(2) + '</b></div>' : '') +
       (run.mutation ? '<div class="stat"><span>Mutation</span><b class="num"' + (run.mutation.skipped || run.mutation.score == null ? ' title="' + esc(run.mutation.skipped || 'no score') + '">skipped' : '>' + run.mutation.score.toFixed(2)) + '</b></div>' : '') +
-      outcomeStats((state.info || {}).outcomes);
+      outcomeStats((state.info || {}).outcomes) +
+      oversightStats((state.info || {}).oversight);
 
     var pct = total ? merged / total : 0;
     $('ring-fg').setAttribute('stroke-dasharray', RING.toFixed(2));
@@ -1000,7 +1010,7 @@ pre { margin: 0; padding: 10px 12px; max-height: 420px; overflow: auto; font: 12
       setInterval(function () {
         get('/api/info').then(function (i) {
           // Keep info fresh so outcome stats (and limits) follow the repo, and repaint the hero when they change.
-          var outcomesChanged = JSON.stringify(i.outcomes) !== JSON.stringify((state.info || {}).outcomes);
+          var outcomesChanged = JSON.stringify(i.outcomes) !== JSON.stringify((state.info || {}).outcomes) || JSON.stringify(i.oversight) !== JSON.stringify((state.info || {}).oversight);
           state.info = i;
           if (outcomesChanged && state.run) renderHero();
           var sel = $('runs');

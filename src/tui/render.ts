@@ -154,7 +154,7 @@ export function renderDashboard(run: Run, events: OrchestraEvent[], o: RenderOpt
   row(phases(run, c));
   const k = counts(run);
   const frac = k.total ? k.merged / k.total : 0;
-  const statusStyle: Style = run.status === 'done' ? 'green' : run.status === 'failed' ? 'red' : 'cyan';
+  const statusStyle: Style = run.status === 'done' ? 'green' : run.status === 'failed' ? 'red' : run.status === 'awaiting_approval' ? 'yellow' : 'cyan';
   row(
     `${bar(frac, Math.min(30, Math.floor(inner / 4)), c)} ${k.merged}/${k.total}  ` +
       `${c('green', `✓${k.merged}`)} ${c('cyan', `●${k.active}`)} ${c('yellow', `⟳${k.repair}`)} ${c('red', `✗${k.failed}`)}${k.needsHuman ? ` ${c('yellow', `?${k.needsHuman}`)}` : ''}  ` +

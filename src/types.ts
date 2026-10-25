@@ -1,6 +1,7 @@
 // Shared domain types. Everything Orchestra persists is one of these shapes, as JSON.
 
 import type { IntegrityFlag } from './integrity.ts';
+import type { RiskTierConfig } from './oversight.ts';
 
 export type Role = 'planner' | 'worker' | 'judge' | 'librarian' | 'evolver';
 
@@ -10,6 +11,7 @@ export type TaskStatus =
   | 'judging' // tests + judge session active
   | 'repair' // judge rejected, queued for another worker attempt
   | 'merging' // waiting in the merge queue
+  | 'awaiting_approval' // judged pass but high risk: waits for `orchestra approve` (W7.1)
   | 'merged' // landed on the integration branch
   | 'failed' // out of attempts
   | 'needs_human' // worker flagged a spec/test contradiction; stops repair, not a failure
@@ -70,6 +72,9 @@ export interface Task {
   integrityFlags?: IntegrityFlag[]; // grading-surface / reward-hack flags raised on this task's diffs (all attempts)
   humanReason?: string; // why the worker flagged the task for a human (status needs_human)
   contrast?: ContrastRecord; // set when a contrastive repair pair ran
+  risk?: { tier: 'low' | 'normal' | 'high'; reasons: string[] }; // W7.1, set when oversight.riskTiers.enabled
+  approval?: { requestedAt: number; by?: string; decidedAt?: number }; // W7.1
+  mergeWaitMs?: number; // W6.2: judged-pass until landed
   costUsd: number;
   startedAt?: number;
   endedAt?: number;
@@ -83,7 +88,8 @@ export interface Scenario {
   check?: string; // optional shell command that checks this scenario (W4.2)
 }
 
-export type RunStatus = 'planning' | 'running' | 'compounding' | 'done' | 'failed';
+// 'awaiting_approval' (W7.1): the only unmerged tasks are held for `orchestra approve` (or blocked behind them); not a failure.
+export type RunStatus = 'planning' | 'running' | 'compounding' | 'awaiting_approval' | 'done' | 'failed';
 
 export interface Run {
   id: string;
@@ -96,6 +102,9 @@ export interface Run {
   endedAt?: number;
   integrationBranch?: string;
   baseRef?: string;
+  requestedBy?: string; // who asked for the run: ORCHESTRA_REQUESTER or git user.name (W7.1)
+  conflictRate?: number; // W6.1: merge conflicts / merge attempts
+  cacheReadShare?: number; // W6.4: cache-read tokens / all input tokens across the run's agent calls; absent without token data
   atlasSha?: string; // commit the Repo Atlas was built at, when context.atlas is enabled
   tasks: Task[];
   costUsd: number;
@@ -127,6 +136,7 @@ export type EventKind =
   | 'task.verdict'
   | 'task.repair'
   | 'task.merged'
+  | 'task.approval'
   | 'task.contrast'
   | 'task.failed'
   | 'task.needs_human'
@@ -243,10 +253,19 @@ export interface ProjectConfig {
       mapTokens: number; // budget for the L0 ranked map
       packs: boolean; // L1 task packs in worker prompts
       packTokens: number; // budget for one L1 pack
+      query?: boolean; // L2: mention `orchestra atlas find|neighbors|impact|tests` in worker and judge prompts (W9.3); absent means false
+      external?: 'off' | 'auto' | 'ctags' | 'graphify'; // optional external graph input (W9.5); absent means 'off'
     };
   };
+  throughput?: { footprintScheduling: boolean; decisionLog?: boolean; batchMerge: { enabled: boolean; maxBatch: number } }; // W6.1, W6.2; decisionLog defaults to footprintScheduling when unset
+  oversight?: { riskTiers: RiskTierConfig }; // W7.1
+  planner?: { cascade: { enabled: boolean; draftModel: string; confidenceThreshold: number } }; // W6.3: cheap model drafts, harness planner model on low confidence or a failed check
+  budgets?: { workerPrompt: { enabled: boolean; maxTurns: number } }; // W6.5: turns and dollars remaining in worker prompts, hard task caps
+  bestOfN?: { enabled: boolean; n: number }; // W6.6: extra worker samples only when an executable verifier exists
+  cache?: { discipline: { enabled: boolean; warmFirst: boolean } }; // W6.4: identical sibling requests, warm one worker before fan-out
+  provider?: string; // W8.1: model provider adapter, 'claude' (default) is the only one
   verification: VerificationConfig;
-  learnings?: { expiryDays: number }; // drop lessons with evidence older than this many days; 0 = off
+  learnings?: { expiryDays: number; graph?: boolean }; // expiryDays: drop lessons with evidence older than this many days (0 = off); graph: rank lessons linked to the task footprint first (L3)
   evolve: {
     every: number; // auto-evolve after every N completed runs, 0 disables
     autoPromote: boolean;

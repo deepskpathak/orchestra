@@ -30,7 +30,7 @@ The evolver can tune one habit by editing a short file instead of rewriting a wh
 ## Metrics per version: `orchestra stats`
 
 ```
-orchestra stats [--plain] [--color]
+orchestra stats [--plain] [--color] [--json]
 ```
 
 Prints one row per harness version that has completed goal runs, then the number of Factory Eval cases and the known versions. Metrics come from run records and the cost ledger (`metrics()` in `src/evolve.ts`):
@@ -43,6 +43,8 @@ Prints one row per harness version that has completed goal runs, then the number
 | cost per merged | Total ledger cost for the version divided by merged tasks |
 
 Evaluation runs (`kind: eval`) are excluded, so evolution does not distort the numbers it is judged on.
+
+After the per-version table, `orchestra stats` prints outcome metrics, exploration metrics, judge calibration and an **Oversight and throughput** block (W7.2): interruptions, review minutes, edits before landing, conflict rate, mean merge wait and cache-read share (`n/a` when a run recorded no data). These show whether the opt-in M6 features (footprint scheduling, batched merges, risk tiers, caching) help or just move work around. `--json` prints `{versions, outcomes, oversight}` for scripts. See [dashboards](dashboards.md#oversight-and-throughput-metrics).
 
 ## Learnings: `orchestra learnings`
 
@@ -74,6 +76,7 @@ An unknown domain exits non-zero and lists the known domains.
 
 **Lesson hygiene.** The librarian returns item edits, never the whole set. Each lesson has a stable `id`, and an edit is `add`, `update` (new text, extra evidence, optional `helped` true or false) or `remove`, addressed by id. Lessons the librarian does not mention are kept, and a response shaped like a full rewrite is converted into edits (matching lessons are updated, new ones added, nothing is removed). `applyLessonEdits` in `src/learnings.ts` is the only path from model output to the store.
 
+- **Code links (opt-in, L3).** A lesson may carry `links: {files, symbols?}` (set through add or update edits; malformed links are dropped, legacy lessons without links load unchanged). With `learnings.graph` true, `retrieveByCode` ranks lessons whose linked files overlap the task's footprint ahead of the normal domain order, within the retrieval budget of 15. Off (the default) retrieval is unchanged. Eval trials are clean-room and never get the code-linked boost.
 - **Counters.** Each lesson carries `helpful` and `harmful` counts. Older files without them load as zero.
 - **Expiry (opt-in).** Set `learnings.expiryDays` above 0 in `.orchestra/config.json` to drop, after each run, lessons whose newest evidence is older than that many days, or whose harmful count is well above helpful. `0` (the default) never expires anything.
 - **Ablation.** `orchestra evals ablation` replays the locked holdout cases twice, with and without the learnings store, and prints per-case scores, the mean delta and its 95% CI. A positive delta means lessons help. It costs two replays per holdout case. Normal eval replays stay clean-room; only the with-lessons arm of this command reads learnings.

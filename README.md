@@ -89,9 +89,11 @@ Set `ORCHESTRA_RUNNER=fake` to use the simulator instead of real Claude sessions
 | `orchestra watch [runId]` | Full-screen live dashboard (q to quit) |
 | `orchestra status [runId]` | One-shot board of the current or given run |
 | `orchestra bench` | Run the fixed benchmark suite (arms x goals x repeats, hidden checks); `--verify-oracles` validates the suite, `--ablations` runs the ablation arms and a matched-cost single-session baseline. See [docs/bench.md](docs/bench.md) |
-| `orchestra stats` | Factory health per harness version, plus outcome metrics (merge acceptance, edits before landing, revert rate, cost per accepted merge, success by task length), merged-but-wrong rate and judge agreement split by M4 verification mode |
+| `orchestra approve <runId> <taskId> --by <name>` | Land a high-risk task held as `awaiting_approval` (opt-in `oversight.riskTiers`); the approver must be a human other than the requester (advisory: names are free text, not authenticated identities; with no recorded requester it warns) |
+| `orchestra stats` | Factory health per harness version, plus outcome metrics (merge acceptance, edits before landing, revert rate, cost per accepted merge, success by task length), merged-but-wrong rate, judge agreement split by M4 verification mode, and oversight and throughput metrics (interruptions, review minutes, edits before landing, conflict rate, merge wait, cache-read share; `--json` for scripts) |
 | `orchestra evolve` | Propose, evaluate, and maybe promote a better harness |
 | `orchestra learnings [--domain <slug>]` | Show what the factory has learned in this repo (`--domain` filters to one domain, `global` for cross-domain lessons) |
+| `orchestra atlas find\|neighbors\|impact\|tests <symbol-or-path>` | L2 code graph queries as a capped tree (80 lines). Need `context.atlas.enabled` and a built atlas, else a hint and a non-zero exit. Files modified in the current worktree are marked `(stale: read the file)`. `context.atlas.query` adds the command to worker and judge prompts. Advisory only |
 | `orchestra atlas build` / `orchestra atlas stats` | Build or refresh the Repo Atlas code graph for HEAD (`.orchestra/atlas/<sha>.json`), or show its file, symbol and edge counts. Work even when `context.atlas.enabled` is false; `.orchestra/`, `.env*` and secret files are never indexed |
 | `orchestra evals` | List Factory Eval cases (`--regression`, `--tag <t>`) |
 | `orchestra evals add` | Add a case for a goal you choose, or harvest a failed run with `--from-run <id> --fix <commit>` |

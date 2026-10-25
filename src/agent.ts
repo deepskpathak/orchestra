@@ -31,6 +31,7 @@ export interface AgentRequest {
   cwd: string;
   model: string;
   budgetUsd: number;
+  maxTurns?: number; // hard turn cap for the session (W6.5); absent: no --max-turns flag
   schema?: object;
   tools?: string[]; // restrict the built-in tool set (read-only roles)
   allowedTools?: string[];
@@ -38,7 +39,7 @@ export interface AgentRequest {
   permissionMode?: string;
   logFile?: string;
   timeoutMs?: number;
-  meta?: { task?: string; attempt?: number; run?: string; variant?: 'a' | 'b' };
+  meta?: { task?: string; attempt?: number; run?: string; variant?: 'a' | 'b' | `s${number}` }; // a/b: contrastive pair, sN: best-of-n sample
   onAction?: (action: string) => void;
   sandbox?: AgentSandbox; // absent: spawn exactly as before
   env?: Record<string, string | undefined>; // absent: process.env
@@ -117,6 +118,7 @@ export function buildArgs(req: AgentRequest): string[] {
     '--permission-mode',
     req.permissionMode ?? 'acceptEdits',
   ];
+  if (req.maxTurns !== undefined) args.push('--max-turns', String(req.maxTurns));
   if (req.tools) args.push('--tools', req.tools.join(','));
   if (req.allowedTools?.length) args.push('--allowedTools', req.allowedTools.join(','));
   if (req.disallowedTools?.length) args.push('--disallowedTools', req.disallowedTools.join(','));

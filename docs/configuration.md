@@ -7,7 +7,7 @@ Orchestra has two config layers, both plain JSON:
 
 ## Project config (`.orchestra/config.json`)
 
-Defaults come from `DEFAULT_PROJECT_CONFIG` in `src/store.ts`. Missing keys fall back to the defaults, and the `judgeTiers`, `preJudge`, `contrastive`, `fastPath`, `verification` and `evolve` objects are merged key by key, so older configs get the defaults for newer keys automatically. On `orchestra init`, `testCommand` is filled in by auto-detection (it stays `null` if nothing is detected).
+Defaults come from `DEFAULT_PROJECT_CONFIG` in `src/store.ts`. Missing keys fall back to the defaults, and the `judgeTiers`, `preJudge`, `contrastive`, `fastPath`, `verification`, `throughput`, `oversight`, `planner`, `budgets`, `bestOfN`, `cache`, `learnings` and `evolve` objects are merged key by key, so older configs get the defaults for newer keys automatically. On `orchestra init`, `testCommand` is filled in by auto-detection (it stays `null` if nothing is detected).
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
@@ -23,6 +23,14 @@ Defaults come from `DEFAULT_PROJECT_CONFIG` in `src/store.ts`. Missing keys fall
 | `contrastive` | object | see below | Two-worker contrastive repair. |
 | `verification` | object | see below | M4 Verification checks, all off by default. |
 | `context` | object | see below | Repo context settings (`context.atlas`). |
+| `throughput` | object | see below | Footprint scheduling and batched merges (W6.1, W6.2), off. |
+| `oversight` | object | see below | Risk tiers for landing (W7.1), off. |
+| `planner` | object | see below | Planner cascade (W6.3), off. |
+| `budgets` | object | see below | Budget-aware worker prompts with hard caps (W6.5), off. |
+| `bestOfN` | object | see below | Verifier-gated best-of-n (W6.6), off. |
+| `cache` | object | see below | Prompt cache discipline (W6.4), off. |
+| `provider` | string | `"claude"` | Model provider adapter (W8.1). |
+| `learnings` | object | see below | Lesson expiry and the L3 lesson graph. |
 | `evolve` | object | see below | Self-improvement settings. |
 
 ### `sandbox`
@@ -109,6 +117,61 @@ Off by default. The Repo Atlas is a deterministic, commit-keyed code graph (file
 | `context.atlas.mapTokens` | number | `1024` | Token budget of the ranked repo map (L0). |
 | `context.atlas.packs` | boolean | `false` | Add a per-task pack (L1: footprint signatures, callers, importers, related tests) to the worker prompt body. |
 | `context.atlas.packTokens` | number | `1500` | Token budget of each task pack. |
+| `context.atlas.query` | boolean | `false` | Mention `orchestra atlas find\|neighbors\|impact\|tests` in worker and judge prompts (L2, W9.3). The command itself works whenever the atlas is enabled and built. Output is advisory and never gates a merge. |
+| `context.atlas.external` | `off` \| `auto` \| `ctags` \| `graphify` | `off` | Merge symbols and edges from an optional external source into the atlas (W9.5). Absent means `off`. |
+
+**External inputs (opt-in, never required).** With `context.atlas.external` set, the atlas build adds nodes and edges from one extra source to the built-in graph. Only paths already in the built-in atlas are accepted, so excluded and secret paths stay out. The merge happens on each load, and `orchestra atlas stats|find|neighbors|impact|tests` apply the same setting as the conductor; the cache at `.orchestra/atlas/<sha>.json` keeps the built-in graph only. If the chosen source is missing or fails, the build logs `Atlas external source (<mode>) unavailable, using built-in: <reason>` and continues. No network is used.
+
+- `ctags`: needs [universal-ctags](https://ctags.io) on PATH (`brew install universal-ctags`, `apt install universal-ctags`). Orchestra writes the atlas commit's own files (not the live checkout) to a scratch directory, runs `ctags --output-format=json -L -` there with `.git`, `.orchestra` and `node_modules` excluded, and caches the output at `.orchestra/atlas-ctags/<sha>.jsonl` (newest 5 kept), so it does not rescan on every start. Exuberant or BSD ctags is detected and ignored.
+- `graphify`: reads a graphify `graph.json` (`graphify-out/graph.json` or `graph.json`) as committed at the atlas commit; if it is not committed there, the checkout's copy is used and a log line says so. Node-link `nodes` and `links` map to atlas files, symbols and `contains`, `imports`, `references`, `tests` edges; unknown node kinds and relations are ignored.
+- `auto`: graphify if a `graph.json` is found, else ctags if available, else the built-in graph.
+
+External MCP code-graph servers such as codegraph and Serena are user opt-ins. Add them to your Claude settings (`claude mcp add ...` or `.mcp.json`); Orchestra does not install, start or configure them.
+
+### `throughput` (W6.1, W6.2)
+
+The keys are off by default. The `throughput` object and `throughput.batchMerge` are merged key by key.
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `throughput.footprintScheduling` | boolean | `false` | Single writer per footprint: a ready task whose planner-declared footprint overlaps an in-flight task waits (a missing footprint overlaps everything). With `decisionLog` unset, dependents also get a short "Decisions from merged dependencies" section in the worker prompt. |
+| `throughput.decisionLog` | boolean | unset | Controls that dependency decision log on its own. Unset follows `footprintScheduling` (so default prompts are unchanged); `true` adds it without footprint scheduling, `false` omits it with it. |
+| `throughput.batchMerge.enabled` | boolean | `false` | Queue judged-pass tasks and merge disjoint-footprint batches into the integration branch with one post-merge test run per batch. On failure the batch is bisected: bad tasks are reset out and go to repair, good ones stay merged. Per-task merge wait is stored as `Task.mergeWaitMs`. |
+| `throughput.batchMerge.maxBatch` | number | `4` | Largest batch. |
+
+Per-call settings (`budgets.workerPrompt`, `throughput.batchMerge.maxBatch`, `context.atlas.query`) are read once when the run starts; editing `config.json` mid-run does not change them for that run.
+
+The conflict rate (merge conflicts / merge attempts) is recorded for every run as `Run.conflictRate` and in the `run.end` event, with these keys on or off.
+
+### `oversight.riskTiers` (W7.1)
+
+Off by default. When enabled, each judged-pass task is classified from its diff (`src/oversight.ts`): `low` and `normal` merge as usual; `high` (auth, data, infra, secrets, workflows, migrations, or a diff over `largeDiffLines`) sets the task to `awaiting_approval` and emits a `task.approval` event. It lands only through `orchestra approve <runId> <taskId> --by <name>`. The approver must be a human who is not the requester, recorded at run start as `Run.requestedBy` (`ORCHESTRA_REQUESTER`, else `git config user.name`). Agent role names (`planner`, `worker`, `judge`, ...) are always refused. **This is advisory, not authenticated identity:** `--by` and the requester are free text, so anyone with shell access can type another name. If the run recorded no requester (`unknown`, because neither `ORCHESTRA_REQUESTER` nor `git config user.name` was set), the four-eyes comparison cannot be applied: approval still proceeds but prints a warning and logs it in the run's events. Set `ORCHESTRA_REQUESTER` before the run, and enforce real approver identity outside Orchestra (branch protection, signed commits) where it matters. Tasks that depend on a held task are blocked in that run. When the only unmerged tasks are held (or blocked behind a held task), the run ends as `awaiting_approval` instead of `failed`: satisfaction, the mutation pass and learning are deferred, and `orchestra run` exits 0. Approving the last held task records satisfaction and sets the run to `done`, or to `failed` when blocked dependents never ran (approval does not restart the run; start a new run for the remainder). Mutation score and learning are not re-run after approval.
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `oversight.riskTiers.enabled` | boolean | `false` | Turn tiering on. |
+| `oversight.riskTiers.lowRiskGlobs` | string[] | docs, `*.md`, `test/**`, issue templates | Paths that make a task low risk when every changed file matches. |
+| `oversight.riskTiers.highRiskGlobs` | string[] | auth, secrets, migrations, data, infra, terraform, k8s, Dockerfile, workflows | Any match makes the task high risk. |
+| `oversight.riskTiers.largeDiffLines` | number | `400` | Added plus removed lines above which a task is high risk. |
+
+### Cost control and provider (W6.3 to W6.6, W8.1)
+
+All off by default. Each object is merged key by key, so a partial block keeps the other defaults.
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `planner.cascade.enabled` | boolean | `false` | A cheap model drafts the plan with a `confidence` field. The harness planner model is called only when `planChecks` finds an issue (unknown dependency, dependency cycle, task without acceptance criteria, no tasks), the confidence is missing or below the threshold, or the draft call fails. One `plan_cascade_draft_accepted` or `plan_cascade_escalated` outcome row is written to the ledger (scored with the confidence) for a later router. |
+| `planner.cascade.draftModel` | string | `fast` | Model or tier for the draft. |
+| `planner.cascade.confidenceThreshold` | number | `0.7` | Drafts below this escalate. |
+| `budgets.workerPrompt.enabled` | boolean | `false` | Worker prompts get a `## Budget` section with turns and dollars remaining. The caps are per task across attempts: `maxTurns` worker turns and the harness `budgetUsd.worker` dollars. Each worker session is started with `--max-turns` and `--max-budget-usd` set to what remains. A task that fails a verdict with the cap reached becomes `failed` ("worker budget cap reached") instead of going to repair. |
+| `budgets.workerPrompt.maxTurns` | number | `100` | Worker turns allowed per task, all attempts. |
+| `bestOfN.enabled` | boolean | `false` | Run `n` worker samples per attempt, but only when a `testCommand` or a scenario `check` exists (otherwise exactly one sample, logged). Samples run in parallel in their own worktrees; the winner is chosen by the test command, then by scenario checks passed, before the judge sees only that one. A tie keeps the first sample. With `budgets.workerPrompt` on, the remaining turn and dollar cap is split evenly across the samples, so together they stay inside it. A sample that crashes is skipped. Not used for contrastive repair pairs. |
+| `bestOfN.n` | number | `2` | Samples per attempt. |
+| `cache.discipline.enabled` | boolean | `false` | Sibling worker requests carry the same sorted `allowedTools`, the same system prompt and the same prompt prefix (no per-task lesson ordering). |
+| `cache.discipline.warmFirst` | boolean | `true` | With discipline on, start one worker and wait for its first action before fanning out the rest. |
+| `provider` | string | `claude` | Model provider adapter (`src/provider.ts`). `claude` wraps the `claude -p` runner with no behaviour change; any other value is rejected. |
+
+The share of input tokens served from the prompt cache is recorded as `Run.cacheReadShare` and in the `run.end` event whenever the agent calls reported token usage.
 
 ### `contrastive`
 
@@ -137,6 +200,7 @@ Off by default. Without a test command the judge scores a single attempt with no
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
+| `learnings.graph` | boolean | `false` | Rank lessons linked to files in the task footprint first when building worker prompts (L3 lesson graph). Eval trials never get the boost. See [self-improvement.md](self-improvement.md#learnings-orchestra-learnings). |
 | `learnings.expiryDays` | number | `0` | Drop lessons whose newest evidence is older than this many days, or whose harmful count is well above helpful, after each run. `0` disables expiry. See [self-improvement.md](self-improvement.md#learnings-orchestra-learnings). |
 
 ### `evolve`

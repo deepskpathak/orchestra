@@ -1,13 +1,17 @@
 // `orchestra` command line. Thin layer over conductor / evolve / render.
 
 import { spawn, spawnSync, execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, openSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, openSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { claudeRunner, preflight, type Runner } from './agent.ts';
+import { approveTask } from './approve.ts';
 import { importGrades, readBenchRows, renderCalibration, renderCalibrationByMode, storeCalibration, storeCalibrationByMode, writeSample } from './calibration.ts';
 import { ABLATION_ARMS, SINGLE_SESSION_ARM, ablationTable, defaultReference, loadArms, referenceError, renderAblationTable, summarize, renderSummary, runBench, verifyOracles } from './bench.ts';
 import { atlasStats, loadOrBuildAtlas } from './atlas.ts';
+import { oversightSummary, renderOversight } from './dashboard-data.ts';
+import { ctagsExec } from './atlas-external.ts';
+import { QUERY_COMMANDS, parsePorcelain, runQuery, type QueryCommand } from './atlas-query.ts';
 import { runGoal } from './conductor.ts';
 import { explorationMetrics, renderExploration } from './exploration.ts';
 import { collectOutcomes, renderOutcomes } from './outcomes.ts';
@@ -22,7 +26,7 @@ import { GLOBAL, lessonAblation, listDomains, readAllLearnings, readLearnings } 
 import { validNetwork } from './container.ts';
 import { detectSandbox, type SandboxBackend } from './sandbox.ts';
 import { PACKAGE_ROOT, currentVersion, packageVersion, listVersions, promote, readArchive, seedHarness } from './harness.ts';
-import { DEFAULT_PROJECT_CONFIG, Store, findRepoRoot } from './store.ts';
+import { DEFAULT_PROJECT_CONFIG, Store, findMainCheckout, findRepoRoot } from './store.ts';
 import { serve } from './web/server.ts';
 import { startTui } from './tui/app.ts';
 import { compactLine, renderDashboard, renderStats, renderStatusLine } from './tui/render.ts';
@@ -50,13 +54,22 @@ Usage:
   orchestra serve --tui [runId]  Interactive terminal dashboard (no browser, opens no port); alias: orchestra tui
   orchestra watch [runId]        Full-screen live dashboard (q to quit)
   orchestra status [runId]       One-shot board of the current or given run
-  orchestra stats                Factory health per harness version, plus the eval infra failure rate
+  orchestra approve <runId> <taskId> --by <name>
+                                 Land a high-risk task held as awaiting_approval (oversight.riskTiers). The approver must be a
+                                 human other than the run's requester (ORCHESTRA_REQUESTER or git user.name at run start).
+                                 Advisory only: names are free text, not authenticated identities. With no recorded requester
+                                 the check cannot run and approve warns
+  orchestra stats [--json]       Factory health per harness version, plus the eval infra failure rate, oversight and throughput
+                                 metrics (interruptions, review minutes, edits, conflict rate, merge wait, cache-read share)
   orchestra evolve               Propose, evaluate (clean-room, interleaved), and maybe promote a better harness;
                                  prints the infra failure rate of the eval replays
   orchestra learnings [--domain <slug>]
                                  Show what the factory has learned (all, or one domain; "global" for cross-domain lessons)
   orchestra atlas build          Build or incrementally refresh the Repo Atlas code graph for HEAD (.orchestra/atlas/<sha>.json)
   orchestra atlas stats          Show file, symbol and edge counts of the atlas for HEAD (builds it if missing)
+  orchestra atlas find|neighbors|impact|tests <symbol-or-path>
+                                 L2 code graph queries as a tree (80 line cap). Need context.atlas.enabled and a built atlas;
+                                 files modified in this worktree are marked stale. Advisory, never gates a merge
                                  Both work regardless of context.atlas.enabled; the atlas never indexes .orchestra/, .env* or secrets
   orchestra bench                Run the fixed benchmark suite: arms x goals x repeats, hidden checks, JSONL + summary
       --arms a,b --goals g1,g2 --repeats N   Choose arms (default bench/arms.json), goals and repeats per goal
@@ -271,13 +284,14 @@ async function cmdRun(args: string[]): Promise<void> {
     const out = await evolve(store, r, (m) => console.log(`  ${m}`));
     console.log(`♫ evolve: ${out.promoted ? `promoted ${out.candidate}` : `kept ${out.incumbent}`} (${out.reason})`);
   }
-  process.exitCode = run.status === 'done' ? 0 : 1;
+  // A run held for approval is waiting on a human, not failed.
+  process.exitCode = run.status === 'done' || run.status === 'awaiting_approval' ? 0 : 1;
 }
 
 export function summary(run: Run): string {
   const merged = run.tasks.filter((t) => t.status === 'merged').length;
   const lines = [
-    `♫ run ${run.id} ${run.status.toUpperCase()}: ${merged}/${run.tasks.length} tasks merged, satisfaction ${(run.satisfaction ?? 0).toFixed(2)}, cost $${run.costUsd.toFixed(2)}`,
+    `♫ run ${run.id} ${run.status.toUpperCase()}: ${merged}/${run.tasks.length} tasks merged, satisfaction ${run.status === 'awaiting_approval' ? 'pending approval' : (run.satisfaction ?? 0).toFixed(2)}, cost $${run.costUsd.toFixed(2)}`,
   ];
   const human = run.tasks.filter((t) => t.status === 'needs_human');
   const failed = run.tasks.filter((t) => t.status === 'failed').length;
@@ -286,7 +300,8 @@ export function summary(run: Run): string {
   if (human.length || failed || blocked) lines.push(`  ${failed} failed, ${blocked} blocked, ${human.length} need a human`);
   for (const t of human) lines.push(`  ? ${t.id} needs a human: ${t.humanReason ?? 'no reason recorded'}`);
   if (run.error) lines.push(`  ${run.error}`);
-  if (merged && run.integrationBranch) lines.push(`  review: git log --oneline ${run.baseRef?.slice(0, 8)}..${run.integrationBranch}`, `  land:   git merge ${run.integrationBranch}`);
+  for (const t of run.tasks.filter((x) => x.status === 'awaiting_approval')) lines.push(`  ! ${t.id} waits for: orchestra approve ${run.id} ${t.id} --by <name>`);
+  if (merged && run.integrationBranch && run.status !== 'awaiting_approval') lines.push(`  review: git log --oneline ${run.baseRef?.slice(0, 8)}..${run.integrationBranch}`, `  land:   git merge ${run.integrationBranch}`);
   return lines.join('\n');
 }
 
@@ -377,6 +392,20 @@ async function cmdServe(args: string[]): Promise<void> {
   process.on('SIGINT', () => void web.close().then(() => process.exit(0)));
 }
 
+async function cmdApprove(args: string[]): Promise<void> {
+  const store = storeOrDie();
+  const i = args.indexOf('--by');
+  const by = i >= 0 ? args[i + 1] : undefined;
+  const [runId, taskId] = args.filter((a, j) => !a.startsWith('--') && j !== i + 1);
+  if (!runId || !taskId || !by) die('usage: orchestra approve <runId> <taskId> --by <name>');
+  try {
+    const run = await approveTask(store, runId, taskId, by, (m) => console.error(m));
+    console.log(`${taskId} approved by ${by} and merged into ${run.integrationBranch}.`);
+  } catch (e) {
+    die((e as Error).message);
+  }
+}
+
 function cmdStatus(args: string[]): void {
   const store = storeOrDie();
   const color = args.includes('--color') || (isTTY() && !args.includes('--plain'));
@@ -391,11 +420,16 @@ function cmdStatus(args: string[]): void {
 function cmdStats(args: string[]): void {
   const store = storeOrDie();
   const color = args.includes('--color') || (isTTY() && !args.includes('--plain'));
+  if (args.includes('--json')) {
+    console.log(JSON.stringify({ versions: metrics(store), outcomes: collectOutcomes(store), oversight: oversightSummary(store) }, null, 2));
+    return;
+  }
   console.log(renderStats(metrics(store), readArchive(store), currentVersion(store), color));
   console.log(`\nFactory Eval cases: ${listEvals(store).length}   versions: ${listVersions(store).join(', ')}`);
   const rates = readArchive(store).filter((a) => a.evalInfraRate !== undefined);
   if (rates.length) console.log(`Eval infra failure rate: ${rates.map((a) => `${a.version} ${(a.evalInfraRate! * 100).toFixed(0)}%`).join('   ')}`);
   console.log(`\n${renderOutcomes(collectOutcomes(store))}`);
+  console.log(`\n${renderOversight(oversightSummary(store))}`);
   console.log(`\n${renderExploration(explorationMetrics(store.ledgerRows()))}`);
   console.log(`\n${renderCalibration(storeCalibration(store))}`);
   console.log(`\n${renderCalibrationByMode(storeCalibrationByMode(store))}`);
@@ -435,10 +469,51 @@ function cmdLearnings(args: string[]): void {
   }
 }
 
-const ATLAS_USAGE = 'Usage: orchestra atlas build | orchestra atlas stats';
+// The same external-source options the conductor passes, so the CLI sees the graph agents were given.
+// Messages go to stderr: stdout is the query result.
+function atlasExternal(root: string) {
+  return { mode: new Store(root).config().context.atlas.external ?? 'off', exec: ctagsExec, log: (m: string) => console.error(m) } as const;
+}
+
+const ATLAS_USAGE = 'Usage: orchestra atlas build | stats | find|neighbors|impact|tests <symbol-or-path>';
+
+// Files modified in the calling worktree; injectable so tests need no git.
+export function gitStatusPaths(root: string): string[] {
+  try {
+    return parsePorcelain(execFileSync('git', ['status', '--porcelain'], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }));
+  } catch {
+    return [];
+  }
+}
+
+// `root` is the main checkout (config and atlas cache); `cwd` is where the command ran, which inside a task
+// worktree is the commit to query and the tree whose modified files are marked stale.
+function cmdAtlasQuery(root: string, sub: QueryCommand, arg: string | undefined, statusPaths: (root: string) => string[] = gitStatusPaths, cwd: string = root): void {
+  if (!arg) die(`Usage: orchestra atlas ${sub} <symbol-or-path>`);
+  if (!new Store(root).config().context.atlas.enabled) die('The Repo Atlas is disabled. Set context.atlas.enabled to true in .orchestra/config.json, then run `orchestra atlas build`.');
+  const dir = join(root, '.orchestra', 'atlas');
+  if (!existsSync(dir) || !readdirSync(dir).some((f) => f.endsWith('.json'))) die('No atlas has been built. Run `orchestra atlas build` first.');
+  let sha: string;
+  try {
+    sha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+  } catch {
+    die('No commits yet. Commit something first; the atlas is keyed by commit.');
+  }
+  const atlas = loadOrBuildAtlas(root, sha, atlasExternal(root));
+  const r = runQuery(atlas, sub, arg, { stale: statusPaths(cwd) });
+  console.log(r.text);
+  if (!r.found) process.exitCode = 1;
+}
 
 function cmdAtlas(args: string[]): void {
   const sub = args[0];
+  if ((QUERY_COMMANDS as readonly string[]).includes(sub ?? '')) {
+    // Agents run this inside their task worktree, where .orchestra/ does not exist: use the main checkout's.
+    const root = findMainCheckout(process.cwd());
+    if (!root) die('Not inside a git repository.');
+    cmdAtlasQuery(root, sub as QueryCommand, args.slice(1).join(' ').trim() || undefined, gitStatusPaths, findRepoRoot(process.cwd()) ?? root);
+    return;
+  }
   if (sub !== 'build' && sub !== 'stats') die(sub ? `unknown atlas subcommand "${sub}". ${ATLAS_USAGE}` : ATLAS_USAGE);
   const root = findRepoRoot(process.cwd());
   if (!root) die('Not inside a git repository.');
@@ -448,7 +523,7 @@ function cmdAtlas(args: string[]): void {
   } catch {
     die('No commits yet. Commit something first; the atlas is keyed by commit.');
   }
-  const atlas = loadOrBuildAtlas(root, sha);
+  const atlas = loadOrBuildAtlas(root, sha, atlasExternal(root));
   const st = atlasStats(atlas);
   const edges = Object.entries(st.edges).map(([k, n]) => `${k} ${n}`).join(', ');
   if (sub === 'build') {
@@ -751,6 +826,9 @@ export async function main(argv: string[]): Promise<void> {
       break;
     case 'status':
       cmdStatus(args);
+      break;
+    case 'approve':
+      await cmdApprove(args);
       break;
     case 'stats':
       cmdStats(args);

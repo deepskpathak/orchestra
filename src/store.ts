@@ -1,8 +1,10 @@
 // Filesystem state under <repo>/.orchestra. All writes are atomic (write tmp, rename)
 // so the dashboard and statusline can read concurrently without seeing torn JSON.
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { basename, dirname, join, resolve } from 'node:path';
+import { DEFAULT_RISK_TIERS } from './oversight.ts';
 import type { LedgerRow, OrchestraEvent, ProjectConfig, Run } from './types.ts';
 
 export const DEFAULT_PROJECT_CONFIG: ProjectConfig = {
@@ -23,9 +25,16 @@ export const DEFAULT_PROJECT_CONFIG: ProjectConfig = {
     oracles: { enabled: false, model: null, propertyRuns: 50, seed: 1, differential: true, excludeWorkerTests: true },
     mutation: { enabled: false, floor: 0.6, maxMutants: 20, failBelowFloor: false, mutantTimeoutMs: 60000 },
   },
+  throughput: { footprintScheduling: false, batchMerge: { enabled: false, maxBatch: 4 } },
+  oversight: { riskTiers: DEFAULT_RISK_TIERS },
+  planner: { cascade: { enabled: false, draftModel: 'fast', confidenceThreshold: 0.7 } },
+  budgets: { workerPrompt: { enabled: false, maxTurns: 100 } },
+  bestOfN: { enabled: false, n: 2 },
+  cache: { discipline: { enabled: false, warmFirst: true } },
+  provider: 'claude',
   fastPath: { enabled: false, maxGoalChars: 400 },
-  context: { atlas: { enabled: false, mapTokens: 1024, packs: false, packTokens: 1500 } },
-  learnings: { expiryDays: 0 },
+  context: { atlas: { enabled: false, mapTokens: 1024, packs: false, packTokens: 1500, query: false } },
+  learnings: { expiryDays: 0, graph: false },
   evolve: { every: 3, autoPromote: true, minGain: 0.02, sample: 5, minCases: 5, candidates: 1, promotionRule: 'gain', niMargin: 0.05, minJudgeAgreement: null,
     budgetUsd: 0,
     sequential: { enabled: false, roundSize: 3 },
@@ -103,7 +112,7 @@ export class Store {
 
   config(): ProjectConfig {
     const c = this.readJson<Partial<ProjectConfig>>('config.json', {});
-    return { ...DEFAULT_PROJECT_CONFIG, ...c, judgeTiers: { ...DEFAULT_PROJECT_CONFIG.judgeTiers, ...(c.judgeTiers ?? {}) }, preJudge: { ...DEFAULT_PROJECT_CONFIG.preJudge, ...(c.preJudge ?? {}) }, contrastive: { ...DEFAULT_PROJECT_CONFIG.contrastive, ...(c.contrastive ?? {}) }, fastPath: { ...DEFAULT_PROJECT_CONFIG.fastPath, ...(c.fastPath ?? {}) }, verification: { contracts: { ...DEFAULT_PROJECT_CONFIG.verification.contracts, ...(c.verification?.contracts ?? {}) }, panel: { ...DEFAULT_PROJECT_CONFIG.verification.panel, ...(c.verification?.panel ?? {}) }, agenticJudge: { ...DEFAULT_PROJECT_CONFIG.verification.agenticJudge, ...(c.verification?.agenticJudge ?? {}) }, oracles: { ...DEFAULT_PROJECT_CONFIG.verification.oracles, ...(c.verification?.oracles ?? {}) }, mutation: { ...DEFAULT_PROJECT_CONFIG.verification.mutation, ...(c.verification?.mutation ?? {}) } }, context: { ...DEFAULT_PROJECT_CONFIG.context, ...(c.context ?? {}), atlas: { ...DEFAULT_PROJECT_CONFIG.context.atlas, ...(c.context?.atlas ?? {}) } }, learnings: { ...DEFAULT_PROJECT_CONFIG.learnings!, ...(c.learnings ?? {}) }, evolve: { ...DEFAULT_PROJECT_CONFIG.evolve, ...(c.evolve ?? {}), sequential: { ...DEFAULT_PROJECT_CONFIG.evolve.sequential!, ...(c.evolve?.sequential ?? {}) }, cost: { ...DEFAULT_PROJECT_CONFIG.evolve.cost!, ...(c.evolve?.cost ?? {}) }, cascade: { ...DEFAULT_PROJECT_CONFIG.evolve.cascade!, ...(c.evolve?.cascade ?? {}) }, splits: { ...DEFAULT_PROJECT_CONFIG.evolve.splits!, ...(c.evolve?.splits ?? {}) }, pareto: { ...DEFAULT_PROJECT_CONFIG.evolve.pareto!, ...(c.evolve?.pareto ?? {}) }, regression: { ...DEFAULT_PROJECT_CONFIG.evolve.regression!, ...(c.evolve?.regression ?? {}) } } };
+    return { ...DEFAULT_PROJECT_CONFIG, ...c, judgeTiers: { ...DEFAULT_PROJECT_CONFIG.judgeTiers, ...(c.judgeTiers ?? {}) }, preJudge: { ...DEFAULT_PROJECT_CONFIG.preJudge, ...(c.preJudge ?? {}) }, contrastive: { ...DEFAULT_PROJECT_CONFIG.contrastive, ...(c.contrastive ?? {}) }, fastPath: { ...DEFAULT_PROJECT_CONFIG.fastPath, ...(c.fastPath ?? {}) }, throughput: { ...DEFAULT_PROJECT_CONFIG.throughput!, ...(c.throughput ?? {}), batchMerge: { ...DEFAULT_PROJECT_CONFIG.throughput!.batchMerge, ...(c.throughput?.batchMerge ?? {}) } }, oversight: { ...DEFAULT_PROJECT_CONFIG.oversight!, ...(c.oversight ?? {}), riskTiers: { ...DEFAULT_RISK_TIERS, ...(c.oversight?.riskTiers ?? {}) } }, planner: { ...DEFAULT_PROJECT_CONFIG.planner!, ...(c.planner ?? {}), cascade: { ...DEFAULT_PROJECT_CONFIG.planner!.cascade, ...(c.planner?.cascade ?? {}) } }, budgets: { ...DEFAULT_PROJECT_CONFIG.budgets!, ...(c.budgets ?? {}), workerPrompt: { ...DEFAULT_PROJECT_CONFIG.budgets!.workerPrompt, ...(c.budgets?.workerPrompt ?? {}) } }, bestOfN: { ...DEFAULT_PROJECT_CONFIG.bestOfN!, ...(c.bestOfN ?? {}) }, cache: { ...DEFAULT_PROJECT_CONFIG.cache!, ...(c.cache ?? {}), discipline: { ...DEFAULT_PROJECT_CONFIG.cache!.discipline, ...(c.cache?.discipline ?? {}) } }, verification: { contracts: { ...DEFAULT_PROJECT_CONFIG.verification.contracts, ...(c.verification?.contracts ?? {}) }, panel: { ...DEFAULT_PROJECT_CONFIG.verification.panel, ...(c.verification?.panel ?? {}) }, agenticJudge: { ...DEFAULT_PROJECT_CONFIG.verification.agenticJudge, ...(c.verification?.agenticJudge ?? {}) }, oracles: { ...DEFAULT_PROJECT_CONFIG.verification.oracles, ...(c.verification?.oracles ?? {}) }, mutation: { ...DEFAULT_PROJECT_CONFIG.verification.mutation, ...(c.verification?.mutation ?? {}) } }, context: { ...DEFAULT_PROJECT_CONFIG.context, ...(c.context ?? {}), atlas: { ...DEFAULT_PROJECT_CONFIG.context.atlas, ...(c.context?.atlas ?? {}) } }, learnings: { ...DEFAULT_PROJECT_CONFIG.learnings!, ...(c.learnings ?? {}) }, evolve: { ...DEFAULT_PROJECT_CONFIG.evolve, ...(c.evolve ?? {}), sequential: { ...DEFAULT_PROJECT_CONFIG.evolve.sequential!, ...(c.evolve?.sequential ?? {}) }, cost: { ...DEFAULT_PROJECT_CONFIG.evolve.cost!, ...(c.evolve?.cost ?? {}) }, cascade: { ...DEFAULT_PROJECT_CONFIG.evolve.cascade!, ...(c.evolve?.cascade ?? {}) }, splits: { ...DEFAULT_PROJECT_CONFIG.evolve.splits!, ...(c.evolve?.splits ?? {}) }, pareto: { ...DEFAULT_PROJECT_CONFIG.evolve.pareto!, ...(c.evolve?.pareto ?? {}) }, regression: { ...DEFAULT_PROJECT_CONFIG.evolve.regression!, ...(c.evolve?.regression ?? {}) } } };
   }
 
   // ---- runs ----
@@ -151,6 +160,20 @@ export function findRepoRoot(start: string): string | null {
     const up = dirname(dir);
     if (up === dir) return null;
     dir = up;
+  }
+}
+
+// Like findRepoRoot, but from inside a linked worktree (a task worktree under .orchestra/worktrees) it
+// returns the main checkout, where .orchestra/ lives. Falls back to the plain root when git cannot say.
+export function findMainCheckout(start: string): string | null {
+  const root = findRepoRoot(start);
+  if (!root) return null;
+  try {
+    if (!statSync(join(root, '.git')).isFile()) return root;
+    const common = resolve(root, execFileSync('git', ['rev-parse', '--git-common-dir'], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim());
+    return basename(common) === '.git' ? dirname(common) : root;
+  } catch {
+    return root;
   }
 }
 

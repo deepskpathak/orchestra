@@ -12,6 +12,8 @@ import { alternateWorkerSection, comparePrompt, COMPARE_SCHEMA, contrastApplies,
 import { aggregatePanel, lineageFraming, pairwiseBothOrders, type PanelJudgeVote } from './panel.ts';
 import { isExcludedPath, loadOrBuildAtlas, type Atlas } from './atlas.ts';
 import { buildTaskPack, renderMap } from './atlas-context.ts';
+import { ATLAS_QUERY_HINT } from './atlas-query.ts';
+import { ctagsExec } from './atlas-external.ts';
 import { plannedFiles } from './exploration.ts';
 import { applyContractUpdate, buildContract, contractSha, criteriaForTask, isContractPath, markPassing, unresolvedAmbiguities, type Contract } from './contracts.ts';
 import { analyzeDiff, MONITOR_MARK, type IntegrityFlag } from './integrity.ts';
@@ -21,9 +23,14 @@ import { loadHarness, type Harness } from './harness.ts';
 import { applyLessonEdits, editsFromResponse, expireDomain, formatLearnings, listDomains, normalizeDomain, readAllLearnings, readLearnings, GLOBAL } from './learnings.ts';
 import { buildSandboxPolicy, preflightSandbox, scrubVerifierEnv, scrubWorkerEnv, type ProbeExec } from './sandbox.ts';
 import { newRunId, type Store } from './store.ts';
+import { bisectBatch, canStart, conflictRate, decisionLog, planBatches } from './throughput.ts';
+import { UNKNOWN_REQUESTER, classifyRisk, onlyHeldForApproval, runSatisfaction } from './oversight.ts';
+import { bestOfNAllowed, budgetExhausted, budgetLine, cacheReadShare, planChecks, selectBestByTests, shouldEscalatePlan, type BudgetState, type TestCandidate } from './cost.ts';
+import { DEFAULT_PROVIDER, resolveModel } from './models.ts';
+import { resolveProvider, type ModelProvider } from './provider.ts';
 import { verificationModes } from './outcomes.ts';
 import { AGENTIC_INSTRUCTION, NO_EVIDENCE_NOTE, executedChecksSection, runScenarioChecks, type CheckResult } from './judge-checks.ts';
-import type { ActiveAgent, CriterionResult, OrchestraEvent, PanelRecord, Role, Run, Scenario, Task, Verdict } from './types.ts';
+import type { ActiveAgent, CriterionResult, OrchestraEvent, PanelRecord, ProjectConfig, Role, Run, Scenario, Task, Verdict } from './types.ts';
 
 export interface Ablation {
   scenarios?: boolean; // the judge and contrast comparer see no hidden scenarios
@@ -141,6 +148,7 @@ export function workerPrompt(i: {
   style?: string;
   map?: string; // L0 repo map, shared prefix
   pack?: string; // L1 task pack, body only
+  atlasQuery?: boolean; // L2: mention the atlas query command (context.atlas.query)
 }): BuiltPrompt {
   const { task } = i;
   return {
@@ -151,6 +159,7 @@ export function workerPrompt(i: {
       guidanceSection('TOOL GUIDANCE', i.tools),
       guidanceSection('STYLE', i.style),
       i.map ? `REPOSITORY MAP:\n${i.map}` : '',
+      i.atlasQuery ? ATLAS_QUERY_HINT : '',
     ]
       .filter(Boolean)
       .join('\n\n'),
@@ -204,13 +213,14 @@ export function judgePrompt(i: {
   checklist?: string;
   agentic?: CheckResult[]; // set (even when empty) in agentic mode (W4.2)
   indexed?: boolean; // panel mode: ask each criterion entry for its 1-based `index`, so panel votes line up by position
+  atlasQuery?: boolean; // L2: mention the atlas query command (context.atlas.query)
 }): BuiltPrompt {
   const { task, tests } = i;
   const base = `HIDDEN SCENARIOS for the whole goal (judge only the parts this task is responsible for):\n${i.scenarios
     .map((s) => `- ${s.id}: GIVEN ${s.given} WHEN ${s.when} THEN ${s.then}`)
     .join('\n') || '(none)'}\n\nAlso return criteria: one entry per acceptance criterion, in order, each with pass, score and a short note${i.indexed ? ', plus `index`: its 1-based position in the ACCEPTANCE CRITERIA list' : ''}.`;
   return {
-    prefix: [base, guidanceSection('TOOL GUIDANCE', i.tools), guidanceSection('REVIEW CHECKLIST', i.checklist), i.agentic ? AGENTIC_INSTRUCTION : ''].filter(Boolean).join('\n\n'),
+    prefix: [base, guidanceSection('TOOL GUIDANCE', i.tools), guidanceSection('REVIEW CHECKLIST', i.checklist), i.agentic ? AGENTIC_INSTRUCTION : '', i.atlasQuery ? ATLAS_QUERY_HINT : ''].filter(Boolean).join('\n\n'),
     body: [
       `TASK ${task.id}: ${task.title}\n${task.description}`,
       `ACCEPTANCE CRITERIA:\n${bullets(task.acceptance)}`,
@@ -343,6 +353,10 @@ const PLAN_SCHEMA = {
   required: ['tasks', 'scenarios'],
 };
 
+// W6.3: the cascade draft also reports how sure it is; the strong planner call never sees this field.
+const CONFIDENCE_ASK = 'Also return a numeric top-level "confidence" from 0 to 1: how sure you are that this plan is complete, correctly ordered and has testable acceptance criteria.';
+const withConfidence = (schema: any) => ({ ...schema, properties: { ...schema.properties, confidence: { type: 'number', minimum: 0, maximum: 1 } } });
+
 export const FAST_PLAN_SCHEMA = {
   ...PLAN_SCHEMA,
   properties: { ...PLAN_SCHEMA.properties, tasks: { ...PLAN_SCHEMA.properties.tasks, maxItems: 1 } },
@@ -465,10 +479,12 @@ const TIMEOUT_MS: Record<Role, number> = {
   evolver: 15 * 60_000,
 };
 
+type AgentVariant = NonNullable<NonNullable<AgentRequest['meta']>['variant']>;
+
 export class Conductor {
   readonly run: Run;
   private readonly store: Store;
-  private readonly runner: Runner;
+  private readonly provider: ModelProvider; // W8.1: every agent call goes through the adapter
   private readonly sandboxOpt?: ConductorOptions['sandbox'];
   private readonly scrubEnv: boolean;
   private readonly preflightExec?: ProbeExec;
@@ -483,11 +499,23 @@ export class Conductor {
   private evalLearnings: boolean;
   private integration!: { path: string; branch: string; base: string };
   private mergeChain: Promise<unknown> = Promise.resolve();
+  // Last integration commit whose tests passed. Batch merging parks transient and rejected merge states on
+  // the integration worktree while tests run, so new task worktrees branch from this commit, never from HEAD.
+  private knownGood = '';
+  private readonly inflight = new Map<string, Promise<void>>(); // tasks with an attempt in progress (scheduler)
+  private readonly cfg: ProjectConfig; // snapshot taken at construction for the per-call hot paths (call, budgets, batch flush, atlas hint)
+  private batchQueue: { task: Task; resolve: () => void }[] = []; // W6.2: judged-pass tasks waiting for a batch
+  private readonly mergeReadyAt = new Map<string, number>();
+  private readonly workerUse = new Map<string, { turns: number; usd: number }>(); // W6.5: worker turns and dollars per task, all attempts
+  private cacheWarmed = false; // W6.4: the first worker has started acting, so its prompt prefix is cached
+  private wakeScheduler: () => void = () => {};
+  private readonly warmSignal = new Promise<void>((r) => { this.wakeScheduler = r; });
   private readonly wtRoot: string;
 
   constructor(opts: ConductorOptions) {
     this.store = opts.store;
-    this.runner = opts.runner;
+    this.cfg = opts.store.config();
+    this.provider = resolveProvider(this.cfg.provider, opts.runner);
     this.harness = loadHarness(opts.store, opts.harnessVersion);
     this.onUpdate = opts.onUpdate;
     this.sandboxOpt = opts.sandbox;
@@ -498,7 +526,7 @@ export class Conductor {
     this.evalLearnings = opts.evalLearnings ?? false;
     this.wtRoot = opts.store.path('worktrees');
     const id = (opts.kind === 'eval' ? 'e' : '') + newRunId();
-    const modes = verificationModes(opts.store.config().verification);
+    const modes = verificationModes(this.cfg.verification);
     this.run = {
       id,
       goal: opts.goal,
@@ -510,6 +538,7 @@ export class Conductor {
       costUsd: 0,
       active: [],
       baseRef: opts.baseRef,
+      requestedBy: detectRequester(opts.store.root),
       ...(modes.length ? { verificationModes: modes } : {}),
     };
   }
@@ -524,6 +553,7 @@ export class Conductor {
       this.integration = g.createIntegration(store.root, this.wtRoot, run.id, run.baseRef);
       run.integrationBranch = this.integration.branch;
       run.baseRef = this.integration.base;
+      this.knownGood = this.integration.base;
       this.emit('run.start', `Run started: ${run.goal}`, { harness: run.harness });
       this.save();
 
@@ -532,11 +562,18 @@ export class Conductor {
       run.status = 'running';
       this.save();
       await this.schedule();
+      if (onlyHeldForApproval(run.tasks)) {
+        // W7.1: the run is waiting on a human, not failed. Satisfaction, mutation and learning describe the whole
+        // run, so they wait for `orchestra approve` (which finalises satisfaction and status; see src/approve.ts).
+        run.status = 'awaiting_approval';
+        const held = run.tasks.filter((t) => t.status === 'awaiting_approval').map((t) => t.id);
+        this.emit('log', `Run waits for approval of ${held.join(', ')}; satisfaction, mutation score and learning are deferred`, { held });
+        return run;
+      }
       const mutationFailure = await this.mutationPass();
 
       const merged = run.tasks.filter((t) => t.status === 'merged');
-      const meanScore = merged.length ? merged.reduce((s, t) => s + (t.verdict?.score ?? 0), 0) / merged.length : 0;
-      run.satisfaction = round(meanScore * (merged.length / Math.max(1, run.tasks.length)));
+      run.satisfaction = runSatisfaction(run.tasks);
 
       if (run.kind === 'goal') {
         run.status = 'compounding';
@@ -548,8 +585,9 @@ export class Conductor {
       if (run.status === 'failed' && !run.error) {
         const human = run.tasks.filter((t) => t.status === 'needs_human').length;
         const blocked = run.tasks.filter((t) => t.status === 'blocked').length;
-        const failed = run.tasks.length - merged.length - human - blocked;
-        run.error = `${run.tasks.length - merged.length} of ${run.tasks.length} tasks did not land (${failed} failed, ${blocked} blocked, ${human} need a human)`;
+        const awaiting = run.tasks.filter((t) => t.status === 'awaiting_approval').length;
+        const failed = run.tasks.length - merged.length - human - blocked - awaiting;
+        run.error = `${run.tasks.length - merged.length} of ${run.tasks.length} tasks did not land (${failed} failed, ${blocked} blocked, ${human} need a human${awaiting ? `, ${awaiting} awaiting approval` : ''})`;
       }
     } catch (err) {
       run.status = 'failed';
@@ -559,8 +597,14 @@ export class Conductor {
       run.endedAt = Date.now();
       run.active = [];
       this.cleanup();
+      const rows = this.store.ledgerRows().filter((r) => r.run === run.id);
+      run.conflictRate = round(conflictRate(rows));
+      const share = cacheReadShare(rows);
+      if (share !== undefined) run.cacheReadShare = round(share);
       this.emit('run.end', `Run ${run.status}. satisfaction ${run.satisfaction ?? 0}, cost $${run.costUsd.toFixed(2)}`, {
         satisfaction: run.satisfaction,
+        conflictRate: run.conflictRate,
+        ...(run.cacheReadShare !== undefined ? { cacheReadShare: run.cacheReadShare } : {}),
         branch: run.integrationBranch,
       });
       this.save();
@@ -581,7 +625,7 @@ export class Conductor {
     try {
       const changed = this.mutationOpts?.changedFiles ?? g.changedFiles(this.integration.path, this.integration.base, false);
       const files = changed.filter((f) => /\.(?:[cm]?[jt]s|[jt]sx)$/.test(f) && !/(?:^|\/)(?:tests?|__tests__)\/|\.(?:test|spec)\./.test(f));
-      wt = g.createTaskWorktree(store.root, this.wtRoot, run.id, 'mutation', g.head(this.integration.path));
+      wt = g.createTaskWorktree(store.root, this.wtRoot, run.id, 'mutation', this.knownGood);
       const cwd = wt.path;
       const exec = this.mutationOpts?.exec ?? ((d: string, c: string, t?: number) => g.runTestsAsync(d, c, t, scrubVerifierEnv(process.env)));
       const out = await runMutation({
@@ -641,12 +685,31 @@ export class Conductor {
     });
     const prompt = joinPrompt(built);
 
-    const res = await this.call('planner', undefined, 1, {
-      prompt,
-      cwd: this.integration.path,
-      schema: fp.fast ? FAST_PLAN_SCHEMA : PLAN_SCHEMA,
-      tools: ['Read', 'Grep', 'Glob'],
-    });
+    const schema = fp.fast ? FAST_PLAN_SCHEMA : PLAN_SCHEMA;
+    const ask = (attempt: number, model?: string, draft = false) =>
+      this.call('planner', undefined, attempt, {
+        prompt: draft ? `${prompt}\n\n${CONFIDENCE_ASK}` : prompt,
+        cwd: this.integration.path,
+        schema: draft ? withConfidence(schema) : schema,
+        tools: ['Read', 'Grep', 'Glob'],
+      }, model);
+    let res: AgentResult;
+    const cascade = cfg.planner?.cascade;
+    if (cascade?.enabled) {
+      // W6.3: a cheap model drafts; the harness planner model is called only when the draft is unsure or fails a deterministic check.
+      const draftModel = resolveModel(cascade.draftModel, harness.config.provider ?? DEFAULT_PROVIDER);
+      const draft = await ask(1, draftModel, true);
+      const dOut = draft.ok ? (extractJson(draft) as { tasks?: any[]; confidence?: unknown } | undefined) : undefined;
+      const issues = !draft.ok ? [`draft planner failed: ${draft.error}`] : dOut?.tasks?.length ? planChecks(dOut.tasks) : ['draft plan has no tasks'];
+      const confidence = typeof dOut?.confidence === 'number' ? dOut.confidence : undefined;
+      const decision = shouldEscalatePlan({ confidence, threshold: cascade.confidenceThreshold, issues });
+      this.emit('log', `Planner cascade: ${decision.escalate ? 'escalated to' : 'accepted draft from'} ${decision.escalate ? harness.config.models.planner : draftModel} (${decision.reason})`, { cascade: { draftModel, confidence, escalated: decision.escalate, reason: decision.reason } });
+      // Outcome row for a later router: one per run, scored with the draft's confidence.
+      this.store.ledger({ t: Date.now(), run: run.id, kind: run.kind, harness: harness.version, role: 'planner', attempt: 1, model: draftModel, ok: !decision.escalate, costUsd: 0, durationMs: 0, turns: 0, outcome: decision.escalate ? 'plan_cascade_escalated' : 'plan_cascade_draft_accepted', ...(confidence !== undefined ? { score: confidence } : {}) });
+      res = decision.escalate ? await ask(2) : draft;
+    } else {
+      res = await ask(1);
+    }
     const out = extractJson(res) as { tasks?: any[]; scenarios?: Scenario[]; domain?: unknown; ambiguities?: unknown } | undefined;
     if (!res.ok || !out?.tasks?.length) throw new Error(`Planner failed: ${res.error ?? 'no tasks returned'}`);
 
@@ -680,11 +743,16 @@ export class Conductor {
 
   // Opt-in Repo Atlas: built or loaded once per run at the integration base. Any failure is logged
   // and the run proceeds with the old prompts.
+  // L2: the query command is only mentioned when the atlas is loaded and context.atlas.query is on.
+  private atlasQuery(): boolean {
+    return !!this.atlas && !!this.cfg.context.atlas.query;
+  }
+
   private loadAtlas(): void {
     const cfg = this.store.config().context.atlas;
     if (!cfg.enabled) return;
     try {
-      this.atlas = loadOrBuildAtlas(this.store.root, this.integration.base);
+      this.atlas = loadOrBuildAtlas(this.store.root, this.integration.base, { mode: cfg.external ?? 'off', exec: ctagsExec, log: (m) => this.emit('log', m) });
       this.run.atlasSha = this.atlas.sha;
       this.map = renderMap(this.atlas, this.run.goal, cfg.mapTokens);
       this.emit('log', `Atlas ready at ${this.atlas.sha.slice(0, 8)} (${Object.keys(this.atlas.files).length} files)`);
@@ -709,9 +777,8 @@ export class Conductor {
   }
 
   private async schedule(): Promise<void> {
-    const { run } = this;
+    const { run, inflight } = this;
     const cfg = this.store.config();
-    const inflight = new Map<string, Promise<void>>();
 
     for (;;) {
       if (run.costUsd >= cfg.runBudgetUsd) {
@@ -722,14 +789,29 @@ export class Conductor {
       const ready = run.tasks.filter(
         (t) => (t.status === 'pending' || t.status === 'repair') && !inflight.has(t.id) && t.deps.every((d) => this.task(d)?.status === 'merged'),
       );
-      for (const t of ready.slice(0, Math.max(0, cfg.concurrency - inflight.size))) {
+      // W6.1 single writer: a task with an overlapping footprint waits for the in-flight one to finish.
+      const running = run.tasks.filter((t) => inflight.has(t.id));
+      let slots = Math.max(0, cfg.concurrency - inflight.size);
+      // W6.4: start one worker and let it begin acting (cache warm) before the siblings fan out.
+      const warming = cfg.cache?.discipline.enabled && cfg.cache.discipline.warmFirst && !this.cacheWarmed;
+      if (warming && inflight.size > 0) slots = 0;
+      else if (warming) slots = Math.min(slots, 1);
+      for (const t of ready) {
+        if (slots <= 0) break;
+        if (cfg.throughput?.footprintScheduling && !canStart(t, running)) continue;
+        slots--;
+        running.push(t);
         const p = this.attempt(t)
           .catch((err) => this.fail(t, `internal error: ${(err as Error).message}`))
-          .finally(() => inflight.delete(t.id));
+          .finally(() => {
+            this.warmed();
+            inflight.delete(t.id);
+            this.pokeBatch();
+          });
         inflight.set(t.id, p);
       }
       if (inflight.size === 0) break;
-      await Promise.race(inflight.values());
+      await Promise.race(warming && !this.cacheWarmed ? [...inflight.values(), this.warmSignal] : inflight.values());
     }
     // Anything left pending has an unmet dependency chain.
     for (const t of run.tasks) if (t.status === 'pending' || t.status === 'repair') this.block(t, 'dependency never landed');
@@ -742,7 +824,7 @@ export class Conductor {
     task.attempts += 1;
     task.status = 'running';
     task.startedAt ??= Date.now();
-    const wt = g.createTaskWorktree(store.root, this.wtRoot, this.run.id, task.id, g.head(this.integration.path));
+    const wt = g.createTaskWorktree(store.root, this.wtRoot, this.run.id, task.id, this.knownGood);
     // A contrastive winner B leaves task.worktree on the -b path; retire it before reusing the normal one.
     if (task.worktree && task.worktree !== wt.path) {
       g.removeWorktree(store.root, task.worktree);
@@ -756,10 +838,17 @@ export class Conductor {
 
     const learnings = (this.run.kind === 'eval' && !this.evalLearnings) || this.ablate.learnings ? {} : readAllLearnings(store);
     const others = this.run.tasks.filter((t) => t.id !== task.id).map((t) => `- ${t.id} ${t.title} [${t.status}]`);
+    const depLog = (cfg.throughput?.decisionLog ?? cfg.throughput?.footprintScheduling) ? decisionLog(task.deps.map((d) => this.task(d)).filter((d): d is Task => d?.status === 'merged')) : '';
     const prompt = joinPrompt(
       workerPrompt({
         goal: this.run.goal,
-        learnings: formatLearnings(learnings, 'worker', this.run.domain),
+        learnings: formatLearnings(learnings, 'worker', this.run.domain, undefined, {
+          // Cache discipline: the same prefix for every sibling, so no per-task lesson ordering.
+          footprint: cfg.cache?.discipline.enabled ? [] : (task.footprint?.files ?? []),
+          graph: cfg.learnings?.graph === true,
+          // Eval trials that read the store (the with-lessons ablation arm) still get no code-linked boost.
+          cleanRoom: this.run.kind === 'eval',
+        }),
         testCommand: cfg.testCommand,
         task,
         others,
@@ -768,18 +857,22 @@ export class Conductor {
         style: harness.guidance.style,
         map: this.map || undefined,
         pack: this.taskPack(task),
+        atlasQuery: this.atlasQuery(),
       }),
-    );
+    ) + (depLog ? `\n\n## Decisions from merged dependencies\n${depLog}` : '')
+      + (cfg.budgets?.workerPrompt.enabled ? `\n\n## Budget\n${budgetLine(this.budgetState(task))}` : '');
 
     if (!this.ablate.contrastive && contrastApplies(cfg, task)) return this.attemptContrast(task, wt, base, prompt);
 
-    const work = await this.call('worker', task, task.attempts, {
-      prompt,
-      cwd: wt.path,
-      allowedTools: cfg.allowedTools,
-      disallowedTools: cfg.disallowedTools,
-      permissionMode: cfg.permissionMode,
-    });
+    // W6.4: identical tool lists across siblings, whatever order the config listed them in.
+    const common = { allowedTools: cfg.cache?.discipline.enabled ? [...cfg.allowedTools].sort() : cfg.allowedTools, disallowedTools: cfg.disallowedTools, permissionMode: cfg.permissionMode };
+    // W6.6: extra samples only where an executable verifier exists.
+    const verifier = !!cfg.testCommand || this.scenarios.some((s) => !!s.check?.trim());
+    const n = cfg.bestOfN?.enabled ? bestOfNAllowed({ n: cfg.bestOfN.n, hasExecutableVerifier: verifier }) : 1;
+    if (cfg.bestOfN?.enabled && n === 1 && !verifier) this.emit('log', `${task.id} best-of-n skipped: no test command or scenario check to select with`, undefined, task.id);
+    const work = n > 1
+      ? await this.sampleBest(task, wt, base, n, prompt, common)
+      : await this.call('worker', task, task.attempts, { prompt, cwd: wt.path, ...common });
     g.commitAll(wt.path, `${task.id}: ${task.title} (orchestra attempt ${task.attempts})`);
 
     // A flagged contradiction stops the loop: no judge, no repair, not counted as a failure.
@@ -814,11 +907,17 @@ export class Conductor {
     }
 
     // ---- self-correction ----
+    // W6.5 hard cap: out of worker turns or dollars means no further attempt, whatever attempts remain.
+    if (!verdict.pass && cfg.budgets?.workerPrompt.enabled && budgetExhausted(this.budgetState(task))) {
+      this.ledgerOutcome(task, 'budget_cap');
+      const b = this.budgetState(task);
+      return this.fail(task, `worker budget cap reached (${b.turnsUsed}/${b.maxTurns} turns, $${b.usdSpent.toFixed(2)}/$${b.usdCap.toFixed(2)}). Last issues: ${verdict.issues.join(' | ').slice(0, 200)}`);
+    }
     if (!verdict.pass) return this.repairOrFail(task, verdict.issues.length ? verdict.issues : [verdict.summary]);
 
     task.status = 'merging';
     this.save();
-    await this.enqueueMerge(task);
+    await this.land(task);
   }
 
   // Integrity monitor: analyze the worker's diff and persist the flags. When tests or other grading
@@ -937,7 +1036,7 @@ export class Conductor {
     // Stale leftovers from an earlier pair would make createTaskWorktree reuse them.
     g.removeWorktree(store.root, join(this.wtRoot, this.run.id, idB));
     g.deleteBranch(store.root, `orchestra/${this.run.id}/${idB}`);
-    const wtB = g.createTaskWorktree(store.root, this.wtRoot, this.run.id, idB, g.head(this.integration.path));
+    const wtB = g.createTaskWorktree(store.root, this.wtRoot, this.run.id, idB, this.knownGood);
     const baseB = g.mergeBase(wtB.path, 'HEAD', this.integration.branch);
     this.emit('log', `${task.id} contrastive repair: running attempts A and B in parallel`, undefined, task.id);
     this.save();
@@ -1066,7 +1165,7 @@ export class Conductor {
     }
     task.status = 'merging';
     this.save();
-    await this.enqueueMerge(task);
+    await this.land(task);
   }
 
   private contrastJudgeError(task: Task, wtB: g.Worktree, error: string): void {
@@ -1104,6 +1203,7 @@ export class Conductor {
         tools: this.harness.guidance.tools,
         checklist: this.harness.guidance.checklist,
         indexed: panelOn,
+        atlasQuery: this.atlasQuery(),
         agentic: agentic ? await runScenarioChecks({ cwd, scenarios: this.scenarios, testCommand: cfg.testCommand, testsResult: tests, timeoutMs: agentic.checkTimeoutMs, exec: (d, c, t) => g.runTestsAsync(d, c, t, scrubVerifierEnv(process.env)) }) : undefined,
       });
     const prompt = joinPrompt(built);
@@ -1260,6 +1360,220 @@ export class Conductor {
     return out;
   }
 
+  // W6.5: worker turns and dollars spent on this task across attempts against the caps.
+  private budgetState(task: Task): BudgetState {
+    const u = this.workerUse.get(task.id) ?? { turns: 0, usd: 0 };
+    return { turnsUsed: u.turns, maxTurns: this.cfg.budgets?.workerPrompt.maxTurns ?? 0, usdSpent: u.usd, usdCap: this.harness.config.budgetUsd.worker };
+  }
+
+  // Session caps for the next worker call: what is left of the task budget. Undefined when the feature is off.
+  // `shares` splits what is left between workers that run at the same time (best-of-n), so together they stay inside the cap.
+  private workerCap(task: Task, shares = 1): { turns: number; usd: number } | undefined {
+    if (!this.cfg.budgets?.workerPrompt.enabled) return undefined;
+    const b = this.budgetState(task);
+    return { turns: Math.max(1, Math.floor((b.maxTurns - b.turnsUsed) / shares)), usd: Math.max(0.01, round((b.usdCap - b.usdSpent) / shares, 4)) };
+  }
+
+  private warmed(): void {
+    this.cacheWarmed = true;
+    this.wakeScheduler();
+  }
+
+  // W6.6: n worker samples in separate worktrees, selected by the test command and scenario checks before
+  // the judge sees only the winner. A tie keeps the first sample. Sample 1 is the task worktree itself.
+  private async sampleBest(task: Task, wt: g.Worktree, base: string, n: number, prompt: string, common: Pick<AgentRequest, 'allowedTools' | 'disallowedTools' | 'permissionMode'>): Promise<AgentResult> {
+    const { store } = this;
+    const cfg = store.config();
+    const trees: g.Worktree[] = [wt];
+    try {
+      for (let i = 2; i <= n; i++) {
+        const id = `${task.id}-s${i}`;
+        g.removeWorktree(store.root, join(this.wtRoot, this.run.id, id));
+        g.deleteBranch(store.root, `orchestra/${this.run.id}/${id}`);
+        trees.push(g.createTaskWorktree(store.root, this.wtRoot, this.run.id, id, this.knownGood));
+      }
+      this.emit('log', `${task.id} best-of-${n}: running ${n} worker samples in parallel`, undefined, task.id);
+      this.save();
+      // The samples run together and each spends from the same task budget, so each gets 1/n of what is left.
+      // allSettled: one sample that throws must not discard the others or skip the cleanup below.
+      const settled = await Promise.allSettled(trees.map((w, i) => this.call('worker', task, task.attempts, { prompt, cwd: w.path, ...common }, undefined, i === 0 ? undefined : (`s${i + 1}` as AgentVariant), trees.length)));
+      const works: AgentResult[] = settled.map((r, i) => {
+        if (r.status === 'fulfilled') return r.value;
+        const error = `sample ${i + 1} crashed: ${(r.reason as Error)?.message ?? r.reason}`;
+        this.emit('log', `${task.id} best-of-${n}: ${error}`, undefined, task.id);
+        return { ok: false, text: '', costUsd: 0, turns: 0, durationMs: 0, error };
+      });
+      const checks = this.scenarios.filter((s) => s.check?.trim()).map((s) => s.check!);
+      const cands: (TestCandidate & { index: number })[] = [];
+      for (let i = 0; i < trees.length; i++) {
+        g.commitAll(trees[i].path, `${task.id}: ${task.title} (orchestra attempt ${task.attempts}, sample ${i + 1})`);
+        if (!works[i].ok || !g.hasChangesSince(trees[i].path, base)) continue;
+        const tests = cfg.testCommand ? await g.runTestsAsync(trees[i].path, cfg.testCommand, undefined, scrubVerifierEnv(process.env)) : undefined;
+        let passed = 0;
+        for (const c of checks) if ((await g.runTestsAsync(trees[i].path, c, undefined, scrubVerifierEnv(process.env))).ok) passed++;
+        cands.push({ index: i, id: String(i), testsPassed: tests ? (tests.ok ? 1 : 0) : 0, testsTotal: tests ? 1 : 0, distinguishingPasses: passed });
+      }
+      const winner = (cands.length ? (selectBestByTests(cands) ?? cands[0]) : undefined)?.index ?? 0;
+      this.emit('log', `${task.id} best-of-${n}: sample ${winner + 1} selected${cands.length ? ` (${cands.map((c) => `#${c.index + 1} tests ${c.testsPassed}/${c.testsTotal}, checks ${c.distinguishingPasses}`).join('; ')})` : ' (no sample produced a change)'}`, { bestOfN: { n, winner: winner + 1, candidates: cands } }, task.id);
+      this.ledgerOutcome(task, 'best_of_n');
+      if (winner !== 0) g.resetTo(wt.path, g.head(trees[winner].path));
+      return works[winner];
+    } finally {
+      for (const t of trees.slice(1)) {
+        g.removeWorktree(store.root, t.path);
+        g.deleteBranch(store.root, t.branch);
+      }
+    }
+  }
+
+  // Judged-pass task: risk-tier gate (W7.1), then the merge queue (per task, or batched W6.2).
+  private land(task: Task): Promise<void> {
+    const cfg = this.store.config();
+    this.mergeReadyAt.set(task.id, Date.now());
+    const tiers = cfg.oversight?.riskTiers;
+    if (tiers?.enabled && task.worktree) {
+      const base = g.mergeBase(task.worktree, 'HEAD', this.integration.branch);
+      const diff = g.diffSince(task.worktree, base, Infinity);
+      const diffLines = diff.split('\n').filter((l) => /^[+-]/.test(l) && !/^(\+\+\+|---)/.test(l)).length;
+      const risk = classifyRisk({ changedFiles: g.changedFiles(task.worktree, base), diffLines, deterministicGreen: task.verdict?.testsPassed === true }, tiers);
+      task.risk = risk;
+      if (risk.tier === 'high') {
+        task.status = 'awaiting_approval';
+        task.approval = { requestedAt: Date.now() };
+        this.emit('task.approval', `${task.id} is high risk and waits for \`orchestra approve ${this.run.id} ${task.id} --by <name>\`: ${risk.reasons.join('; ')}`, { risk }, task.id);
+        this.save();
+        return Promise.resolve();
+      }
+    }
+    return cfg.throughput?.batchMerge.enabled ? this.enqueueBatch(task) : this.enqueueMerge(task);
+  }
+
+  private enqueueBatch(task: Task): Promise<void> {
+    return new Promise<void>((resolve) => {
+      this.batchQueue.push({ task, resolve });
+      this.pokeBatch();
+    });
+  }
+
+  // Flush once the queue is full or every in-flight attempt is already waiting in it, so disjoint
+  // tasks that finish around the same time share one post-merge test run.
+  private pokeBatch(): void {
+    const max = this.cfg.throughput?.batchMerge.maxBatch ?? 4;
+    const q = this.batchQueue.length;
+    if (!q || (q < max && q < this.inflight.size)) return;
+    const items = this.batchQueue;
+    this.batchQueue = [];
+    const job = this.mergeChain.then(() => this.mergeBatches(items));
+    this.mergeChain = job.catch(() => undefined);
+  }
+
+  private async mergeBatches(items: { task: Task; resolve: () => void }[]): Promise<void> {
+    const max = this.cfg.throughput?.batchMerge.maxBatch ?? 4;
+    try {
+      for (const ids of planBatches(items.map((i) => i.task), max)) {
+        const batch = ids.map((id) => items.find((i) => i.task.id === id)!.task);
+        try {
+          await this.mergeBatch(batch);
+        } catch (err) {
+          for (const t of batch) if (t.status === 'merging') this.fail(t, `internal error: ${(err as Error).message}`);
+          g.resetTo(this.integration.path, this.knownGood);
+        }
+      }
+    } finally {
+      for (const i of items) i.resolve();
+    }
+  }
+
+  // Merge a disjoint batch, run the post-merge tests once, bisect on failure. Bad tasks are reset out
+  // and go to repair; good ones stay merged.
+  private async mergeBatch(batch: Task[]): Promise<void> {
+    const cfg = this.store.config();
+    const ip = this.integration.path;
+    const before = g.head(ip);
+    const footprints = new Map(batch.map((t) => [t.id, this.footprint(t)]));
+    const mergeAll = (tasks: Task[]): Task[] => {
+      g.resetTo(ip, before);
+      const failed: Task[] = [];
+      for (const t of tasks) if (!g.merge(ip, t.branch!, `Merge ${t.id}: ${t.title}`).ok) failed.push(t);
+      return failed;
+    };
+    const conflicted = mergeAll(batch);
+    for (const t of conflicted) {
+      this.ledgerOutcome(t, 'conflict');
+      g.resetTo(t.worktree!, before);
+      this.repairOrFail(t, ['Your previous change conflicted with work merged by other tasks. Re-implement the task on top of the latest code.']);
+    }
+    let landing = batch.filter((t) => !conflicted.includes(t));
+    if (landing.length && cfg.testCommand) {
+      const byId = new Map(landing.map((t) => [t.id, t]));
+      // Failing output per task: the last (smallest) failing run that included it, so repair notes never carry
+      // the tail of an unrelated passing run.
+      const failTails = new Map<string, string>();
+      const res = await bisectBatch(landing.map((t) => t.id), async (ids) => {
+        if (mergeAll(ids.map((id) => byId.get(id)!)).length) return false;
+        const r = await g.runTestsAsync(ip, cfg.testCommand!);
+        if (!r.ok) for (const id of ids) failTails.set(id, r.tail);
+        return r.ok;
+      });
+      this.emit('log', `batch of ${landing.length} tested in ${res.testRuns} post-merge run(s); ${res.bad.length} bad`, { batch: landing.map((t) => t.id), bad: res.bad });
+      const bad = landing.filter((t) => res.bad.includes(t.id));
+      landing = landing.filter((t) => !res.bad.includes(t.id));
+      // The good halves were tested apart; test the union once so an interaction between them cannot land untested.
+      if (bad.length && landing.length > 1) {
+        const settled = await this.settleUnion(landing, mergeAll, ip, cfg.testCommand);
+        landing = settled.kept;
+        for (const [id, tail] of settled.tails) failTails.set(id, tail);
+      } else if (bad.length) mergeAll(landing);
+      // With nothing bad the first run tested the whole landing set and nothing has touched the worktree since,
+      // so HEAD is the commit that was tested. Re-merging would build a different, untested one.
+      const dropped = batch.filter((t) => !conflicted.includes(t) && !landing.includes(t) && !bad.includes(t));
+      bad.push(...dropped);
+      for (const t of bad) {
+        g.resetTo(t.worktree!, before);
+        this.repairOrFail(t, [`After merging with other tasks the test suite fails. Re-implement on the latest code. Output tail:\n${(failTails.get(t.id) ?? '').slice(-1200)}`]);
+      }
+    }
+    this.knownGood = g.head(ip);
+    for (const t of landing) this.markMerged(t, footprints.get(t.id));
+  }
+
+  // Test the landing set as a whole. If it fails, add tasks one at a time and drop any that break the
+  // cumulative set (rare path, at most one run per task). Returns the kept tasks and, for each dropped one,
+  // the output of the run that rejected it.
+  private async settleUnion(landing: Task[], mergeAll: (tasks: Task[]) => Task[], ip: string, cmd: string): Promise<{ kept: Task[]; tails: Map<string, string> }> {
+    const tails = new Map<string, string>();
+    if (mergeAll(landing).length === 0) {
+      const r = await g.runTestsAsync(ip, cmd);
+      if (r.ok) return { kept: landing, tails };
+      for (const t of landing) tails.set(t.id, r.tail);
+    }
+    const kept: Task[] = [];
+    let inPlace = false; // the worktree holds exactly `kept`, as last tested
+    for (const t of landing) {
+      const conflicts = mergeAll([...kept, t]).length;
+      const r = conflicts === 0 ? await g.runTestsAsync(ip, cmd) : undefined;
+      if (r?.ok) {
+        kept.push(t);
+        inPlace = true;
+      } else {
+        tails.set(t.id, r ? r.tail : 'It conflicts with the other tasks of the batch.');
+        inPlace = false;
+      }
+    }
+    if (!inPlace) mergeAll(kept);
+    return { kept, tails };
+  }
+
+  private markMerged(task: Task, footprint?: { planned: string[]; changed: string[]; declared?: string[] }): void {
+    task.status = 'merged';
+    task.endedAt = Date.now();
+    task.mergeWaitMs = Date.now() - (this.mergeReadyAt.get(task.id) ?? Date.now());
+    this.markCriteriaPassing(task);
+    this.ledgerOutcome(task, 'merged', footprint);
+    this.emit('task.merged', `${task.id} merged (attempt ${task.attempts})`, { mergeWaitMs: task.mergeWaitMs }, task.id);
+    this.save();
+  }
+
   // Refinery: merges are serialized; post-merge tests guard the integration branch.
   private enqueueMerge(task: Task): Promise<void> {
     const job = this.mergeChain.then(() => this.mergeOne(task));
@@ -1286,12 +1600,8 @@ export class Conductor {
         return this.repairOrFail(task, [`After merging with other tasks the test suite fails. Re-implement on the latest code. Output tail:\n${t.tail.slice(-1200)}`]);
       }
     }
-    task.status = 'merged';
-    task.endedAt = Date.now();
-    this.markCriteriaPassing(task);
-    this.ledgerOutcome(task, 'merged', footprint);
-    this.emit('task.merged', `${task.id} merged (attempt ${task.attempts})`, undefined, task.id);
-    this.save();
+    this.knownGood = g.head(ip);
+    this.markMerged(task, footprint);
   }
 
   // Passive: planned files are repo paths named in the task text, so the metric means the same with
@@ -1458,8 +1768,9 @@ export class Conductor {
     return out;
   }
 
-  private async call(role: Role, task: Task | undefined, attempt: number, req: Omit<AgentRequest, 'role' | 'system' | 'model' | 'budgetUsd'>, modelOverride?: string, variant?: 'a' | 'b'): Promise<AgentResult> {
+  private async call(role: Role, task: Task | undefined, attempt: number, req: Omit<AgentRequest, 'role' | 'system' | 'model' | 'budgetUsd'>, modelOverride?: string, variant?: AgentVariant, capShares = 1): Promise<AgentResult> {
     const { run, harness } = this;
+    const cap = role === 'worker' && task ? this.workerCap(task, capShares) : undefined;
     const sfx = variant ? `-${variant}` : '';
     const model = modelOverride ?? harness.config.models[role];
     const agent: ActiveAgent = {
@@ -1476,27 +1787,40 @@ export class Conductor {
     this.emit('agent.start', `${role} started${task ? ` on ${task.id}` : ''} (${model})`, undefined, task?.id, role);
     this.save();
     let lastSave = 0;
-    const res = await this.runner({
-      ...req,
-      ...this.isolation(role, req.cwd),
-      role,
-      model,
-      system: harness.prompts[role],
-      budgetUsd: harness.config.budgetUsd[role],
-      timeoutMs: TIMEOUT_MS[role],
-      logFile: this.store.path('runs', run.id, 'logs', `${task?.id ?? 'run'}-${role}-${attempt}${sfx}.jsonl`),
-      meta: { task: task?.id, attempt, run: run.id, variant },
-      onAction: (action) => {
-        agent.lastAction = action;
-        if (!action.startsWith('says:')) agent.tools += 1;
-        this.emit('agent.action', action, undefined, task?.id, role);
-        if (Date.now() - lastSave > 200) {
-          lastSave = Date.now();
-          this.save();
-        }
-      },
-    });
+    let res: AgentResult;
+    try {
+      res = await this.provider.run({
+        ...req,
+        ...this.isolation(role, req.cwd),
+        role,
+        model,
+        system: harness.prompts[role],
+        budgetUsd: cap ? cap.usd : harness.config.budgetUsd[role],
+        ...(cap ? { maxTurns: cap.turns } : {}),
+        timeoutMs: TIMEOUT_MS[role],
+        logFile: this.store.path('runs', run.id, 'logs', `${task?.id ?? 'run'}-${role}-${attempt}${sfx}.jsonl`),
+        meta: { task: task?.id, attempt, run: run.id, variant },
+        onAction: (action) => {
+          agent.lastAction = action;
+          if (role === 'worker' && !this.cacheWarmed) this.warmed();
+          if (!action.startsWith('says:')) agent.tools += 1;
+          this.emit('agent.action', action, undefined, task?.id, role);
+          if (Date.now() - lastSave > 200) {
+            lastSave = Date.now();
+            this.save();
+          }
+        },
+      });
+    } catch (e) {
+      // A runner that throws must not leave a phantom active agent behind.
+      run.active = run.active.filter((a) => a !== agent);
+      throw e;
+    }
     run.active = run.active.filter((a) => a !== agent);
+    if (role === 'worker' && task) {
+      const u = this.workerUse.get(task.id) ?? { turns: 0, usd: 0 };
+      this.workerUse.set(task.id, { turns: u.turns + res.turns, usd: u.usd + res.costUsd });
+    }
     run.costUsd = round(run.costUsd + res.costUsd, 4);
     if (task) task.costUsd = round(task.costUsd + res.costUsd, 4);
     this.store.ledger({
@@ -1621,6 +1945,14 @@ export function normalizeTasks(raw: any[]): Task[] {
   return tasks;
 }
 
+// Who asked for the run: ORCHESTRA_REQUESTER, else git user.name, else "unknown" (W7.1).
+function detectRequester(root: string): string {
+  const env = process.env.ORCHESTRA_REQUESTER?.trim();
+  if (env) return env;
+  const r = spawnSync('git', ['config', 'user.name'], { cwd: root, encoding: 'utf8' });
+  return (r.status === 0 && r.stdout.trim()) || UNKNOWN_REQUESTER;
+}
+
 function round(n: number, dp = 3): number {
   const f = 10 ** dp;
   return Math.round(n * f) / f;
@@ -1629,3 +1961,4 @@ function round(n: number, dp = 3): number {
 export async function runGoal(opts: ConductorOptions): Promise<Run> {
   return new Conductor(opts).execute();
 }
+
