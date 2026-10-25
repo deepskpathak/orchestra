@@ -136,8 +136,8 @@ export function deleteBranch(root: string, branch: string): void {
   tryGit(root, 'branch', '-D', branch);
 }
 
-export function runTests(cwd: string, command: string, timeoutMs = 10 * 60_000): { ok: boolean; exit: number | null; tail: string } {
-  const r = spawnSync('sh', ['-c', command], { cwd, encoding: 'utf8', timeout: timeoutMs, env: { ...process.env, CI: '1' } });
+export function runTests(cwd: string, command: string, timeoutMs = 10 * 60_000, env: Record<string, string | undefined> = process.env): { ok: boolean; exit: number | null; tail: string } {
+  const r = spawnSync('sh', ['-c', command], { cwd, encoding: 'utf8', timeout: timeoutMs, env: { ...env, CI: '1' } });
   const out = `${r.stdout ?? ''}${r.stderr ?? ''}`;
   const tail = out.length > 4000 ? '...' + out.slice(-4000) : out;
   if (r.error) return { ok: false, exit: null, tail: `${r.error.message}\n${tail}` };

@@ -44,3 +44,7 @@ deny-list backstop only.
 
 CI has no docker. The tests use a pure `dockerArgs` builder, an injected detector, and a spawn shim, so they pass without it.
 The backend has not been run against a real docker daemon in this repo's tests.
+
+## Verification commands are not sandboxed
+
+Oracle tests and probes (`verification.oracles`), agentic scenario `check` commands (`verification.agenticJudge`) and mutation runs (`verification.mutation`) execute worker-written code as plain child processes of the orchestrator. They are not routed through the worker sandbox wrapper: the oracle files live outside the worktree the wrapper mounts, and the docker image is only guaranteed to hold the `claude` CLI. What they do get is a scrubbed environment: the push and publish credentials `--sandbox` strips from workers, plus `ANTHROPIC_*` and `CLAUDE_*`. PATH, HOME and other variables are kept. Filesystem and network access are not confined for these commands, so treat them like the test command and only enable them on repos you would run tests for.

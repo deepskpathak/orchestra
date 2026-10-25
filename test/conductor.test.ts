@@ -950,6 +950,33 @@ test('agentic judge: failing scenario check and its exit code reach the judge pr
   assert.match(judge.prompt, /tests: `true` PASSED \(exit 0\)/);
 });
 
+test('agentic judge: scenario checks run with a scrubbed env, so credentials never reach worker code or the judge prompt', async () => {
+  const seen: AgentRequest[] = [];
+  const base = fakeRunner({ failFirstAttemptOf: [] });
+  const runner: Runner = async (req) => {
+    seen.push(req);
+    if (req.role === 'planner') {
+      return { ok: true, text: '', costUsd: 0, turns: 1, durationMs: 1, structured: { tasks: [{ id: 'T1', title: 'a', description: 'a', acceptance: ['c1'], deps: [] }], scenarios: [{ id: 'S1', given: 'g', when: 'w', then: 't', check: 'echo "tok=[$GH_TOKEN][$ANTHROPIC_API_KEY]"' }] } };
+    }
+    return base(req);
+  };
+  const saved = { GH_TOKEN: process.env.GH_TOKEN, ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY };
+  process.env.GH_TOKEN = 'secret-gh';
+  process.env.ANTHROPIC_API_KEY = 'secret-model';
+  try {
+    const store = tempRepo({ concurrency: 1, verification: { ...DEFAULT_PROJECT_CONFIG.verification, agenticJudge: { enabled: true, checkTimeoutMs: 20000 } } });
+    await runGoal({ store, runner, goal: 'g' });
+  } finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+  const judge = seen.find((r) => r.role === 'judge')!;
+  assert.match(judge.prompt, /tok=\[\]\[\]/);
+  assert.doesNotMatch(judge.prompt, /secret-/);
+});
+
 test('agentic judge + panel: majority verdict keeps per-criterion evidence so passes are not flagged', () => {
   const crit = (evidence?: string) => [{ criterion: 'c1', pass: true, score: 1, ...(evidence ? { evidence } : {}) }];
   const raws = [

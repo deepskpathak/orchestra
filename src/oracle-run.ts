@@ -7,6 +7,7 @@ import { existsSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import * as g from './git.ts';
+import { scrubVerifierEnv } from './sandbox.ts';
 import { differential, gradingTestFiles, oracleVerdict, workerOwnedTests, type DifferentialResult, type RunOutput } from './oracles.ts';
 
 export const DEFAULT_TEST_GLOBS = ['test/**', 'tests/**', '**/__tests__/**', '**/*.test.*', '**/*.spec.*'];
@@ -41,7 +42,10 @@ export interface OracleEnv {
 }
 
 // NODE_TEST_CONTEXT makes a nested `node --test` report to the parent runner and exit 0, so drop it.
-const envFor = (target: string, o: OracleEnv) => ({ ...process.env, NODE_TEST_CONTEXT: undefined, CI: '1', ORACLE_TARGET: target, ORACLE_SEED: String(o.seed), ORACLE_RUNS: String(o.propertyRuns) });
+// Oracle files and the worker code they import run as plain child processes, outside any agent sandbox,
+// so they get the scrubbed env: no push, publish or model credentials. Limitation: the filesystem and
+// network are not confined here even when the worker sandbox is on (see docs/isolation.md).
+const envFor = (target: string, o: OracleEnv) => ({ ...scrubVerifierEnv(process.env), NODE_TEST_CONTEXT: undefined, CI: '1', ORACLE_TARGET: target, ORACLE_SEED: String(o.seed), ORACLE_RUNS: String(o.propertyRuns) });
 
 export function runOracleTests(tree: string, files: string[], o: OracleEnv, timeoutMs = 120_000): { ok: boolean; tail: string } {
   const r = spawnSync(process.execPath, ['--test', ...files], { cwd: tree, encoding: 'utf8', timeout: timeoutMs, env: envFor(tree, o) });

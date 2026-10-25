@@ -166,6 +166,15 @@ export function scrubWorkerEnv(env: Record<string, string | undefined>): Record<
   return out;
 }
 
+// Env for orchestrator-run commands that execute worker-written code (oracle tests and probes, scenario
+// checks, mutation runs). Those processes are not model sessions, so on top of the push and publish
+// credentials scrubWorkerEnv removes they get no model credentials either. PATH, HOME and the rest stay.
+export function scrubVerifierEnv(env: Record<string, string | undefined>): Record<string, string | undefined> {
+  const out = scrubWorkerEnv(env);
+  for (const k of Object.keys(out)) if (k.startsWith('ANTHROPIC_') || k.startsWith('CLAUDE_')) delete out[k];
+  return out;
+}
+
 // ---------- pre-flight self-test (W5.2) ----------
 
 export interface ProbeExecResult {

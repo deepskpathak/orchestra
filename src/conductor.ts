@@ -19,7 +19,7 @@ import { mutationScore, runMutation } from './mutation.ts';
 import { listOracleFiles, runOracles, type OracleOutcome } from './oracle-run.ts';
 import { loadHarness, type Harness } from './harness.ts';
 import { applyLessonEdits, editsFromResponse, expireDomain, formatLearnings, listDomains, normalizeDomain, readAllLearnings, readLearnings, GLOBAL } from './learnings.ts';
-import { buildSandboxPolicy, preflightSandbox, scrubWorkerEnv, type ProbeExec } from './sandbox.ts';
+import { buildSandboxPolicy, preflightSandbox, scrubVerifierEnv, scrubWorkerEnv, type ProbeExec } from './sandbox.ts';
 import { newRunId, type Store } from './store.ts';
 import { verificationModes } from './outcomes.ts';
 import { AGENTIC_INSTRUCTION, NO_EVIDENCE_NOTE, executedChecksSection, runScenarioChecks, type CheckResult } from './judge-checks.ts';
@@ -511,7 +511,7 @@ export class Conductor {
       const files = changed.filter((f) => /\.(?:[cm]?[jt]s|[jt]sx)$/.test(f) && !/(?:^|\/)(?:tests?|__tests__)\/|\.(?:test|spec)\./.test(f));
       wt = g.createTaskWorktree(store.root, this.wtRoot, run.id, 'mutation', g.head(this.integration.path));
       const cwd = wt.path;
-      const exec = this.mutationOpts?.exec ?? ((d: string, c: string) => g.runTests(d, c));
+      const exec = this.mutationOpts?.exec ?? ((d: string, c: string) => g.runTests(d, c, undefined, scrubVerifierEnv(process.env)));
       const out = runMutation({
         files,
         max: cfg.maxMutants,
@@ -954,7 +954,7 @@ export class Conductor {
         diff: g.diffSince(cwd, base),
         tools: this.harness.guidance.tools,
         checklist: this.harness.guidance.checklist,
-        agentic: agentic ? runScenarioChecks({ cwd, scenarios: this.scenarios, testCommand: cfg.testCommand, testsResult: tests, timeoutMs: agentic.checkTimeoutMs, exec: (d, c, t) => g.runTests(d, c, t) }) : undefined,
+        agentic: agentic ? runScenarioChecks({ cwd, scenarios: this.scenarios, testCommand: cfg.testCommand, testsResult: tests, timeoutMs: agentic.checkTimeoutMs, exec: (d, c, t) => g.runTests(d, c, t, scrubVerifierEnv(process.env)) }) : undefined,
       });
     const prompt = joinPrompt(built);
     const oracle = await this.oraclePass(task, cwd, base);
