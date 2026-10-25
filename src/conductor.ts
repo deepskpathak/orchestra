@@ -684,7 +684,7 @@ export class Conductor {
     const cfg = this.store.config().context.atlas;
     if (!cfg.enabled) return;
     try {
-      this.atlas = loadOrBuildAtlas(this.store.root, this.integration.base);
+      this.atlas = loadOrBuildAtlas(this.store.root, this.integration.base, { mode: cfg.external ?? 'off', exec: ctagsExec, log: (m) => this.emit('log', m) });
       this.run.atlasSha = this.atlas.sha;
       this.map = renderMap(this.atlas, this.run.goal, cfg.mapTokens);
       this.emit('log', `Atlas ready at ${this.atlas.sha.slice(0, 8)} (${Object.keys(this.atlas.files).length} files)`);
@@ -1628,4 +1628,11 @@ function round(n: number, dp = 3): number {
 
 export async function runGoal(opts: ConductorOptions): Promise<Run> {
   return new Conductor(opts).execute();
+}
+
+// Real exec for the optional ctags probe: stdout on success, throws when the binary is missing or fails.
+function ctagsExec(cmd: string, args: string[], cwd: string): string {
+  const r = spawnSync(cmd, args, { cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 60_000 });
+  if (r.error || r.status !== 0) throw new Error(r.error?.message ?? `${cmd} exited ${r.status}`);
+  return r.stdout;
 }

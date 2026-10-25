@@ -132,7 +132,7 @@ ORCHESTRA_RUNNER=fake orchestra run "Add a health endpoint"
 | `orchestra stats` | Factory health per harness version |
 | `orchestra evolve` | Propose, evaluate and maybe promote a better harness |
 | `orchestra learnings [--domain <slug>]` | Show what the factory has learned in this repo (`--domain` filters to one domain, `global` for cross-domain lessons) |
-| `orchestra atlas build` / `orchestra atlas stats` | Build or refresh the Repo Atlas code graph for HEAD (`.orchestra/atlas/<sha>.json`), or show its file, symbol and edge counts. Work even when `context.atlas.enabled` is false; `.orchestra/`, `.env*` and secret files are never indexed |
+| `orchestra atlas build` / `orchestra atlas stats` | Build or refresh the Repo Atlas code graph for HEAD (`.orchestra/atlas/<sha>.json`), or show its file, symbol and edge counts. Work even when `context.atlas.enabled` is false (optional ctags or graphify inputs: see `context.atlas.external` in [configuration](configuration.md)); `.orchestra/`, `.env*` and secret files are never indexed |
 | `orchestra evals` | List Factory Eval cases (`--regression`, `--tag <t>`) |
 | `orchestra evals add` | Add a case for a goal you choose, or harvest a failed run with `--from-run <id> --fix <commit>` |
 | `orchestra evals audit` | Check cases and lessons for solution leakage (exit 1 on findings) |
