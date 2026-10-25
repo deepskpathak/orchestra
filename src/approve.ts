@@ -19,6 +19,7 @@ export async function approveTask(store: Store, runId: string, taskId: string, b
   const path = store.path('worktrees', runId, `_approve-${taskId}`);
   rmSync(path, { recursive: true, force: true });
   g.git(store.root, 'worktree', 'add', '-q', path, run.integrationBranch);
+  const before = g.head(path);
   try {
     const m = g.merge(path, task.branch, `Merge ${task.id}: ${task.title} (approved by ${by})`);
     if (!m.ok) throw new Error(`${taskId} conflicts with the integration branch: ${m.detail.slice(0, 300)}`);
@@ -28,7 +29,9 @@ export async function approveTask(store: Store, runId: string, taskId: string, b
       if (!t.ok) throw new Error(`post-merge tests fail, ${taskId} not merged:\n${t.tail.slice(-800)}`);
     }
   } catch (e) {
+    // A completed merge is already committed, so `merge --abort` is a no-op: restore the tip.
     g.tryGit(path, 'merge', '--abort');
+    g.resetTo(path, before);
     g.removeWorktree(store.root, path);
     throw e;
   }

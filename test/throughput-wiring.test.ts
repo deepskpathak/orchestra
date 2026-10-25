@@ -191,3 +191,31 @@ test('orchestra approve (CLI): requester, agent names and missing --by are refus
     else process.env.ORCHESTRA_REQUESTER = prev;
   }
 });
+
+test('approve: failing post-merge tests restore the integration branch and keep the task held', async () => {
+  const prev = process.env.ORCHESTRA_REQUESTER;
+  process.env.ORCHESTRA_REQUESTER = 'alice';
+  try {
+    const store = tempRepo({ oversight: { riskTiers: { ...DEFAULT_PROJECT_CONFIG.oversight!.riskTiers, enabled: true } } });
+    const inner = planned([t('T1', ['infra/main.tf'])], {}, 0);
+    const runner: Runner = async (req) => {
+      const res = await inner(req);
+      if (req.role === 'worker') {
+        const { mkdirSync, writeFileSync } = await import('node:fs');
+        mkdirSync(`${req.cwd}/infra`, { recursive: true });
+        writeFileSync(`${req.cwd}/infra/main.tf`, 'resource {}\n');
+      }
+      return res;
+    };
+    const run = await runGoal({ store, runner, goal: 'g' });
+    const tip = () => execFileSync('git', ['rev-parse', run.integrationBranch!], { cwd: store.root, encoding: 'utf8' }).trim();
+    const before = tip();
+    store.writeJson('config.json', { ...store.config(), testCommand: '! test -f infra/main.tf' });
+    await assert.rejects(() => approveTask(store, run.id, 'T1', 'bob'), /post-merge tests fail/);
+    assert.equal(tip(), before, 'the failing merge is not left on the integration branch');
+    assert.equal(store.loadRun(run.id)!.tasks[0].status, 'awaiting_approval');
+  } finally {
+    if (prev === undefined) delete process.env.ORCHESTRA_REQUESTER;
+    else process.env.ORCHESTRA_REQUESTER = prev;
+  }
+});
