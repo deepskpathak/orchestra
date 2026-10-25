@@ -159,7 +159,9 @@ export function extractTsJs(text: string): Extracted {
     if (symbols.length >= MAX_SYMBOLS_PER_FILE) break;
   }
   const imports: ImportRef[] = [];
-  for (const m of text.matchAll(/\b(import|export)\s+(type\s+)?([^'"`;]*?)\s*from\s*['"]([^'"]+)['"]/g)) {
+  // Anchored per statement (line start) and the clause cannot contain another import/export keyword,
+  // so in semicolon-less code an earlier `export ...` cannot swallow the next import.
+  for (const m of text.matchAll(/^[ \t]*(import|export)\s+(type\s+)?((?:(?!\b(?:import|export)\b)[^'"`;])*?)\s*from\s*['"]([^'"]+)['"]/gm)) {
     const clause = m[3];
     const names: string[] = [];
     const brace = /\{([^}]*)\}/.exec(clause);

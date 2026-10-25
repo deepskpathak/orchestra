@@ -263,3 +263,8 @@ test('loadOrBuildAtlas diffs only a few ancestor candidates and prunes the cache
   const inc = loadOrBuildAtlas(dir, shas[19]);
   assert.deepEqual(inc, buildAtlas(dir, shas[19]));
 });
+
+test('extractTsJs keeps imports separate in semicolon-less code', () => {
+  const ex = extractTsJs("export const A = 1\nimport b from './b'\nexport { c } from './c'\nimport d from \"./d\"\nexport * from './e'\n");
+  assert.deepEqual(ex.imports.map((i) => [i.spec, i.names.join(',')]), [['./b', 'default'], ['./c', 'c'], ['./d', 'default'], ['./e', '']]);
+});
