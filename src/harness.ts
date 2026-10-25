@@ -25,6 +25,21 @@ export interface Harness {
   guidance: { tools: string; style: string; checklist: string };
 }
 
+// Per-case results of a validation that stopped early (budget cap or infrastructure failure), kept so the next
+// cycle resumes the same candidate instead of paying for the finished replays again.
+export interface PartialSide {
+  detail: Record<string, number>;
+  passed: Record<string, boolean>;
+  cost: number;
+  infraFailureRate: number;
+  monitorFireRate?: number;
+}
+export interface PartialEval {
+  incumbent: string; // the incumbent these results were measured against; unusable once it changes
+  inc: PartialSide;
+  cand: PartialSide;
+}
+
 export interface ArchiveEntry {
   version: string;
   parent: string | null;
@@ -39,6 +54,7 @@ export interface ArchiveEntry {
   stepping?: boolean; // kept on the Pareto front as a stepping stone, not promoted
   holdoutScore?: number | null; // locked holdout score; never shown to the evolver
   evalInfraRate?: number; // share of the last full eval's replays that failed on infrastructure
+  partialEval?: PartialEval; // validation interrupted mid-way; resumed by the next evolve cycle, cleared once complete
   rejectKind?: 'smoke'; // rejected by the cheap smoke test (structural check or one replay), not by a measured comparison; not fed back to the evolver as a 'do not repeat'
   status: 'promoted' | 'candidate' | 'rejected' | 'retired';
 }

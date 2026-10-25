@@ -235,6 +235,46 @@ test('budgetUsd halts the cycle with a budget reason and stays within one replay
   assert.ok(s.planners() < 12, 'not all validation replays ran');
 });
 
+test('budget stop saves the finished validation results and the next cycle resumes the same candidate without repaying', async () => {
+  const { store, cases } = repoWith(6, { budgetUsd: 4 });
+  const s = spy(fakeRunner());
+  const first = await evolve(store, s.runner, quiet);
+  assert.equal(first.promoted, false);
+  assert.match(first.reason, /budget cap.*next cycle resumes v2/);
+  const partial = readArchive(store).find((a) => a.version === 'v2')!.partialEval!;
+  const done = Object.keys(partial.cand.detail);
+  assert.ok(done.length >= 1 && done.length < cases.length, `${done.length} of ${cases.length} cases finished`);
+  assert.equal(partial.incumbent, 'v1');
+  assert.deepEqual(Object.keys(partial.inc.detail).sort(), done.sort());
+  assert.equal(readArchive(store).find((a) => a.version === 'v2')!.status, 'candidate');
+  const paid = evalRuns(store).length;
+  assert.equal(paid, 2 * done.length);
+
+  // Lift the cap: the next cycle resumes v2, asks no evolver and replays only the remaining cases.
+  store.writeJson('config.json', { ...store.config(), evolve: { ...store.config().evolve, budgetUsd: 0 } });
+  const second = await evolve(store, s.runner, quiet);
+  assert.equal(s.evolverPrompts.length, 1, 'no new variant was proposed');
+  assert.equal(readArchive(store).some((a) => a.version === 'v3'), false);
+  assert.equal(second.candidate, 'v2');
+  assert.equal(evalRuns(store).length, 2 * cases.length, 'every case replayed exactly once per side across both cycles');
+  const v2 = readArchive(store).find((a) => a.version === 'v2')!;
+  assert.equal(v2.partialEval, undefined);
+  assert.equal(Object.keys(v2.evalDetail!).length, cases.length);
+  assert.equal(second.promoted, true, second.reason);
+});
+
+test('a partial result for a different incumbent is not resumed', async () => {
+  const { store } = repoWith(4, {});
+  writeArchive(store, [
+    { version: 'v1', parent: null, createdAt: 0, rationale: 'seed', evalScore: null, status: 'promoted' },
+    { version: 'v2', parent: 'v1', createdAt: 1, rationale: 'old', evalScore: null, status: 'candidate', partialEval: { incumbent: 'v0', inc: { detail: { 'case-00': 1 }, passed: { 'case-00': true }, cost: 1, infraFailureRate: 0 }, cand: { detail: { 'case-00': 1 }, passed: { 'case-00': true }, cost: 1, infraFailureRate: 0 } } },
+  ]);
+  execFileSync('cp', ['-R', store.path('harness', 'v1'), store.path('harness', 'v2')]);
+  const s = spy(fakeRunner());
+  await evolve(store, s.runner, quiet);
+  assert.equal(s.evolverPrompts.length, 1, 'a fresh variant was proposed');
+});
+
 test('sequential: stops before all validation cases once the CI settles', async () => {
   const { store } = repoWith(6, { sequential: { enabled: true, roundSize: 2 }, minCases: 2 });
   const s = spy(fakeRunner());

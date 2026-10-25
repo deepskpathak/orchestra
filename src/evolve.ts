@@ -22,6 +22,7 @@ import {
   readArchive,
   updateArchive,
   writeArchive,
+  type PartialSide,
 } from './harness.ts';
 import { archiveHistory, archivePatches, selectParent } from './pareto.ts';
 import { regressionSuite } from './evalcases.ts';
@@ -509,23 +510,34 @@ async function evolveCycle(store: Store, runner: Runner, log: (msg: string) => v
   };
   const noOutcome = (reason: string): EvolveOutcome => ({ candidate: null, incumbent, candidateScore: null, incumbentScore: null, promoted: false, reason });
 
-  log(`Evolver studying ${incumbent} (${m.find((x) => x.version === incumbent)?.runs ?? 0} runs of evidence)`);
-  const proposal = await askEvolver(prompt);
-  if (!proposal.variants.length) return noOutcome(`Evolver produced no variant: ${proposal.res.error ?? 'empty'}`);
-
+  // A validation cut short by the budget cap (or an infrastructure failure) saved its finished per-case results on
+  // the candidate. While the incumbent is unchanged the next cycle resumes that candidate rather than proposing a
+  // new one and paying for the same replays again.
+  const pending = readArchive(store)
+    .filter((a) => a.partialEval && a.status === 'candidate' && a.partialEval.incumbent === incumbent && existsSync(store.path('harness', a.version)))
+    .sort((a, b) => b.createdAt - a.createdAt)[0];
   const created: { version: string; rationale: string; files: string[] }[] = [];
-  let guardError = '';
-  for (const out of proposal.variants.slice(0, k)) {
-    try {
-      const version = createVariant(store, parent, Object.fromEntries(out.files!.map((f) => [f.name, f.content])), out.rationale ?? '');
-      created.push({ version, rationale: out.rationale ?? '', files: out.files!.map((f) => f.name) });
-      log(`Candidate ${version}: ${out.rationale}`);
-    } catch (err) {
-      guardError = (err as Error).message;
-      log(`Variant rejected by guard: ${guardError}`);
+  if (pending) {
+    created.push({ version: pending.version, rationale: pending.rationale, files: [] });
+    log(`Resuming ${pending.version} against ${incumbent}: ${Object.keys(pending.partialEval!.cand.detail).length} validation case(s) already evaluated`);
+  } else {
+    log(`Evolver studying ${incumbent} (${m.find((x) => x.version === incumbent)?.runs ?? 0} runs of evidence)`);
+    const proposal = await askEvolver(prompt);
+    if (!proposal.variants.length) return noOutcome(`Evolver produced no variant: ${proposal.res.error ?? 'empty'}`);
+
+    let guardError = '';
+    for (const out of proposal.variants.slice(0, k)) {
+      try {
+        const version = createVariant(store, parent, Object.fromEntries(out.files!.map((f) => [f.name, f.content])), out.rationale ?? '');
+        created.push({ version, rationale: out.rationale ?? '', files: out.files!.map((f) => f.name) });
+        log(`Candidate ${version}: ${out.rationale}`);
+      } catch (err) {
+        guardError = (err as Error).message;
+        log(`Variant rejected by guard: ${guardError}`);
+      }
     }
+    if (!created.length) return noOutcome(`Variant rejected by guard: ${guardError}`);
   }
-  if (!created.length) return noOutcome(`Variant rejected by guard: ${guardError}`);
   let candidate = created[0].version;
 
   // A sample below minCases could never promote (a stale config.json can pin an old, smaller sample).
@@ -564,7 +576,7 @@ async function evolveCycle(store: Store, runner: Runner, log: (msg: string) => v
   const wouldCross = (n: number) => budget.wouldExceed(replays ? (evalSpend / replays) * n : 0);
   const budgetStop = (where: string): EvolveOutcome => ({ candidate, incumbent, candidateScore: null, incumbentScore: null, promoted: false, reason: `budget cap $${budget.cap} reached (spent $${round(budget.spent)}) ${where}; candidate kept for later evaluation` });
 
-  if (cascade) {
+  if (cascade && !pending) {
     // Step 1: smoke test. Guards and checklist intact (against the parent and the live incumbent), then one replay of
     // the first case. A failed replay only rejects when the incumbent passes that case: the case may be hard or
     // flaky, and a variant is not at fault for failing what the incumbent fails too.
@@ -628,7 +640,7 @@ async function evolveCycle(store: Store, runner: Runner, log: (msg: string) => v
     // Step 3: full validation for the top finalists only.
     finalists = cleared.sort((a, b) => b.gain - a.gain).slice(0, Math.max(1, Math.floor(cascade.finalists))).map((x) => x.version);
     candidate = finalists[0];
-  } else if (k > 1) {
+  } else if (k > 1 && !pending) {
     // Screen cheaply: the newest min(2, sample) cases. Drop any candidate that fails a case the incumbent passes.
     const screen = cases.slice(-Math.max(1, Math.min(2, cfg.evolve.sample)));
     log(`Screening ${created.length} candidate(s) on ${screen.length} case(s)`);
@@ -684,12 +696,37 @@ async function evolveCycle(store: Store, runner: Runner, log: (msg: string) => v
   // every case; otherwise it runs in rounds and may stop early (settled CI) or at the budget cap.
   const seq = cfg.evolve.sequential?.enabled ? cfg.evolve.sequential : null;
   const roundSize = seq ? Math.max(1, Math.floor(seq.roundSize)) : budget.unlimited ? cases.length : 1;
+  const side = (r: EvalResult): PartialSide => ({ detail: r.detail, passed: r.passed, cost: r.cost, infraFailureRate: r.infraFailureRate, ...(r.monitorFireRate === undefined ? {} : { monitorFireRate: r.monitorFireRate }) });
+  // Saved results restricted to cases still in the sample; their cost was paid in an earlier cycle (reused).
+  const restore = (saved: PartialSide, ids: Set<string>): EvalResult => {
+    const detail = Object.fromEntries(Object.entries(saved.detail).filter(([id]) => ids.has(id)));
+    const total = Object.keys(saved.detail).length;
+    const cost = total ? round(saved.cost * (Object.keys(detail).length / total)) : 0;
+    const vals = Object.values(detail);
+    return { score: vals.length ? round(vals.reduce((a, b) => a + b, 0) / vals.length) : 0, detail, passed: Object.fromEntries(Object.entries(saved.passed).filter(([id]) => ids.has(id))), cost, infraFailureRate: saved.infraFailureRate, reused: ids.size, reusedCost: cost, ...(saved.monitorFireRate === undefined ? {} : { monitorFireRate: saved.monitorFireRate }) };
+  };
   const validate = async (version: string) => {
     const parts: { r: EvalResult; n: number }[] = [];
     const evaluated: EvalCase[] = [];
     let note = '';
     let halted = false;
-    const rounds = roundsOf(cases, roundSize);
+    let todo = cases;
+    const saved = version === pending?.version ? pending.partialEval : undefined;
+    if (saved) {
+      const ids = new Set(Object.keys(saved.cand.detail).filter((id) => id in saved.inc.detail && cases.some((c) => c.id === id)));
+      if (ids.size) {
+        parts.push({ r: restore(saved.inc, ids), n: ids.size }, { r: restore(saved.cand, ids), n: ids.size });
+        evaluated.push(...cases.filter((c) => ids.has(c.id)));
+        todo = cases.filter((c) => !ids.has(c.id));
+      }
+    }
+    const rounds = roundsOf(todo, roundSize);
+    const sides = () => ({ inc: combine(parts.filter((_, x) => x % 2 === 0)), cand: combine(parts.filter((_, x) => x % 2 === 1)) });
+    const keepPartial = () => {
+      if (!parts.length) return;
+      const { inc, cand } = sides();
+      updateArchive(store, version, { partialEval: { incumbent, inc: side(inc), cand: side(cand) } });
+    };
     for (let ri = 0; ri < rounds.length; ri++) {
       const rc = rounds[ri];
       if (wouldCross(2 * rc.length)) {
@@ -700,7 +737,10 @@ async function evolveCycle(store: Store, runner: Runner, log: (msg: string) => v
       const pr = await evaluatePair(store, runner, incumbent, version, rc, onRun, undefined, incCache);
       spent(pr.incumbent, rc.length);
       spent(pr.candidate, rc.length);
-      if (pr.incumbent.inconclusive) return { version, error: pr.incumbent.inconclusive, rates: `infra failure rate: incumbent ${pr.incumbent.infraFailureRate}, candidate ${pr.candidate.infraFailureRate}` };
+      if (pr.incumbent.inconclusive) {
+        keepPartial();
+        return { version, error: pr.incumbent.inconclusive, rates: `infra failure rate: incumbent ${pr.incumbent.infraFailureRate}, candidate ${pr.candidate.infraFailureRate}` };
+      }
       parts.push({ r: pr.incumbent, n: rc.length }, { r: pr.candidate, n: rc.length });
       evaluated.push(...rc);
       // Never stop before the minCases floor: an early stop on fewer cases than the floor could not promote anyway.
@@ -713,21 +753,22 @@ async function evolveCycle(store: Store, runner: Runner, log: (msg: string) => v
         }
       }
     }
-    if (halted) return { version, halted: true as const, done: evaluated.length };
-    const incParts = parts.filter((_, x) => x % 2 === 0);
-    const candParts = parts.filter((_, x) => x % 2 === 1);
-    return { version, cases: evaluated, note, inc: combine(incParts), cand: combine(candParts) };
+    if (halted) {
+      keepPartial();
+      return { version, halted: true as const, done: evaluated.length, kept: parts.length > 0 };
+    }
+    return { version, cases: evaluated, note, ...sides() };
   };
 
   const judged: { version: string; cases: EvalCase[]; inc: EvalResult; cand: EvalResult; better: boolean; reason: string; gain: number; note: string }[] = [];
   for (const v of finalists) {
     const res = await validate(v);
     if ('error' in res) return inconclusive(v, incumbent, res.error!, res.rates);
-    if ('halted' in res) return budgetStop(`after ${res.done} of ${cases.length} validation cases`);
+    if ('halted' in res) return budgetStop(`after ${res.done} of ${cases.length} validation cases${res.kept ? `; the finished results are saved and the next cycle resumes ${v}` : ''}`);
     const { inc, cand } = res;
     // Leave the archive as it was on inconclusive: a half-run evaluation must not mark anything rejected.
     updateArchive(store, incumbent, { evalScore: inc.score, evalDetail: inc.detail, evalInfraRate: inc.infraFailureRate });
-    updateArchive(store, v, { evalScore: cand.score, evalDetail: cand.detail, validationDetail: cand.detail, evalInfraRate: cand.infraFailureRate });
+    updateArchive(store, v, { evalScore: cand.score, evalDetail: cand.detail, validationDetail: cand.detail, evalInfraRate: cand.infraFailureRate, partialEval: undefined });
     const regressions = res.cases.filter((c) => inc.passed[c.id] && !cand.passed[c.id]).map((c) => c.id);
     const monitor = { incumbent: inc.monitorFireRate ?? 0, candidate: cand.monitorFireRate ?? 0 };
     const decision = promotionDecision({
