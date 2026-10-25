@@ -6,7 +6,7 @@ import * as g from './git.ts';
 import type { Store } from './store.ts';
 import type { Run } from './types.ts';
 
-export function approveTask(store: Store, runId: string, taskId: string, by: string): Run {
+export async function approveTask(store: Store, runId: string, taskId: string, by: string): Promise<Run> {
   const run = store.loadRun(runId);
   if (!run) throw new Error(`unknown run "${runId}"`);
   const task = run.tasks.find((t) => t.id === taskId);
@@ -24,7 +24,7 @@ export function approveTask(store: Store, runId: string, taskId: string, by: str
     if (!m.ok) throw new Error(`${taskId} conflicts with the integration branch: ${m.detail.slice(0, 300)}`);
     const cmd = store.config().testCommand;
     if (cmd) {
-      const t = g.runTests(path, cmd);
+      const t = await g.runTestsAsync(path, cmd);
       if (!t.ok) throw new Error(`post-merge tests fail, ${taskId} not merged:\n${t.tail.slice(-800)}`);
     }
   } catch (e) {

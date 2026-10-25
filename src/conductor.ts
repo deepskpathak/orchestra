@@ -1387,13 +1387,29 @@ export class Conductor {
       this.emit('log', `batch of ${landing.length} tested in ${res.testRuns} post-merge run(s); ${res.bad.length} bad`, { batch: landing.map((t) => t.id), bad: res.bad });
       const bad = landing.filter((t) => res.bad.includes(t.id));
       landing = landing.filter((t) => !res.bad.includes(t.id));
-      mergeAll(landing);
+      // The good halves were tested apart; test the union once so an interaction between them cannot land untested.
+      if (bad.length && landing.length > 1) landing = await this.settleUnion(landing, mergeAll, ip, cfg.testCommand);
+      else mergeAll(landing);
+      const dropped = batch.filter((t) => !conflicted.includes(t) && !landing.includes(t) && !bad.includes(t));
+      bad.push(...dropped);
       for (const t of bad) {
         g.resetTo(t.worktree!, before);
         this.repairOrFail(t, [`After merging with other tasks the test suite fails. Re-implement on the latest code. Output tail:\n${tail.slice(-1200)}`]);
       }
     }
     for (const t of landing) this.markMerged(t, footprints.get(t.id));
+  }
+
+  // Test the landing set as a whole. If it fails, add tasks one at a time and drop any that break the
+  // cumulative set (rare path, at most one run per task).
+  private async settleUnion(landing: Task[], mergeAll: (tasks: Task[]) => Task[], ip: string, cmd: string): Promise<Task[]> {
+    if (mergeAll(landing).length === 0 && (await g.runTestsAsync(ip, cmd)).ok) return landing;
+    const kept: Task[] = [];
+    for (const t of landing) {
+      if (mergeAll([...kept, t]).length === 0 && (await g.runTestsAsync(ip, cmd)).ok) kept.push(t);
+    }
+    mergeAll(kept);
+    return kept;
   }
 
   private markMerged(task: Task, footprint?: { planned: string[]; changed: string[]; declared?: string[] }): void {

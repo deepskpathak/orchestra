@@ -111,12 +111,13 @@ test('risk tiers: infra task awaits approval; requester and agents cannot approv
     assert.equal(run.tasks[0].risk?.tier, 'high');
     assert.ok(store.events(run.id).some((e) => e.kind === 'task.approval'));
 
-    assert.throws(() => approveTask(store, run.id, 'T1', 'alice'), /requester/);
-    assert.throws(() => approveTask(store, run.id, 'T1', 'ALICE '), /requester/);
-    assert.throws(() => approveTask(store, run.id, 'T1', 'judge'), /agent/);
+    await assert.rejects(() => approveTask(store, run.id, 'T1', 'alice'), /requester/);
+    await assert.rejects(() => approveTask(store, run.id, 'T1', 'ALICE '), /requester/);
+    await assert.rejects(() => approveTask(store, run.id, 'T1', 'judge'), /agent/);
+    await assert.rejects(() => approveTask(store, run.id, 'T1', 'worker'), /agent/);
     assert.equal(store.loadRun(run.id)!.tasks[0].status, 'awaiting_approval');
 
-    const done = approveTask(store, run.id, 'T1', 'bob');
+    const done = await approveTask(store, run.id, 'T1', 'bob');
     assert.equal(done.tasks[0].status, 'merged');
     assert.equal(done.status, 'done');
     const files = execFileSync('git', ['ls-tree', '-r', '--name-only', run.integrationBranch!], { cwd: store.root, encoding: 'utf8' });
@@ -136,4 +137,57 @@ test('config: partial throughput and oversight blocks merge with defaults', () =
   assert.equal(c.throughput!.batchMerge.enabled, true);
   assert.equal(c.oversight!.riskTiers.enabled, true);
   assert.equal(c.oversight!.riskTiers.largeDiffLines, 400);
+});
+
+test('batch merge: an interaction between two individually good halves never lands untested', async () => {
+  const store = tempRepo({ concurrency: 4, throughput: { footprintScheduling: true, batchMerge: { enabled: true, maxBatch: 4 } } });
+  // Suite fails only when T1 and T3 are both on the integration branch.
+  store.writeJson('config.json', { ...store.config(), testCommand: '! (test -f fake/T1.txt && test -f fake/T3.txt)' });
+  const ids = ['T1', 'T2', 'T3', 'T4'];
+  const run = await runGoal({ store, runner: planned(ids.map((id) => t(id, [`fake/${id}.txt`])), {}, 5), goal: 'g' });
+  const merged = (id: string) => run.tasks.find((x) => x.id === id)!.status === 'merged';
+  assert.equal(merged('T1') && merged('T3'), false, 'T1 and T3 must not both land');
+  assert.equal(merged('T2'), true);
+  const files = execFileSync('git', ['ls-tree', '-r', '--name-only', run.integrationBranch!], { cwd: store.root, encoding: 'utf8' });
+  assert.equal(/fake\/T1\.txt/.test(files) && /fake\/T3\.txt/.test(files), false);
+});
+
+test('orchestra approve (CLI): requester, agent names and missing --by are refused; another human merges', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const { join } = await import('node:path');
+  const { PACKAGE_ROOT } = await import('../src/harness.ts');
+  const prev = process.env.ORCHESTRA_REQUESTER;
+  process.env.ORCHESTRA_REQUESTER = 'alice';
+  try {
+    const store = tempRepo({ oversight: { riskTiers: { ...DEFAULT_PROJECT_CONFIG.oversight!.riskTiers, enabled: true } } });
+    const inner = planned([t('T1', ['infra/main.tf'])], {}, 0);
+    const runner: Runner = async (req) => {
+      const res = await inner(req);
+      if (req.role === 'worker') {
+        const { mkdirSync, writeFileSync } = await import('node:fs');
+        mkdirSync(`${req.cwd}/infra`, { recursive: true });
+        writeFileSync(`${req.cwd}/infra/main.tf`, 'resource {}\n');
+      }
+      return res;
+    };
+    const run = await runGoal({ store, runner, goal: 'g' });
+    const cli = join(PACKAGE_ROOT, 'bin', 'orchestra.ts');
+    const approve = (...a: string[]) => spawnSync(process.execPath, [cli, 'approve', run.id, 'T1', ...a], { cwd: store.root, encoding: 'utf8', timeout: 60000 });
+    for (const who of ['alice', 'worker', 'judge']) {
+      const r = approve('--by', who);
+      assert.equal(r.status, 1, `${who}: ${r.stdout}${r.stderr}`);
+      assert.match(r.stderr, /approval refused/);
+    }
+    const noBy = approve();
+    assert.equal(noBy.status, 1);
+    assert.match(noBy.stderr, /usage: orchestra approve/);
+    assert.equal(store.loadRun(run.id)!.tasks[0].status, 'awaiting_approval');
+    const ok = approve('--by', 'bob');
+    assert.equal(ok.status, 0, ok.stdout + ok.stderr);
+    assert.match(ok.stdout, /approved by bob/);
+    assert.equal(store.loadRun(run.id)!.tasks[0].status, 'merged');
+  } finally {
+    if (prev === undefined) delete process.env.ORCHESTRA_REQUESTER;
+    else process.env.ORCHESTRA_REQUESTER = prev;
+  }
 });

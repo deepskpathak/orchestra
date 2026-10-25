@@ -385,14 +385,14 @@ async function cmdServe(args: string[]): Promise<void> {
   process.on('SIGINT', () => void web.close().then(() => process.exit(0)));
 }
 
-function cmdApprove(args: string[]): void {
+async function cmdApprove(args: string[]): Promise<void> {
   const store = storeOrDie();
   const i = args.indexOf('--by');
   const by = i >= 0 ? args[i + 1] : undefined;
   const [runId, taskId] = args.filter((a, j) => !a.startsWith('--') && j !== i + 1);
   if (!runId || !taskId || !by) die('usage: orchestra approve <runId> <taskId> --by <name>');
   try {
-    const run = approveTask(store, runId, taskId, by);
+    const run = await approveTask(store, runId, taskId, by);
     console.log(`${taskId} approved by ${by} and merged into ${run.integrationBranch}.`);
   } catch (e) {
     die((e as Error).message);
@@ -807,7 +807,7 @@ export async function main(argv: string[]): Promise<void> {
       cmdStatus(args);
       break;
     case 'approve':
-      cmdApprove(args);
+      await cmdApprove(args);
       break;
     case 'stats':
       cmdStats(args);
