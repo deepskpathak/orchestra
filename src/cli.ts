@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { claudeRunner, preflight, type Runner } from './agent.ts';
 import { importGrades, readBenchRows, renderCalibration, storeCalibration, writeSample } from './calibration.ts';
-import { ABLATION_ARMS, SINGLE_SESSION_ARM, ablationTable, loadArms, renderAblationTable, summarize, renderSummary, runBench, verifyOracles } from './bench.ts';
+import { ABLATION_ARMS, SINGLE_SESSION_ARM, ablationTable, defaultReference, loadArms, renderAblationTable, summarize, renderSummary, runBench, verifyOracles } from './bench.ts';
 import { atlasStats, loadOrBuildAtlas } from './atlas.ts';
 import { runGoal } from './conductor.ts';
 import { explorationMetrics, renderExploration } from './exploration.ts';
@@ -59,6 +59,7 @@ Usage:
       --arms a,b --goals g1,g2 --repeats N   Choose arms (default bench/arms.json), goals and repeats per goal
       --suite <dir>              Use another suite directory (default: the bundled bench/)
       --ablations                Run the built-in arms full, -scenarios, -repair, -learnings, -contrastive, -evolver plus a matched-cost single-session baseline
+      --reference <arm>          Reference arm for the paired table (default full, else the first arm run); also applies to --report
       --report                   Summarise all stored bench results, with judge agreement and kappa per harness version
       --verify-oracles           Check that every goal's oracle passes its own hidden check (exit 1 otherwise)
   orchestra bench calibrate --sample N [--seed S]
@@ -567,9 +568,19 @@ async function cmdBench(args: string[]): Promise<void> {
     const store = storeOrDie();
     const rows = readBenchRows(store);
     if (rows.length) console.log(`${renderSummary(summarize(rows))}\n`);
-    // Pairs are (goal, repeat), so only the latest bench that ran a "full" arm is compared.
-    const latest = rows.filter((r) => r.arm === 'full').map((r) => r.bench).sort().pop();
-    if (latest) console.log(`Ablations in ${latest} (paired versus full, 95% CI clustered by goal)\n${renderAblationTable(ablationTable(rows.filter((r) => r.bench === latest)))}\n`);
+    // Pairs are (goal, repeat), so only the latest bench that ran the reference arm (and at least one other) is compared.
+    const wanted = flag(args, '--reference');
+    const eligible = (b: string) => {
+      const rs = rows.filter((r) => r.bench === b);
+      const ref = wanted ?? defaultReference(rs);
+      return !!ref && rs.some((r) => r.arm === ref) && rs.some((r) => r.arm !== ref);
+    };
+    const latest = [...new Set(rows.map((r) => r.bench))].sort().reverse().find(eligible);
+    if (latest) {
+      const rs = rows.filter((r) => r.bench === latest);
+      const ref = wanted ?? defaultReference(rs)!;
+      console.log(`Ablations in ${latest} (paired versus ${ref}, 95% CI clustered by goal)\n${renderAblationTable(ablationTable(rs, ref), ref)}\n`);
+    }
     console.log(renderCalibration(storeCalibration(store)));
     return;
   }
@@ -580,7 +591,8 @@ async function cmdBench(args: string[]): Promise<void> {
   const arms = args.includes('--ablations') ? [...ABLATION_ARMS, SINGLE_SESSION_ARM] : loadArms(suite, named);
   const res = await runBench({ store, runner: runner(), suite, arms, goals, repeats, onRow: (r) => console.log(`${r.arm} ${r.goal} #${r.repeat}: ${r.checkPass ? 'pass' : 'fail'} ($${r.costUsd.toFixed(3)})`) });
   console.log(`\n${renderSummary(res.summary)}`);
-  if (args.includes('--ablations')) console.log(`\n${renderAblationTable(ablationTable(res.rows))}`);
+  const ref = flag(args, '--reference') ?? defaultReference(res.rows);
+  if (ref && (args.includes('--ablations') || arms.length > 1)) console.log(`\n${renderAblationTable(ablationTable(res.rows, ref), ref)}`);
   console.log(`\nresults: ${join(res.dir, 'results.jsonl')}\nsummary: ${join(res.dir, 'summary.json')}`);
 }
 
