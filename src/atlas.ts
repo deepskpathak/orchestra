@@ -39,6 +39,7 @@ export interface Extracted {
 
 export interface FileEntry extends Extracted {
   lang: string;
+  goModule?: string; // go.mod only: the declared module path
   size: number;
   lines: number;
 }
@@ -321,7 +322,12 @@ export function extractFile(path: string, text: string): FileEntry {
   else if (lang === 'java') ex = extractJava(text);
   else if (lang === 'rust') ex = extractRust(text);
   const lines = text ? text.split('\n').length - (text.endsWith('\n') ? 1 : 0) : 0;
-  return { lang, size: Buffer.byteLength(text), lines, symbols: ex.symbols, imports: ex.imports };
+  const entry: FileEntry = { lang, size: Buffer.byteLength(text), lines, symbols: ex.symbols, imports: ex.imports };
+  if (baseName(path) === 'go.mod') {
+    const gm = /^module\s+("?)([^\s"]+)\1/m.exec(text);
+    if (gm) entry.goModule = gm[2];
+  }
+  return entry;
 }
 
 // ---- import resolution and graph ----
@@ -343,13 +349,18 @@ interface Index {
   files: Set<string>;
   suffix: Map<string, string[]>; // every path suffix (by segment) to the files ending with it
   dirs: Map<string, string[]>; // dir -> files directly in it
+  dirSuffix: Map<string, string[]>; // every dir suffix (by segment) to the dirs ending with it
+  goMods: { dir: string; mod: string }[]; // go.mod locations, deepest first
 }
 
-function buildIndex(paths: string[]): Index {
+function buildIndex(entries: Record<string, FileEntry>, paths: string[]): Index {
   const files = new Set(paths);
   const suffix = new Map<string, string[]>();
   const dirs = new Map<string, string[]>();
+  const goMods: { dir: string; mod: string }[] = [];
   for (const p of paths) {
+    const gm = entries[p].goModule;
+    if (gm && baseName(p) === 'go.mod') goMods.push({ dir: posixDir(p), mod: gm });
     const segs = p.split('/');
     for (let i = 0; i < segs.length; i++) {
       const s = segs.slice(i).join('/');
@@ -362,7 +373,18 @@ function buildIndex(paths: string[]): Index {
     if (list) list.push(p);
     else dirs.set(d, [p]);
   }
-  return { files, suffix, dirs };
+  const dirSuffix = new Map<string, string[]>();
+  for (const d of dirs.keys()) {
+    const segs = d ? d.split('/') : [];
+    for (let i = 0; i < segs.length; i++) {
+      const sfx = segs.slice(i).join('/');
+      const list = dirSuffix.get(sfx);
+      if (list) list.push(d);
+      else dirSuffix.set(sfx, [d]);
+    }
+  }
+  goMods.sort((a, b) => b.dir.length - a.dir.length || (a.dir < b.dir ? -1 : 1));
+  return { files, suffix, dirs, dirSuffix, goMods };
 }
 
 const JS_EXTS = ['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs'];
@@ -414,12 +436,17 @@ function resolvePython(from: string, imp: ImportRef, idx: Index): string[] {
   return out;
 }
 
+// Go imports resolve only inside the repo: through the go.mod module path when one matches, else (no
+// go.mod declared at all) by a directory suffix of at least two segments. Stdlib and external
+// imports therefore produce no edge.
 function resolveGo(from: string, imp: ImportRef, idx: Index): string[] {
+  const goFiles = (dir: string) => (idx.dirs.get(dir) ?? []).filter((f) => f.endsWith('.go') && !f.endsWith('_test.go') && f !== from).sort();
+  const mod = idx.goMods.find((m) => imp.spec === m.mod || imp.spec.startsWith(m.mod + '/'));
+  if (mod) return goFiles(normalizeJoin(mod.dir, imp.spec.slice(mod.mod.length)));
+  if (idx.goMods.length) return [];
   const parts = imp.spec.split('/');
-  for (let k = parts.length; k >= 1; k--) {
-    const dir = parts.slice(parts.length - k).join('/');
-    const hits = [...idx.dirs.entries()].filter(([d]) => d === dir || d.endsWith('/' + dir));
-    const files = hits.flatMap(([, f]) => f).filter((f) => f.endsWith('.go') && !f.endsWith('_test.go') && f !== from);
+  for (let k = parts.length; k >= 2; k--) {
+    const files = (idx.dirSuffix.get(parts.slice(parts.length - k).join('/')) ?? []).flatMap(goFiles);
     if (files.length) return files.sort();
   }
   return [];
@@ -477,7 +504,7 @@ const GENERIC_STEMS = new Set(['index', 'main', 'mod', 'lib', 'init', '__init__'
 // Pure: derives nodes and edges from per-file extractions. Deterministic ordering.
 export function buildGraph(files: Record<string, FileEntry>): { nodes: AtlasNode[]; edges: AtlasEdge[] } {
   const paths = Object.keys(files).sort();
-  const idx = buildIndex(paths);
+  const idx = buildIndex(files, paths);
   const nodes: AtlasNode[] = [];
   const edges: AtlasEdge[] = [];
   const edgeSeen = new Set<string>();

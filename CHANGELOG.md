@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Atlas Go imports: resolution uses the `go.mod` module path when present (stdlib and external imports get no edge) and otherwise needs at least two trailing path segments, via a precomputed directory-suffix map instead of scanning every directory per import.
 - Atlas TS/JS imports: the import/export regex is anchored per statement and cannot span another import or export keyword, so in semicolon-less code an earlier `export ...` no longer swallows the next import.
 - Atlas L1 task pack: skeletons come from the base-commit atlas, so a file changed on integration is now annotated "changed since base; symbols and lines as of the base commit" instead of looking current.
 - Atlas build: blobs are sized with `git cat-file --batch-check` and only those within 256KB are read, binary extensions are skipped up front, and a failed chunk read degrades to per-blob reads, so large or binary files can no longer overflow the buffer and abort the build.

@@ -268,3 +268,28 @@ test('extractTsJs keeps imports separate in semicolon-less code', () => {
   const ex = extractTsJs("export const A = 1\nimport b from './b'\nexport { c } from './c'\nimport d from \"./d\"\nexport * from './e'\n");
   assert.deepEqual(ex.imports.map((i) => [i.spec, i.names.join(',')]), [['./b', 'default'], ['./c', 'c'], ['./d', 'default'], ['./e', '']]);
 });
+
+test('Go imports resolve by module path, not by last segment (no stdlib or external edges)', () => {
+  const store = tempRepo();
+  const dir = store.root;
+  put(dir, 'go.mod', 'module example.com/acme/app\n\ngo 1.22\n');
+  put(dir, 'cmd/main.go', 'package main\nimport (\n  "fmt"\n  "net/http"\n  "github.com/other/http"\n  "example.com/acme/app/internal/http"\n  "example.com/acme/app/pkg/util"\n)\nfunc main() {}\n');
+  put(dir, 'internal/http/server.go', 'package http\nfunc Serve() {}\n');
+  put(dir, 'pkg/util/util.go', 'package util\nfunc U() {}\n');
+  put(dir, 'vendor/fmt/fmt.go', 'package fmt\n');
+  const a = buildAtlas(dir, commit(dir, 'go'));
+  const targets = a.edges.filter((e) => e.kind === 'imports' && e.from === 'cmd/main.go').map((e) => e.to).sort();
+  assert.deepEqual(targets, ['internal/http/server.go', 'pkg/util/util.go']);
+});
+
+test('Go imports without a go.mod need two trailing segments to match a directory', () => {
+  const store = tempRepo();
+  const dir = store.root;
+  put(dir, 'a/main.go', 'package main\nimport (\n  "fmt"\n  "lib/util"\n  "x/y/svc/store"\n)\n');
+  put(dir, 'fmt/fmt.go', 'package fmt\n');
+  put(dir, 'util/util.go', 'package util\n');
+  put(dir, 'svc/store/store.go', 'package store\n');
+  const a = buildAtlas(dir, commit(dir, 'go2'));
+  const targets = a.edges.filter((e) => e.kind === 'imports' && e.from === 'a/main.go').map((e) => e.to);
+  assert.deepEqual(targets, ['svc/store/store.go']);
+});
