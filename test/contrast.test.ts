@@ -69,3 +69,8 @@ test('deleteBranch tolerates a missing branch', () => {
   assert.equal(g.git(dir, 'branch', '--list', 'tmp-b'), '');
   assert.doesNotThrow(() => g.deleteBranch(dir, 'nope'));
 });
+
+test('panel enabled: orders that disagree leave picked null (see conductor test for the wiring)', async () => {
+  const { pairwiseBothOrders } = await import('../src/panel.ts');
+  assert.equal(pairwiseBothOrders('B', 'B'), null);
+});

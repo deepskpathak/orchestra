@@ -8,6 +8,7 @@ import { join, resolve } from 'node:path';
 import { extractJson, parseWorkerOutcome, type AgentRequest, type AgentResult, type Runner } from './agent.ts';
 import * as g from './git.ts';
 import { alternateWorkerSection, comparePrompt, COMPARE_SCHEMA, contrastApplies, resolveContrast } from './contrast.ts';
+import { aggregatePanel, lineageFraming, pairwiseBothOrders, type PanelJudgeVote } from './panel.ts';
 import { isExcludedPath, loadOrBuildAtlas, type Atlas } from './atlas.ts';
 import { buildTaskPack, renderMap } from './atlas-context.ts';
 import { plannedFiles } from './exploration.ts';
@@ -16,7 +17,7 @@ import { loadHarness, type Harness } from './harness.ts';
 import { applyLessonEdits, editsFromResponse, expireDomain, formatLearnings, listDomains, normalizeDomain, readAllLearnings, readLearnings, GLOBAL } from './learnings.ts';
 import { buildSandboxPolicy, preflightSandbox, scrubWorkerEnv, type ProbeExec } from './sandbox.ts';
 import { newRunId, type Store } from './store.ts';
-import type { ActiveAgent, CriterionResult, OrchestraEvent, Role, Run, Scenario, Task, Verdict } from './types.ts';
+import type { ActiveAgent, CriterionResult, OrchestraEvent, PanelRecord, Role, Run, Scenario, Task, Verdict } from './types.ts';
 
 export interface Ablation {
   scenarios?: boolean; // the judge and contrast comparer see no hidden scenarios
@@ -203,6 +204,33 @@ export function judgePrompt(i: {
       `DIFF vs base:\n${i.diff}`,
     ].join('\n\n'),
   };
+}
+
+// One judge's per-criterion binary verdicts, keyed by the acceptance text when the judge answered
+// in order (as asked), else by its own criterion text. No criteria falls back to one overall criterion.
+export function panelCriteria(v: Partial<Verdict>, acceptance: string[]): Record<string, boolean> {
+  const list = aggregateCriteria(v.criteria)?.list;
+  if (!list) return { overall: Boolean(v.pass) };
+  const byOrder = list.length === acceptance.length;
+  return Object.fromEntries(list.map((c, i) => [byOrder ? acceptance[i] : c.criterion, c.pass]));
+}
+
+// Clear-majority panel verdict: per-criterion majority, mean scores, issues from every judge.
+export function panelMajorityVerdict(raws: Partial<Verdict>[], majority: Record<string, boolean>, acceptance: string[]): Partial<Verdict> {
+  const keys = Object.keys(majority);
+  const score = raws.reduce((a, r) => a + Number(r.score), 0) / raws.length;
+  const issues = [...new Set(raws.flatMap((r) => r.issues ?? []))];
+  const lead = raws.find((r) => r.pass === (raws.filter((x) => x.pass).length * 2 > raws.length)) ?? raws[0];
+  const perCriterion = keys.length === 1 && keys[0] === 'overall' ? undefined : keys.map((criterion) => {
+    const scores = raws.flatMap((r) => {
+      const list = aggregateCriteria(r.criteria)?.list;
+      if (!list) return [];
+      const c = list.length === acceptance.length ? list[acceptance.indexOf(criterion)] : list.find((x) => x.criterion === criterion);
+      return c ? [c.score] : [];
+    });
+    return { criterion, pass: majority[criterion], score: scores.length ? scores.reduce((a, b) => a + b, 0) / scores.length : majority[criterion] ? 1 : 0 };
+  });
+  return { pass: Object.values(majority).every(Boolean), score, summary: lead.summary ?? '', issues, ...(perCriterion ? { criteria: perCriterion } : {}) };
 }
 
 const PLAN_SCHEMA = {
@@ -719,34 +747,57 @@ export class Conductor {
       const testsB = testsOf(wtB.path);
       const headA = g.head(wtA.path);
       const headB = g.head(wtB.path);
+      const diffA = g.diffSince(wtA.path, baseA);
+      const diffB = g.diffSince(wtB.path, baseB);
       const prompt = joinPrompt(
-        comparePrompt({ task, scenarios: this.scenarios, workerTextA: workA.text, workerTextB: workB.text, diffA: g.diffSince(wtA.path, baseA), diffB: g.diffSince(wtB.path, baseB) }),
+        comparePrompt({ task, scenarios: this.scenarios, workerTextA: workA.text, workerTextB: workB.text, diffA, diffB }),
       );
-      let raw: unknown;
-      let error: string | undefined;
-      for (let tryNo = 1; tryNo <= 2 && raw === undefined; tryNo++) {
-        const res = await this.call('judge', task, task.attempts, {
-          prompt,
-          cwd: wtA.path,
-          schema: COMPARE_SCHEMA,
-          tools: ['Read', 'Grep', 'Glob', 'Bash'],
-          allowedTools: ['Read', 'Grep', 'Glob', 'Bash'],
-          disallowedTools: ['Edit', 'Write', 'Bash(git commit:*)', 'Bash(git reset:*)', 'Bash(rm:*)'],
-          permissionMode: 'default',
-        });
-        // Judges never edit. If one did anyway, discard it in both worktrees.
-        g.resetTo(wtA.path, headA);
-        g.resetTo(wtB.path, headB);
-        const out = extractJson(res) as { a?: { score?: unknown }; b?: { score?: unknown } } | undefined;
-        if (res.ok && out && typeof out.a?.score === 'number' && typeof out.b?.score === 'number') raw = out;
-        else {
-          error = res.error ?? 'no verdict';
-          if (tryNo === 1) this.emit('log', `${task.id} comparison judge failed (${error}), retrying once`, undefined, task.id);
+      const compareOnce = async (text: string): Promise<{ raw?: unknown; error?: string }> => {
+        let raw: unknown;
+        let error: string | undefined;
+        for (let tryNo = 1; tryNo <= 2 && raw === undefined; tryNo++) {
+          const res = await this.call('judge', task, task.attempts, {
+            prompt: text,
+            cwd: wtA.path,
+            schema: COMPARE_SCHEMA,
+            tools: ['Read', 'Grep', 'Glob', 'Bash'],
+            allowedTools: ['Read', 'Grep', 'Glob', 'Bash'],
+            disallowedTools: ['Edit', 'Write', 'Bash(git commit:*)', 'Bash(git reset:*)', 'Bash(rm:*)'],
+            permissionMode: 'default',
+          });
+          // Judges never edit. If one did anyway, discard it in both worktrees.
+          g.resetTo(wtA.path, headA);
+          g.resetTo(wtB.path, headB);
+          const out = extractJson(res) as { a?: { score?: unknown }; b?: { score?: unknown } } | undefined;
+          if (res.ok && out && typeof out.a?.score === 'number' && typeof out.b?.score === 'number') raw = out;
+          else {
+            error = res.error ?? 'no verdict';
+            if (tryNo === 1) this.emit('log', `${task.id} comparison judge failed (${error}), retrying once`, undefined, task.id);
+          }
+        }
+        return { raw, error };
+      };
+      const first = await compareOnce(prompt);
+      if (first.raw === undefined) return this.contrastJudgeError(task, wtB, first.error ?? 'no verdict');
+      const r = resolveContrast(first.raw, testsA, testsB, threshold);
+      ({ a: vA, b: vB, picked, reasons } = r);
+      if (cfg.verification.panel.enabled) {
+        // Both orders: the same comparison with the candidates swapped. A pick that flips with position is position bias, so no pick.
+        const swapped = joinPrompt(
+          comparePrompt({ task, scenarios: this.scenarios, workerTextA: workB.text, workerTextB: workA.text, diffA: diffB, diffB: diffA }),
+        );
+        const second = await compareOnce(swapped);
+        const pref = (x: unknown): 'A' | 'B' | null => {
+          const p = (x as { preferred?: unknown } | undefined)?.preferred;
+          return p === 'A' || p === 'B' ? p : null;
+        };
+        const consistent = pairwiseBothOrders(pref(first.raw), pref(second.raw));
+        this.emit('log', `${task.id} comparison in both orders: ${second.raw === undefined ? 'swapped run failed' : consistent ? `consistent pick ${consistent}` : 'orders disagree'}`, { consistent }, task.id);
+        if (!consistent) {
+          picked = null;
+          reasons = `Panel comparison in both orders was not consistent (${second.raw === undefined ? `swapped run failed: ${second.error}` : 'position bias'}), so no attempt was picked. ${reasons}`.trim();
         }
       }
-      if (raw === undefined) return this.contrastJudgeError(task, wtB, error ?? 'no verdict');
-      const r = resolveContrast(raw, testsA, testsB, threshold);
-      ({ a: vA, b: vB, picked, reasons } = r);
     }
 
     task.contrast = { attempt: task.attempts, a: { branch: wtA.branch, verdict: vA }, b: { branch: wtB.branch, verdict: vB }, picked, reasons };
@@ -799,8 +850,7 @@ export class Conductor {
     const tests = cfg.testCommand ? g.runTests(cwd, cfg.testCommand) : null;
     if (tests) this.emit('log', `${task.id} tests ${tests.ok ? 'passed' : 'FAILED'}`, undefined, task.id);
     const headBefore = g.head(cwd);
-    const prompt = joinPrompt(
-      judgePrompt({
+    const built = judgePrompt({
         task,
         scenarios: this.scenarios,
         workerText: work.text,
@@ -809,17 +859,17 @@ export class Conductor {
         diff: g.diffSince(cwd, base),
         tools: this.harness.guidance.tools,
         checklist: this.harness.guidance.checklist,
-      }),
-    );
+      });
+    const prompt = joinPrompt(built);
 
     const testsOk = tests ? tests.ok : null;
-    const runJudge = async (model?: string): Promise<{ res: AgentResult; v?: Partial<Verdict> }> => {
+    const runJudge = async (model?: string, framing = ''): Promise<{ res: AgentResult; v?: Partial<Verdict> }> => {
       const res = await this.call(
         'judge',
         task,
         task.attempts,
         {
-          prompt,
+          prompt: framing ? joinPrompt({ ...built, prefix: `${framing}\n\n${built.prefix}` }) : prompt,
           cwd,
           schema: VERDICT_SCHEMA,
           tools: ['Read', 'Grep', 'Glob', 'Bash'],
@@ -839,7 +889,37 @@ export class Conductor {
     let v: Partial<Verdict> | undefined;
     let error: string | undefined;
     const tiers = cfg.judgeTiers;
-    if (tiers.enabled) {
+    const panelCfg = cfg.verification.panel;
+    let panel: PanelRecord | undefined;
+    let retryModel: string | undefined;
+    if (panelCfg.enabled && panelCfg.judges.length) {
+      // Panel judging (opt-in): every member votes per criterion; a split vote goes to the escalation model.
+      const votes: PanelJudgeVote[] = [];
+      const raws: Partial<Verdict>[] = [];
+      for (const [i, member] of panelCfg.judges.entries()) {
+        const lineage = member.lineage ?? 'default';
+        const r = await runJudge(member.model, lineageFraming(lineage));
+        if (!r.v) {
+          this.emit('log', `${task.id} panel judge ${i + 1} (${member.model}) gave no verdict (${r.res.error ?? 'no verdict'}), skipped`, undefined, task.id);
+          continue;
+        }
+        votes.push({ judge: `j${i + 1}`, model: member.model, lineage, criteria: panelCriteria(r.v, task.acceptance) });
+        raws.push(r.v);
+      }
+      if (votes.length) {
+        const agg = aggregatePanel(votes);
+        const escalated = agg.split;
+        panel = {
+          votes: votes.map((vote, i) => ({ judge: vote.judge, model: vote.model, lineage: vote.lineage, pass: Boolean(raws[i].pass), score: Number(raws[i].score), criteria: vote.criteria })),
+          disagreement: round(agg.disagreement),
+          perCriterion: agg.perCriterion.map((c) => ({ criterion: c.criterion, pass: c.pass, fail: c.fail, disagreement: round(c.disagreement) })),
+          escalated,
+        };
+        this.emit('log', `${task.id} judge panel of ${votes.length}: disagreement ${panel.disagreement.toFixed(2)}${escalated ? ', split vote, escalating' : ''}`, { disagreement: panel.disagreement, judges: votes.length, escalated }, task.id);
+        if (escalated) retryModel = panelCfg.escalateModel ?? this.harness.config.models.judge;
+        else v = panelMajorityVerdict(raws, agg.majority, task.acceptance);
+      }
+    } else if (tiers.enabled) {
       const cheap = await runJudge(tiers.cheapModel);
       if (cheap.v && !shouldEscalate(cheap.v, testsOk, this.harness.config.passThreshold, tiers.margin)) v = cheap.v;
       else this.emit('log', `${task.id} cheap judge not decisive, escalating to ${this.harness.config.models.judge}`, undefined, task.id);
@@ -847,7 +927,7 @@ export class Conductor {
 
     // A judge crash or budget exhaustion says nothing about the worker: retry the judge alone, once.
     for (let tryNo = 1; tryNo <= 2 && !v; tryNo++) {
-      const r = await runJudge();
+      const r = await runJudge(retryModel);
       v = r.v;
       if (v) break;
       error = r.res.error ?? 'no verdict';
@@ -856,7 +936,8 @@ export class Conductor {
     if (!v || typeof v.score !== 'number') {
       return { pass: false, score: 0, summary: `Judge failed twice: ${error}`, issues: [], testsPassed: tests?.ok ?? null, judgeError: error };
     }
-    return buildVerdict(v, testsOk, this.harness.config.passThreshold, testsOk === false ? `Test command \`${cfg.testCommand}\` fails. Output tail:\n${tests!.tail.slice(-1200)}` : undefined);
+    const verdict = buildVerdict(v, testsOk, this.harness.config.passThreshold, testsOk === false ? `Test command \`${cfg.testCommand}\` fails. Output tail:\n${tests!.tail.slice(-1200)}` : undefined);
+    return panel ? { ...verdict, panel } : verdict;
   }
 
   // Refinery: merges are serialized; post-merge tests guard the integration branch.

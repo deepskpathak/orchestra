@@ -28,9 +28,10 @@ export interface CriterionResult {
 
 // Recorded when a judge panel scored the task (W4.1).
 export interface PanelRecord {
-  votes: { judge: string; pass: boolean; score: number; criteria?: Record<string, boolean> }[]; // one per judge
-  disagreement: { criterion: string; pass: number; fail: number }[]; // criteria with a split vote
-  escalated: boolean; // a split vote went to the escalation model
+  votes: { judge: string; model: string; lineage: string; pass: boolean; score: number; criteria?: Record<string, boolean> }[]; // one per judge
+  disagreement: number; // mean share of judges in the minority per criterion, 0 = unanimous
+  perCriterion: { criterion: string; pass: number; fail: number; disagreement: number }[];
+  escalated: boolean; // a split vote went to the escalation model, whose verdict decided
 }
 
 export interface Verdict {
