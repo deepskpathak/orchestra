@@ -248,7 +248,7 @@ export interface ProjectConfig {
     };
   };
   verification: VerificationConfig;
-  learnings?: { expiryDays: number }; // drop lessons with evidence older than this many days; 0 = off
+  learnings?: { expiryDays: number; graph?: boolean }; // expiryDays: drop lessons with evidence older than this many days (0 = off); graph: rank lessons linked to the task footprint first (L3)
   evolve: {
     every: number; // auto-evolve after every N completed runs, 0 disables
     autoPromote: boolean;

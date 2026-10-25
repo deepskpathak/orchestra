@@ -147,6 +147,7 @@ Off by default. Without a test command the judge scores a single attempt with no
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
+| `learnings.graph` | boolean | `false` | Rank lessons linked to files in the task footprint first when building worker prompts (L3 lesson graph). Eval trials never get the boost. See [self-improvement.md](self-improvement.md#learnings-orchestra-learnings). |
 | `learnings.expiryDays` | number | `0` | Drop lessons whose newest evidence is older than this many days, or whose harmful count is well above helpful, after each run. `0` disables expiry. See [self-improvement.md](self-improvement.md#learnings-orchestra-learnings). |
 
 ### `evolve`

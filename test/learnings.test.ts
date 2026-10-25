@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  DOMAIN_CAP, applyLessonEdits, editsFromResponse, expireDomain, expireStale, lessonAblation, lessonId, formatLearnings, listDomains, normalizeDomain, readAllLearnings, readLearnings, summarizeLearnings, writeLearnings, type Lesson,
+  DOMAIN_CAP, applyLessonEdits, editsFromResponse, expireDomain, expireStale, lessonAblation, lessonId, formatLearnings, listDomains, normalizeDomain, readAllLearnings, readLearnings, retrieveByCode, summarizeLearnings, writeLearnings, type Lesson,
 } from '../src/learnings.ts';
 import { tempRepo } from './helpers.ts';
 
@@ -204,4 +204,44 @@ test('lessonAblation reports per-case scores, mean delta and CI with fake evalua
   const tie = await lessonAblation(async () => 0.5, async () => 0.5, cases);
   assert.equal(tie.meanDelta, 0);
   assert.equal(tie.verdict, 'no-evidence');
+});
+
+test('retrieveByCode ranks footprint-linked lessons first; graph off or cleanRoom keeps the plain order', () => {
+  const plain = lesson('plain one');
+  const linked = { ...lesson('about a'), links: { files: ['src/a.ts'] } };
+  const all = { cli: [plain, linked], _global: [lesson('glob')] };
+  const texts = (ls: Lesson[]) => ls.map((l) => l.lesson);
+  assert.deepEqual(texts(retrieveByCode(all, 'cli', ['src/a.ts'], 15, { graph: true })), ['about a', 'plain one', 'glob']);
+  assert.deepEqual(texts(retrieveByCode(all, 'cli', ['src/a.ts'], 15, { graph: false })), ['plain one', 'about a', 'glob']);
+  assert.deepEqual(texts(retrieveByCode(all, 'cli', ['src/a.ts'], 15, { graph: true, cleanRoom: true })), ['plain one', 'about a', 'glob']);
+  assert.deepEqual(texts(retrieveByCode(all, 'cli', ['src/b.ts'], 15, { graph: true })), ['plain one', 'about a', 'glob']);
+  assert.deepEqual(texts(retrieveByCode(all, 'cli', ['src/a.ts'], 1, { graph: true })), ['about a']);
+  assert.equal(formatLearnings(all, 'worker', 'cli', 15, { footprint: ['src/a.ts'], graph: true }).split('\n')[0], '- [worker] about a');
+});
+
+test('links round-trip through edits, legacy lessons stay unchanged, malformed links are dropped', () => {
+  const store = tempRepo();
+  writeLearnings(store, [lesson('legacy')], 'r1', 'cli');
+  assert.equal(readLearnings(store, 'cli')[0]!.links, undefined);
+  const edits = editsFromResponse({ edits: [
+    { op: 'add', lesson: 'good', evidence: [{ run: 'r2' }], links: { files: ['src/a.ts', ''], symbols: ['f'] } },
+    { op: 'add', lesson: 'bad', evidence: [{ run: 'r2' }], links: { files: 'src/a.ts' } },
+  ] }, []);
+  assert.deepEqual((edits[0] as { links?: unknown }).links, { files: ['src/a.ts'], symbols: ['f'] });
+  assert.equal('links' in edits[1]!, false);
+  applyLessonEdits(store, 'cli', edits, 'r2', 10);
+  const got = readLearnings(store, 'cli');
+  assert.deepEqual(got.find((l) => l.lesson === 'good')!.links, { files: ['src/a.ts'], symbols: ['f'] });
+  assert.equal(got.find((l) => l.lesson === 'bad')!.links, undefined);
+  assert.equal(got.find((l) => l.lesson === 'legacy')!.links, undefined);
+  const id = got.find((l) => l.lesson === 'legacy')!.id!;
+  applyLessonEdits(store, 'cli', [{ op: 'update', id, links: { files: ['src/z.ts'] } }], 'r3', 20);
+  assert.deepEqual(readLearnings(store, 'cli').find((l) => l.id === id)!.links, { files: ['src/z.ts'] });
+});
+
+test('config merges a partial learnings block and defaults graph to false', () => {
+  const store = tempRepo();
+  assert.equal(store.config().learnings!.graph, false);
+  store.writeJson('config.json', { learnings: { expiryDays: 5 } });
+  assert.deepEqual(store.config().learnings, { expiryDays: 5, graph: false });
 });
