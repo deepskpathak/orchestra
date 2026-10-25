@@ -818,6 +818,23 @@ test('mutation failBelowFloor fails the run with a clear error; report-only does
   assert.equal(ok.mutation!.pass, false);
 });
 
+test('mutation skipped (failing baseline, nothing to mutate) is recorded as skipped, not as a passing 1.0, and never gates', async () => {
+  const cases: [string, { changedFiles: string[]; ok: boolean }, RegExp][] = [
+    ['failing baseline', { changedFiles: ['calc.js'], ok: false }, /already fail/],
+    ['no mutable source', { changedFiles: ['README.md'], ok: true }, /no mutable source changes/],
+  ];
+  for (const [name, c, why] of cases) {
+    const store = mutationRepo({ floor: 0.9, failBelowFloor: true });
+    const run = await runGoal({ store, runner: fakeRunner(), goal: 'g', mutation: { changedFiles: c.changedFiles, exec: () => ({ ok: c.ok }) } });
+    assert.equal(run.status, 'done', name);
+    assert.match(run.mutation!.skipped!, why, name);
+    assert.equal(run.mutation!.score, undefined, name);
+    assert.equal(run.mutation!.pass, undefined, name);
+    assert.ok(store.events(run.id).some((e) => /Mutation skipped/.test(e.msg)), name);
+    assert.ok(!store.events(run.id).some((e) => /Mutation score/.test(e.msg)), name);
+  }
+});
+
 test('mutation disabled leaves the run without mutation', async () => {
   const store = tempRepo();
   const run = await runGoal({ store, runner: fakeRunner(), goal: 'g', mutation: { changedFiles: ['calc.js'], exec: () => { throw new Error('must not run'); } } });

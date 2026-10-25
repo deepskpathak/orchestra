@@ -520,8 +520,16 @@ export class Conductor {
         write: (f, c) => writeFileSync(join(cwd, f), c),
         exec: (c) => exec(cwd, c),
       });
-      if (out.skipped) this.emit('log', `Mutation skipped: ${out.skipped}`);
       if (out.unreadable) this.emit('log', `Mutation left out ${out.unreadable.length} unreadable file(s): ${out.unreadable.join(', ')}`);
+      // A skipped pass (no checks, failing baseline, nothing to mutate) has no score. Recording a vacuous
+      // 1.0 pass would read as evidence the tests are strong, so record it as skipped and never gate on it.
+      const skipped = out.skipped ?? (out.results.length === 0 ? 'no mutable source changes' : undefined);
+      if (skipped) {
+        run.mutation = { total: 0, killed: 0, floor: cfg.floor, skipped };
+        this.emit('log', `Mutation skipped: ${skipped}`, { mutation: run.mutation });
+        this.save();
+        return undefined;
+      }
       const m = mutationScore(out.results, cfg.floor);
       run.mutation = { total: m.total, killed: m.killed, score: m.score, floor: m.floor, pass: m.pass };
       this.emit('log', `Mutation score ${m.score.toFixed(2)} (${m.killed}/${m.total} killed, floor ${m.floor}) ${m.pass ? 'pass' : 'below floor'}`, { mutation: run.mutation });

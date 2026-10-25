@@ -172,3 +172,14 @@ test('run summary separates failed, blocked and needs-human tasks', () => {
   const run = { id: 'r1', status: 'failed', satisfaction: 0.5, costUsd: 1, tasks: [t('T1', 'needs_human', { humanReason: 'spec vs test' }), t('T2', 'blocked'), t('T3', 'blocked'), t('T4', 'failed'), t('T5', 'merged')] } as unknown as Run;
   assert.match(summary(run), /1 failed, 2 blocked, 1 need a human/);
 });
+
+test('a skipped mutation pass renders as skipped in the summary and the dashboard, never as a score', () => {
+  const base = { id: 'r1', goal: 'g', harness: 'v1', kind: 'goal', status: 'done', startedAt: 0, costUsd: 0, tasks: [], active: [] } as unknown as Run;
+  const skipped: Run = { ...base, mutation: { total: 0, killed: 0, floor: 0.6, skipped: 'checks already fail without mutation' } };
+  assert.match(summary(skipped), /mutation score skipped \(checks already fail without mutation\)/);
+  const out = renderDashboard(skipped, [], { width: 100, now: 1, color: false, frame: 0 });
+  assert.match(out, /mutation skipped \(checks already fail/);
+  assert.doesNotMatch(out, /mutation 1\.00/);
+  const scored: Run = { ...base, mutation: { total: 4, killed: 3, floor: 0.6, score: 0.75, pass: true } };
+  assert.match(summary(scored), /mutation score 0\.75 \(3\/4 killed, floor 0\.6, pass\)/);
+});

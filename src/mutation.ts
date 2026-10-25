@@ -106,6 +106,12 @@ export function generateMutants(source: string, file: string, max: number): Muta
   }));
 }
 
+// One plain-text line for a run's mutation result, shared by the CLI and the TUI.
+export function mutationLine(m: { total: number; killed: number; floor: number; score?: number; pass?: boolean; skipped?: string }): string {
+  if (m.skipped || m.score === undefined) return `skipped (${m.skipped ?? 'no score'})`;
+  return `${m.score.toFixed(2)} (${m.killed}/${m.total} killed, floor ${m.floor}, ${m.pass ? 'pass' : 'below floor'})`;
+}
+
 // No mutants is vacuously fine: score 1, passes, so an empty change never fails a run.
 export function mutationScore(results: { killed: boolean }[], floor: number): MutationScore {
   const total = results.length;

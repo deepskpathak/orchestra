@@ -476,6 +476,7 @@ pre { margin: 0; padding: 10px 12px; max-height: 420px; overflow: auto; font: 12
       '<div class="stat"><span>Agents</span><b class="num">' + run.active.length + '</b></div>' +
       '<div class="stat"><span>Merged</span><b class="num">' + merged + ' / ' + total + '</b></div>' +
       (run.satisfaction != null ? '<div class="stat"><span>Satisfaction</span><b class="num">' + run.satisfaction.toFixed(2) + '</b></div>' : '') +
+      (run.mutation ? '<div class="stat"><span>Mutation</span><b class="num"' + (run.mutation.skipped || run.mutation.score == null ? ' title="' + esc(run.mutation.skipped || 'no score') + '">skipped' : '>' + run.mutation.score.toFixed(2)) + '</b></div>' : '') +
       outcomeStats((state.info || {}).outcomes);
 
     var pct = total ? merged / total : 0;
