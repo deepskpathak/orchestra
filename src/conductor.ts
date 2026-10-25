@@ -21,6 +21,7 @@ import { loadHarness, type Harness } from './harness.ts';
 import { applyLessonEdits, editsFromResponse, expireDomain, formatLearnings, listDomains, normalizeDomain, readAllLearnings, readLearnings, GLOBAL } from './learnings.ts';
 import { buildSandboxPolicy, preflightSandbox, scrubWorkerEnv, type ProbeExec } from './sandbox.ts';
 import { newRunId, type Store } from './store.ts';
+import { verificationModes } from './outcomes.ts';
 import { AGENTIC_INSTRUCTION, NO_EVIDENCE_NOTE, executedChecksSection, runScenarioChecks, type CheckResult } from './judge-checks.ts';
 import type { ActiveAgent, CriterionResult, OrchestraEvent, PanelRecord, Role, Run, Scenario, Task, Verdict } from './types.ts';
 
@@ -425,6 +426,7 @@ export class Conductor {
     this.evalLearnings = opts.evalLearnings ?? false;
     this.wtRoot = opts.store.path('worktrees');
     const id = (opts.kind === 'eval' ? 'e' : '') + newRunId();
+    const modes = verificationModes(opts.store.config().verification);
     this.run = {
       id,
       goal: opts.goal,
@@ -436,6 +438,7 @@ export class Conductor {
       costUsd: 0,
       active: [],
       baseRef: opts.baseRef,
+      ...(modes.length ? { verificationModes: modes } : {}),
     };
   }
 

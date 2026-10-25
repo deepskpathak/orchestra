@@ -918,3 +918,11 @@ test('agentic judge + panel: majority verdict keeps per-criterion evidence so pa
   const v = buildVerdict(merged, true, 0.7, undefined, true);
   assert.ok(!v.issues.some((i) => i.includes('without executed evidence')));
 });
+
+test('run records the verification modes enabled at start, and nothing when all are off', async () => {
+  const off = await runGoal({ store: tempRepo({ concurrency: 1 }), runner: fakeRunner({ failFirstAttemptOf: [] }), goal: 'g' });
+  assert.equal(off.verificationModes, undefined);
+  const store = tempRepo({ concurrency: 1, verification: { ...DEFAULT_PROJECT_CONFIG.verification, agenticJudge: { enabled: true, checkTimeoutMs: 20000 }, contracts: { enabled: true } } });
+  const on = await runGoal({ store, runner: fakeRunner({ failFirstAttemptOf: [] }), goal: 'g' });
+  assert.deepEqual(on.verificationModes, ['agentic', 'contracts']);
+});

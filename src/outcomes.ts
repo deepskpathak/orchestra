@@ -7,7 +7,7 @@
 import { readBenchRows } from './calibration.ts';
 import { git } from './git.ts';
 import type { Store } from './store.ts';
-import type { Run } from './types.ts';
+import type { Run, VerificationConfig } from './types.ts';
 
 // What git says about one run's integration branch. Absent facts mean "not landed".
 export interface RunGitFacts {
@@ -29,6 +29,29 @@ export interface Bucket {
   rate: number | null;
 }
 
+// M4 verification modes a run can be graded under. A run with none enabled is reported as 'none'.
+export const VERIFICATION_MODES = ['panel', 'agentic', 'contracts', 'oracles', 'mutation'] as const;
+export type VerificationMode = (typeof VERIFICATION_MODES)[number];
+
+export function verificationModes(v: VerificationConfig): VerificationMode[] {
+  const on: Record<VerificationMode, boolean> = { panel: v.panel.enabled, agentic: v.agenticJudge.enabled, contracts: v.contracts.enabled, oracles: v.oracles.enabled, mutation: v.mutation.enabled };
+  return VERIFICATION_MODES.filter((m) => on[m]);
+}
+
+// Modes a run was graded under. A run with several modes counts in each of them, so the rows overlap.
+export function runModes(r: Pick<Run, 'verificationModes'>): string[] {
+  return r.verificationModes?.length ? r.verificationModes : ['none'];
+}
+
+// Merged-but-wrong: runs that reached main and were then reverted or needed a later fix, per mode (H2).
+export interface ModeOutcome {
+  mode: string;
+  runs: number; // goal runs with merged work
+  accepted: number;
+  wrong: number; // accepted runs that were reverted or followed by a fix
+  wrongRate: number | null; // wrong / accepted
+}
+
 export interface OutcomeMetrics {
   candidates: number; // goal runs that produced at least one merged task
   accepted: number;
@@ -42,6 +65,7 @@ export interface OutcomeMetrics {
   byTaskCount: Bucket[];
   byGoalLength: Bucket[];
   byHumanMinutes: Bucket[]; // bench rows only; empty when there are none
+  byVerification: ModeOutcome[]; // merged-but-wrong rate split by verification mode
 }
 
 const ratio = (n: number, d: number): number | null => (d > 0 ? n / d : null);
@@ -87,7 +111,26 @@ export function computeOutcomes(runs: Run[], facts: Record<string, RunGitFacts |
     byTaskCount: bucketize(goals.map((r) => ({ value: r.tasks.length, ok: ok(r) })), TASK_COUNT_EDGES),
     byGoalLength: bucketize(goals.map((r) => ({ value: r.goal.length, ok: ok(r) })), GOAL_LENGTH_EDGES),
     byHumanMinutes: bucketize(bench.map((b) => ({ value: b.humanMinutes, ok: b.pass })), HUMAN_MIN_EDGES),
+    byVerification: byVerification(candidates, facts),
   };
+}
+
+function byVerification(candidates: Run[], facts: Record<string, RunGitFacts | undefined>): ModeOutcome[] {
+  const order = ['none', ...VERIFICATION_MODES] as string[];
+  const rows = new Map<string, ModeOutcome>();
+  for (const r of candidates) {
+    for (const mode of runModes(r)) {
+      const row = rows.get(mode) ?? { mode, runs: 0, accepted: 0, wrong: 0, wrongRate: null };
+      row.runs++;
+      if (facts[r.id]?.landed) {
+        row.accepted++;
+        if (facts[r.id]?.reverted || (facts[r.id]?.fixups ?? 0) > 0) row.wrong++;
+      }
+      rows.set(mode, row);
+    }
+  }
+  for (const row of rows.values()) row.wrongRate = ratio(row.wrong, row.accepted);
+  return [...rows.values()].sort((a, b) => order.indexOf(a.mode) - order.indexOf(b.mode));
 }
 
 const pct = (x: number | null) => (x === null ? 'n/a' : `${(x * 100).toFixed(0)}%`);
@@ -108,6 +151,7 @@ export function renderOutcomes(m: OutcomeMetrics): string {
   section('success by task count', m.byTaskCount);
   section('success by goal length', m.byGoalLength);
   section('bench pass by human time', m.byHumanMinutes);
+  if (m.byVerification.length) lines.push(`  merged-but-wrong by verification mode: ${m.byVerification.map((b) => `${b.mode} ${pct(b.wrongRate)} (${b.wrong}/${b.accepted} landed, ${b.runs} run${b.runs === 1 ? '' : 's'})`).join(', ')}`);
   return lines.join('\n');
 }
 

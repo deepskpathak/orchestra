@@ -5,7 +5,7 @@ import { existsSync, mkdtempSync, openSync, readFileSync, writeFileSync } from '
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { claudeRunner, preflight, type Runner } from './agent.ts';
-import { importGrades, readBenchRows, renderCalibration, storeCalibration, writeSample } from './calibration.ts';
+import { importGrades, readBenchRows, renderCalibration, renderCalibrationByMode, storeCalibration, storeCalibrationByMode, writeSample } from './calibration.ts';
 import { ABLATION_ARMS, SINGLE_SESSION_ARM, ablationTable, defaultReference, loadArms, referenceError, renderAblationTable, summarize, renderSummary, runBench, verifyOracles } from './bench.ts';
 import { atlasStats, loadOrBuildAtlas } from './atlas.ts';
 import { runGoal } from './conductor.ts';
@@ -397,6 +397,7 @@ function cmdStats(args: string[]): void {
   console.log(`\n${renderOutcomes(collectOutcomes(store))}`);
   console.log(`\n${renderExploration(explorationMetrics(store.ledgerRows()))}`);
   console.log(`\n${renderCalibration(storeCalibration(store))}`);
+  console.log(`\n${renderCalibrationByMode(storeCalibrationByMode(store))}`);
 }
 
 async function cmdEvolve(): Promise<void> {

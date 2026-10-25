@@ -104,6 +104,7 @@ export interface Run {
   error?: string;
   mutation?: { total: number; killed: number; score: number; floor: number; pass: boolean }; // W4.5
   contract?: { path: string; sha256: string }; // W4.3 the acceptance contract workers cannot edit
+  verificationModes?: string[]; // M4 modes enabled when the run started (panel, agentic, contracts, oracles, mutation); absent = none
 }
 
 // One live agent session, shown as a lane in the dashboard.

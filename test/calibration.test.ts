@@ -123,3 +123,19 @@ test('rows with no judge (single-session baseline) are excluded from agreement a
   assert.equal(stratifiedSample([...judged, ...baseline], 0.8, 20).filter((s) => s.arm === 'single-session').length, 0);
   assert.equal(agreementBlock(calibrate([...judged, ...baseline], 0.8), 'v1', 0.9), null);
 });
+
+test('calibrateByMode splits judge agreement by the verification modes of each run', async () => {
+  const { calibrateByMode, renderCalibrationByMode } = await import('../src/calibration.ts');
+  const row = (runId: string, satisfaction: number, checkPass: boolean) => ({ arm: 'a', goal: 'g', taskType: 't', humanMinutes: 1, repeat: 1, runId, harness: 'v1', checkPass, judgeSatisfaction: satisfaction, taskVerdicts: {}, costUsd: 0, wallMs: 0 });
+  const rows = [row('r1', 0.9, true), row('r2', 0.9, false), row('r3', 0.9, true), row('r4', 0.9, false)];
+  const modes = new Map([['r1', ['panel']], ['r2', ['panel', 'agentic']], ['r3', []]]); // r4 unknown
+  const cal = calibrateByMode(rows, 0.7, modes);
+  const by = Object.fromEntries(cal.map((c) => [c.mode, c]));
+  assert.equal(by.panel.n, 2);
+  assert.equal(by.panel.agreement, 0.5);
+  assert.equal(by.agentic.agreement, 0);
+  assert.equal(by.none.n, 2);
+  assert.equal(by.none.agreement, 0.5);
+  assert.match(renderCalibrationByMode(cal), /agentic\s+1/);
+  assert.match(renderCalibrationByMode([]), /no bench results/);
+});
