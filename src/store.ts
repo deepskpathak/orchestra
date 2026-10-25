@@ -21,6 +21,7 @@ export const DEFAULT_PROJECT_CONFIG: ProjectConfig = {
   evolve: { every: 3, autoPromote: true, minGain: 0.02, sample: 5, minCases: 5, candidates: 1, promotionRule: 'gain', niMargin: 0.05, minJudgeAgreement: null,
     budgetUsd: 0,
     sequential: { enabled: false, roundSize: 3 },
+    splits: { enabled: false, feedback: 0.3, validation: 0.5, holdout: 0.2, signoffBelow: 12 },
     cost: { enabled: false, maxCostRisePct: 25, minGainForCost: 0.02, costWeight: 0.1, timeWeight: 0.02 },
   },
 };

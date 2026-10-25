@@ -46,6 +46,9 @@ export interface EvalCase {
   harvestedFrom?: string;
   source?: string; // source goal id; cases sharing it form one cluster in paired statistics
   taskType?: string;
+  createdAt?: number; // ms epoch; orders cases for time-split eval sets
+  tags?: string[];
+  reference?: string; // human fix or known-good solution, never shown to workers
 }
 
 export function goalRuns(store: Store, kind: 'goal' | 'eval' = 'goal'): Run[] {
@@ -97,7 +100,7 @@ export function harvest(store: Store, run: Run, minSatisfaction = 0.8): EvalCase
   if (run.kind !== 'goal' || run.status !== 'done' || (run.satisfaction ?? 0) < minSatisfaction || !run.baseRef) return null;
   // Cluster by goal text (re-runs of the same goal are correlated) and type by the planner's domain slug, the only
   // task metadata a goal run carries; without these every case is its own cluster of type 'unknown'.
-  const c: EvalCase = { id: run.id, goal: run.goal, base: run.baseRef, check: store.config().testCommand, harvestedFrom: run.id, source: run.goal.trim().replace(/\s+/g, ' ').toLowerCase(), taskType: run.domain || 'unknown' };
+  const c: EvalCase = { id: run.id, goal: run.goal, base: run.baseRef, check: store.config().testCommand, harvestedFrom: run.id, source: run.goal.trim().replace(/\s+/g, ' ').toLowerCase(), taskType: run.domain || 'unknown', createdAt: run.endedAt ?? Date.now() };
   store.writeJson(`evals/${run.id}.json`, c);
   return c;
 }

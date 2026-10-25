@@ -213,6 +213,7 @@ export interface ProjectConfig {
     minJudgeAgreement?: number | null; // refuse to evolve when the incumbent's judge/hidden-check agreement is below this; null = off
     budgetUsd?: number; // hard cap on spend per evolve cycle; 0 or unset = no cap
     sequential?: { enabled: boolean; roundSize: number }; // evaluate in rounds, stop once the CI settles the comparison
+    splits?: { enabled: boolean; feedback: number; validation: number; holdout: number; signoffBelow: number }; // time-split eval sets
     cost?: { enabled: boolean; maxCostRisePct: number; minGainForCost: number; costWeight: number; timeWeight: number }; // cost-aware objective
   };
 }
