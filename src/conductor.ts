@@ -1507,24 +1507,31 @@ export class Conductor {
     let landing = batch.filter((t) => !conflicted.includes(t));
     if (landing.length && cfg.testCommand) {
       const byId = new Map(landing.map((t) => [t.id, t]));
-      let tail = '';
+      // Failing output per task: the last (smallest) failing run that included it, so repair notes never carry
+      // the tail of an unrelated passing run.
+      const failTails = new Map<string, string>();
       const res = await bisectBatch(landing.map((t) => t.id), async (ids) => {
         if (mergeAll(ids.map((id) => byId.get(id)!)).length) return false;
         const r = await g.runTestsAsync(ip, cfg.testCommand!);
-        tail = r.tail;
+        if (!r.ok) for (const id of ids) failTails.set(id, r.tail);
         return r.ok;
       });
       this.emit('log', `batch of ${landing.length} tested in ${res.testRuns} post-merge run(s); ${res.bad.length} bad`, { batch: landing.map((t) => t.id), bad: res.bad });
       const bad = landing.filter((t) => res.bad.includes(t.id));
       landing = landing.filter((t) => !res.bad.includes(t.id));
       // The good halves were tested apart; test the union once so an interaction between them cannot land untested.
-      if (bad.length && landing.length > 1) landing = await this.settleUnion(landing, mergeAll, ip, cfg.testCommand);
-      else mergeAll(landing);
+      if (bad.length && landing.length > 1) {
+        const settled = await this.settleUnion(landing, mergeAll, ip, cfg.testCommand);
+        landing = settled.kept;
+        for (const [id, tail] of settled.tails) failTails.set(id, tail);
+      } else if (bad.length) mergeAll(landing);
+      // With nothing bad the first run tested the whole landing set and nothing has touched the worktree since,
+      // so HEAD is the commit that was tested. Re-merging would build a different, untested one.
       const dropped = batch.filter((t) => !conflicted.includes(t) && !landing.includes(t) && !bad.includes(t));
       bad.push(...dropped);
       for (const t of bad) {
         g.resetTo(t.worktree!, before);
-        this.repairOrFail(t, [`After merging with other tasks the test suite fails. Re-implement on the latest code. Output tail:\n${tail.slice(-1200)}`]);
+        this.repairOrFail(t, [`After merging with other tasks the test suite fails. Re-implement on the latest code. Output tail:\n${(failTails.get(t.id) ?? '').slice(-1200)}`]);
       }
     }
     this.knownGood = g.head(ip);
@@ -1532,15 +1539,30 @@ export class Conductor {
   }
 
   // Test the landing set as a whole. If it fails, add tasks one at a time and drop any that break the
-  // cumulative set (rare path, at most one run per task).
-  private async settleUnion(landing: Task[], mergeAll: (tasks: Task[]) => Task[], ip: string, cmd: string): Promise<Task[]> {
-    if (mergeAll(landing).length === 0 && (await g.runTestsAsync(ip, cmd)).ok) return landing;
-    const kept: Task[] = [];
-    for (const t of landing) {
-      if (mergeAll([...kept, t]).length === 0 && (await g.runTestsAsync(ip, cmd)).ok) kept.push(t);
+  // cumulative set (rare path, at most one run per task). Returns the kept tasks and, for each dropped one,
+  // the output of the run that rejected it.
+  private async settleUnion(landing: Task[], mergeAll: (tasks: Task[]) => Task[], ip: string, cmd: string): Promise<{ kept: Task[]; tails: Map<string, string> }> {
+    const tails = new Map<string, string>();
+    if (mergeAll(landing).length === 0) {
+      const r = await g.runTestsAsync(ip, cmd);
+      if (r.ok) return { kept: landing, tails };
+      for (const t of landing) tails.set(t.id, r.tail);
     }
-    mergeAll(kept);
-    return kept;
+    const kept: Task[] = [];
+    let inPlace = false; // the worktree holds exactly `kept`, as last tested
+    for (const t of landing) {
+      const conflicts = mergeAll([...kept, t]).length;
+      const r = conflicts === 0 ? await g.runTestsAsync(ip, cmd) : undefined;
+      if (r?.ok) {
+        kept.push(t);
+        inPlace = true;
+      } else {
+        tails.set(t.id, r ? r.tail : 'It conflicts with the other tasks of the batch.');
+        inPlace = false;
+      }
+    }
+    if (!inPlace) mergeAll(kept);
+    return { kept, tails };
   }
 
   private markMerged(task: Task, footprint?: { planned: string[]; changed: string[]; declared?: string[] }): void {

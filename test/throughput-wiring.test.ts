@@ -335,3 +335,27 @@ test('approve: with no recorded requester the approval warns that four-eyes is n
     else process.env.GIT_CONFIG_GLOBAL = prevCfg;
   }
 });
+
+test('batch merge: the integration HEAD after a clean batch is the commit that was tested', async () => {
+  const store = tempRepo({ concurrency: 3, throughput: { footprintScheduling: true, batchMerge: { enabled: true, maxBatch: 4 } } });
+  const log = `${store.root}/../tested-heads-${Date.now()}.log`;
+  // Record HEAD only for runs in the integration worktree (the judge also runs the suite in task worktrees).
+  store.writeJson('config.json', { ...store.config(), testCommand: `case "$PWD" in *_integration) git rev-parse HEAD >> ${log};; esac; true` });
+  const run = await runGoal({ store, runner: planned(['T1', 'T2', 'T3'].map((id) => t(id, [`fake/${id}.txt`])), {}, 5), goal: 'g' });
+  assert.equal(run.status, 'done');
+  const { readFileSync } = await import('node:fs');
+  const tested = readFileSync(log, 'utf8').trim().split('\n');
+  const tip = execFileSync('git', ['rev-parse', run.integrationBranch!], { cwd: store.root, encoding: 'utf8' }).trim();
+  assert.equal(tested[tested.length - 1], tip, 'the final integration commit was tested, not rebuilt afterwards');
+});
+
+test('batch merge: tasks dropped by the union check get the failing output in their repair note', async () => {
+  const store = tempRepo({ concurrency: 4, throughput: { footprintScheduling: true, batchMerge: { enabled: true, maxBatch: 4 } } });
+  store.writeJson('config.json', { ...store.config(), testCommand: 'if test -f fake/T1.txt && test -f fake/T3.txt; then echo UNION-BROKEN; exit 1; fi' });
+  const ids = ['T1', 'T2', 'T3', 'T4'];
+  const run = await runGoal({ store, runner: planned(ids.map((id) => t(id, [`fake/${id}.txt`])), {}, 5), goal: 'g' });
+  const issues = store.events(run.id).filter((e) => e.kind === 'task.repair').map((e) => ({ task: e.task, text: ((e.data as any)?.issues ?? []).join('\n') }));
+  const t3 = issues.filter((i) => i.task === 'T3');
+  assert.ok(t3.length > 0, 'T3 is sent to repair');
+  for (const i of t3) assert.match(i.text, /UNION-BROKEN/, 'the note carries the failing output, not an empty tail');
+});
