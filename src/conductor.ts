@@ -198,11 +198,12 @@ export function judgePrompt(i: {
   tools?: string;
   checklist?: string;
   agentic?: CheckResult[]; // set (even when empty) in agentic mode (W4.2)
+  indexed?: boolean; // panel mode: ask each criterion entry for its 1-based `index`, so panel votes line up by position
 }): BuiltPrompt {
   const { task, tests } = i;
   const base = `HIDDEN SCENARIOS for the whole goal (judge only the parts this task is responsible for):\n${i.scenarios
     .map((s) => `- ${s.id}: GIVEN ${s.given} WHEN ${s.when} THEN ${s.then}`)
-    .join('\n') || '(none)'}\n\nAlso return criteria: one entry per acceptance criterion, in order, each with pass, score and a short note.`;
+    .join('\n') || '(none)'}\n\nAlso return criteria: one entry per acceptance criterion, in order, each with pass, score and a short note${i.indexed ? ', plus `index`: its 1-based position in the ACCEPTANCE CRITERIA list' : ''}.`;
   return {
     prefix: [base, guidanceSection('TOOL GUIDANCE', i.tools), guidanceSection('REVIEW CHECKLIST', i.checklist), i.agentic ? AGENTIC_INSTRUCTION : ''].filter(Boolean).join('\n\n'),
     body: [
@@ -216,33 +217,83 @@ export function judgePrompt(i: {
   };
 }
 
-// One judge's per-criterion binary verdicts, keyed by the acceptance text when the judge answered
-// in order (as asked), else by its own criterion text. No criteria falls back to one overall criterion.
-export function panelCriteria(v: Partial<Verdict>, acceptance: string[]): Record<string, boolean> {
-  const list = aggregateCriteria(v.criteria)?.list;
-  if (!list) return { overall: Boolean(v.pass) };
-  const byOrder = list.length === acceptance.length;
-  return Object.fromEntries(list.map((c, i) => [byOrder ? acceptance[i] : c.criterion, c.pass]));
+// Stand-in key for a judge that gave no usable per-criterion answers. It is never tallied once any judge keyed real criteria.
+export const OVERALL = 'overall';
+
+const normText = (t: string): string => t.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+
+// One stable, unique label per acceptance criterion (the text; later duplicates get a "(#n)" suffix).
+export function criterionLabels(acceptance: string[]): string[] {
+  const seen = new Map<string, number>();
+  return acceptance.map((a) => {
+    const n = (seen.get(a) ?? 0) + 1;
+    seen.set(a, n);
+    return n === 1 ? a : `${a} (#${n})`;
+  });
 }
 
-// Clear-majority panel verdict: per-criterion majority, mean scores, issues from every judge.
+type SlotCriterion = CriterionResult & { scored: boolean }; // scored: the judge gave a finite score
+
+// Maps a judge's criteria onto acceptance slots (0-based). In order of trust: the judge's own 1-based `index`, then
+// the normalised criterion text, then position when the count matches. Anything still unmatched is dropped, so two
+// judges can never end up with disjoint keys that each look like a lone vote.
+export function matchCriteria(raw: unknown, acceptance: string[]): Map<number, SlotCriterion> {
+  const entries = (Array.isArray(raw) ? raw : []).flatMap((c: any) => {
+    const n = normalizeCriterion(c);
+    return n ? [{ n: { ...n, scored: Number.isFinite(c.score) }, index: Number.isInteger(c.index) ? (c.index as number) : undefined }] : [];
+  });
+  const slots = new Map<number, SlotCriterion>();
+  const byIndex = entries.map((e, pos) => ({ ...e, pos }));
+  const afterIndex = byIndex.filter((e) => {
+    const k = e.index === undefined ? -1 : e.index - 1;
+    if (k >= 0 && k < acceptance.length && !slots.has(k)) {
+      slots.set(k, e.n);
+      return false;
+    }
+    return true;
+  });
+  const texts = acceptance.map(normText);
+  const afterText = afterIndex.filter((e) => {
+    const t = normText(e.n.criterion);
+    const k = t ? texts.findIndex((x, i) => x === t && !slots.has(i)) : -1;
+    if (k >= 0) slots.set(k, e.n);
+    return k < 0;
+  });
+  if (entries.length === acceptance.length) for (const e of afterText) if (!slots.has(e.pos)) slots.set(e.pos, e.n);
+  return slots;
+}
+
+// One judge's per-criterion binary verdicts keyed by acceptance label. A judge with no matchable criteria
+// contributes a single synthetic `overall` verdict instead.
+export function panelCriteria(v: Partial<Verdict>, acceptance: string[]): Record<string, boolean> {
+  const slots = matchCriteria(v.criteria, acceptance);
+  if (!slots.size) return { [OVERALL]: Boolean(v.pass) };
+  const labels = criterionLabels(acceptance);
+  return Object.fromEntries([...slots].sort(([a], [b]) => a - b).map(([k, c]) => [labels[k], c.pass]));
+}
+
+const mean = (xs: number[]): number => xs.reduce((a, b) => a + b, 0) / xs.length;
+
+// Clear-majority panel verdict: per-criterion majority, mean scores, issues from every judge. Non-finite scores are ignored.
 export function panelMajorityVerdict(raws: Partial<Verdict>[], majority: Record<string, boolean>, acceptance: string[]): Partial<Verdict> {
-  const keys = Object.keys(majority);
-  const score = raws.reduce((a, r) => a + Number(r.score), 0) / raws.length;
+  const real = Object.keys(majority).filter((k) => k !== OVERALL);
+  const passVotes = raws.filter((x) => x.pass).length;
+  const finite = raws.map((r) => Number(r.score)).filter(Number.isFinite);
+  const score = finite.length ? mean(finite) : passVotes * 2 > raws.length ? 1 : 0;
   const issues = [...new Set(raws.flatMap((r) => r.issues ?? []))];
-  const lead = raws.find((r) => r.pass === (raws.filter((x) => x.pass).length * 2 > raws.length)) ?? raws[0];
-  const perCriterion = keys.length === 1 && keys[0] === 'overall' ? undefined : keys.map((criterion) => {
-    const found = raws.flatMap((r) => {
-      const list = aggregateCriteria(r.criteria)?.list;
-      if (!list) return [];
-      const c = list.length === acceptance.length ? list[acceptance.indexOf(criterion)] : list.find((x) => x.criterion === criterion);
+  const lead = raws.find((r) => r.pass === (passVotes * 2 > raws.length)) ?? raws[0];
+  const labels = criterionLabels(acceptance);
+  const slotsOf = raws.map((r) => matchCriteria(r.criteria, acceptance));
+  const perCriterion = real.length ? real.map((criterion) => {
+    const found = slotsOf.flatMap((m) => {
+      const c = m.get(labels.indexOf(criterion));
       return c ? [c] : [];
     });
-    const scores = found.map((c) => c.score);
+    const scores = found.filter((c) => c.scored).map((c) => c.score);
     // W4.2 + W4.1: keep the evidence of the first judge that sided with the majority, so agentic mode can still see it.
     const evidence = found.find((c) => c.pass === majority[criterion] && c.evidence)?.evidence;
-    return { criterion, pass: majority[criterion], score: scores.length ? scores.reduce((a, b) => a + b, 0) / scores.length : majority[criterion] ? 1 : 0, ...(evidence ? { evidence } : {}) };
-  });
+    return { criterion, pass: majority[criterion], score: scores.length ? mean(scores) : majority[criterion] ? 1 : 0, ...(evidence ? { evidence } : {}) };
+  }) : undefined;
   return { pass: Object.values(majority).every(Boolean), score, summary: lead.summary ?? '', issues, ...(perCriterion ? { criteria: perCriterion } : {}) };
 }
 
@@ -293,15 +344,21 @@ export const FAST_PLAN_SCHEMA = {
   required: ['tasks'],
 };
 
+// A well-formed criterion entry with its score clamped to 0..1 (non-finite scores become 0); null for anything malformed.
+function normalizeCriterion(c: any): CriterionResult | null {
+  if (!c || typeof c !== 'object' || typeof c.criterion !== 'string' || typeof c.pass !== 'boolean') return null;
+  const n = Number.isFinite(c.score) ? Math.min(1, Math.max(0, c.score)) : 0;
+  return { criterion: c.criterion, pass: c.pass, score: n, ...(typeof c.note === 'string' ? { note: c.note } : {}), ...(typeof c.evidence === 'string' && c.evidence.trim() ? { evidence: c.evidence } : {}) };
+}
+
 // Per-criterion judging: mean score, and pass only when every criterion passes. Malformed entries are skipped.
 // In agentic mode, `unevidenced` lists criteria that passed without evidence (advisory only).
 export function aggregateCriteria(criteria: unknown, agentic = false): { score: number; pass: boolean; failing: CriterionResult[]; list: CriterionResult[]; unevidenced: CriterionResult[] } | undefined {
   if (!Array.isArray(criteria)) return undefined;
   const list: CriterionResult[] = [];
   for (const c of criteria) {
-    if (!c || typeof c !== 'object' || typeof c.criterion !== 'string' || typeof c.pass !== 'boolean') continue;
-    const n = Number.isFinite(c.score) ? Math.min(1, Math.max(0, c.score)) : 0;
-    list.push({ criterion: c.criterion, pass: c.pass, score: n, ...(typeof c.note === 'string' ? { note: c.note } : {}), ...(typeof c.evidence === 'string' && c.evidence.trim() ? { evidence: c.evidence } : {}) });
+    const n = normalizeCriterion(c);
+    if (n) list.push(n);
   }
   if (!list.length) return undefined;
   return { score: list.reduce((a, c) => a + c.score, 0) / list.length, pass: list.every((c) => c.pass), failing: list.filter((c) => !c.pass), list, unevidenced: agentic ? list.filter((c) => c.pass && !c.evidence) : [] };
@@ -354,6 +411,15 @@ const VERDICT_SCHEMA = {
     },
   },
   required: ['pass', 'score', 'summary', 'issues'],
+};
+
+// Panel judges also number their criteria so votes can be matched by position, not by free text.
+const PANEL_VERDICT_SCHEMA = {
+  ...VERDICT_SCHEMA,
+  properties: {
+    ...VERDICT_SCHEMA.properties,
+    criteria: { ...VERDICT_SCHEMA.properties.criteria, items: { ...VERDICT_SCHEMA.properties.criteria.items, properties: { ...VERDICT_SCHEMA.properties.criteria.items.properties, index: { type: 'integer', minimum: 1 } } } },
+  },
 };
 
 const EVIDENCE_SCHEMA = {
@@ -1018,6 +1084,7 @@ export class Conductor {
     const tests = cfg.testCommand ? g.runTests(cwd, cfg.testCommand) : null;
     if (tests) this.emit('log', `${task.id} tests ${tests.ok ? 'passed' : 'FAILED'}`, undefined, task.id);
     const agentic = cfg.verification.agenticJudge.enabled ? cfg.verification.agenticJudge : undefined;
+    const panelOn = cfg.verification.panel.enabled && cfg.verification.panel.judges.length > 0;
     const headBefore = g.head(cwd);
     const frozen = this.frozenCriteria(task);
     const built = judgePrompt({
@@ -1029,6 +1096,7 @@ export class Conductor {
         diff: g.diffSince(cwd, base),
         tools: this.harness.guidance.tools,
         checklist: this.harness.guidance.checklist,
+        indexed: panelOn,
         agentic: agentic ? runScenarioChecks({ cwd, scenarios: this.scenarios, testCommand: cfg.testCommand, testsResult: tests, timeoutMs: agentic.checkTimeoutMs, exec: (d, c, t) => g.runTests(d, c, t, scrubVerifierEnv(process.env)) }) : undefined,
       });
     const prompt = joinPrompt(built);
@@ -1043,7 +1111,7 @@ export class Conductor {
         {
           prompt: framing ? joinPrompt({ ...built, prefix: `${framing}\n\n${built.prefix}` }) : prompt,
           cwd,
-          schema: VERDICT_SCHEMA,
+          schema: panelOn ? PANEL_VERDICT_SCHEMA : VERDICT_SCHEMA,
           tools: ['Read', 'Grep', 'Glob', 'Bash'],
           allowedTools: ['Read', 'Grep', 'Glob', 'Bash'],
           disallowedTools: ['Edit', 'Write', 'Bash(git commit:*)', 'Bash(git reset:*)', 'Bash(rm:*)'],
@@ -1064,7 +1132,7 @@ export class Conductor {
     const panelCfg = cfg.verification.panel;
     let panel: PanelRecord | undefined;
     let retryModel: string | undefined;
-    if (panelCfg.enabled && panelCfg.judges.length) {
+    if (panelOn) {
       // Panel judging (opt-in): every member votes per criterion; a split vote goes to the escalation model.
       const votes: PanelJudgeVote[] = [];
       const raws: Partial<Verdict>[] = [];
@@ -1079,10 +1147,14 @@ export class Conductor {
         raws.push(r.v);
       }
       if (votes.length) {
-        const agg = aggregatePanel(votes);
+        // The synthetic `overall` answer of a judge without usable criteria is only tallied when no judge keyed real
+        // criteria; and every acceptance criterion must be decided by a true majority of the judges.
+        const keyed = votes.some((vt) => Object.keys(vt.criteria).some((k) => k !== OVERALL));
+        const tallied = keyed ? votes.map((vt) => ({ ...vt, criteria: Object.fromEntries(Object.entries(vt.criteria).filter(([k]) => k !== OVERALL)) })) : votes;
+        const agg = aggregatePanel(tallied, keyed ? criterionLabels(task.acceptance) : []);
         const escalated = agg.split;
         panel = {
-          votes: votes.map((vote, i) => ({ judge: vote.judge, model: vote.model, lineage: vote.lineage, pass: Boolean(raws[i].pass), score: Number(raws[i].score), criteria: vote.criteria })),
+          votes: votes.map((vote, i) => ({ judge: vote.judge, model: vote.model, lineage: vote.lineage, pass: Boolean(raws[i].pass), score: Number.isFinite(Number(raws[i].score)) ? Number(raws[i].score) : 0, criteria: vote.criteria })),
           disagreement: round(agg.disagreement),
           perCriterion: agg.perCriterion.map((c) => ({ criterion: c.criterion, pass: c.pass, fail: c.fail, disagreement: round(c.disagreement) })),
           escalated,

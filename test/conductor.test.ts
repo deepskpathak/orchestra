@@ -721,6 +721,36 @@ test('panel: a clear majority records votes and disagreement without escalating'
   assert.ok(store.events(run.id).some((e) => e.kind === 'log' && /judge panel of 3: disagreement 0\.17/.test(e.msg)));
 });
 
+test('panel: reworded criteria matched by index, a judge without criteria is not tallied, and index is only asked for in panel mode', async () => {
+  const seen: AgentRequest[] = [];
+  const base = fakeRunner({ failFirstAttemptOf: [] });
+  const reworded = [{ criterion: 'first', pass: true, score: 0.9, index: 1 }, { criterion: 'second', pass: true, score: 0.9, index: 2 }];
+  const byModel: Record<string, unknown> = {
+    haiku: { pass: true, score: 0.9, summary: 'bare', issues: [] },
+    sonnet: { pass: true, score: 0.9, summary: 'indexed', issues: [], criteria: reworded },
+    'opus-mini': { pass: true, score: 0.9, summary: 'indexed', issues: [], criteria: reworded },
+  };
+  const runner: Runner = async (req) => {
+    seen.push(req);
+    if (req.role === 'planner') return { ok: true, text: '', costUsd: 0, turns: 1, durationMs: 1, structured: { tasks: [{ id: 'T1', title: 'a', description: 'a', acceptance: ['c1', 'c2'], deps: [] }], scenarios: [] } };
+    if (req.role === 'judge' && byModel[req.model]) return { ok: true, text: '', costUsd: 0.01, turns: 1, durationMs: 1, structured: byModel[req.model] };
+    return base(req);
+  };
+  const store = tempRepo({ verification: { ...DEFAULT_PROJECT_CONFIG.verification, panel: { enabled: true, judges: panelJudges, escalateModel: null } } });
+  const run = await runGoal({ store, runner, goal: 'g' });
+  const t = run.tasks[0];
+  assert.equal(t.status, 'merged');
+  assert.equal(t.verdict!.panel!.escalated, false);
+  assert.deepEqual(t.verdict!.panel!.perCriterion.map((c) => [c.criterion, c.pass, c.fail]), [['c1', 2, 0], ['c2', 2, 0]].map(([c, p, f]) => [c, p, f]));
+  assert.deepEqual(t.verdict!.criteria!.map((c) => c.criterion), ['c1', 'c2']);
+  assert.ok(seen.filter((r) => r.role === 'judge').every((r) => /1-based position/.test(r.prompt)));
+  const offSeen: AgentRequest[] = [];
+  const off = await runGoal({ store: tempRepo({ concurrency: 1 }), runner: (req) => { offSeen.push(req); return base(req); }, goal: 'g' });
+  assert.equal(off.status, 'done');
+  assert.ok(offSeen.some((r) => r.role === 'judge'));
+  assert.ok(offSeen.filter((r) => r.role === 'judge').every((r) => !/1-based position/.test(r.prompt) && !JSON.stringify(r.schema ?? {}).includes('"index"')));
+});
+
 test('panel: a split vote makes exactly one escalation call whose verdict decides', async () => {
   const seen: Array<{ model: string; prompt: string }> = [];
   const store = tempRepo({ verification: { ...DEFAULT_PROJECT_CONFIG.verification, panel: { enabled: true, judges: panelJudges.slice(0, 2), escalateModel: 'big' } } });

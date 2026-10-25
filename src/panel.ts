@@ -11,7 +11,7 @@ export interface CriterionTally {
   criterion: string;
   pass: number;
   fail: number;
-  majority: boolean | null; // null when pass === fail
+  majority: boolean | null; // null without a true majority of the judges (a tie, or too few votes)
   disagreement: number; // share of voting judges in the minority; a tie counts as 0.5
 }
 
@@ -22,9 +22,16 @@ export interface PanelAggregate {
   split: boolean; // some criterion has no clear majority
 }
 
-export function aggregatePanel(votes: PanelJudgeVote[]): PanelAggregate {
+// A criterion needs a true majority of the judges on the panel: more than half must pass it, or more than half
+// must fail it. A criterion only some judges voted on (or none, when named in `expected`) cannot be decided by
+// those few, so it counts as split and goes to escalation. Missing votes never count for either side.
+export function aggregatePanel(votes: PanelJudgeVote[], expected: string[] = []): PanelAggregate {
   const order: string[] = [];
   const tally = new Map<string, { pass: number; fail: number }>();
+  for (const criterion of expected) {
+    tally.set(criterion, { pass: 0, fail: 0 });
+    order.push(criterion);
+  }
   for (const v of votes) {
     for (const [criterion, pass] of Object.entries(v.criteria)) {
       let t = tally.get(criterion);
@@ -41,9 +48,9 @@ export function aggregatePanel(votes: PanelJudgeVote[]): PanelAggregate {
   const perCriterion: CriterionTally[] = order.map((criterion) => {
     const { pass, fail } = tally.get(criterion)!;
     const n = pass + fail;
-    const m = pass === fail ? null : pass > fail;
+    const m = pass * 2 > votes.length ? true : fail * 2 > votes.length ? false : null;
     if (m !== null) majority[criterion] = m;
-    return { criterion, pass, fail, majority: m, disagreement: Math.min(pass, fail) / n };
+    return { criterion, pass, fail, majority: m, disagreement: n === 0 ? 0.5 : Math.min(pass, fail) / n };
   });
   const disagreement = perCriterion.length ? perCriterion.reduce((a, c) => a + c.disagreement, 0) / perCriterion.length : 0;
   return { majority, perCriterion, disagreement, split: perCriterion.some((c) => c.majority === null) };
