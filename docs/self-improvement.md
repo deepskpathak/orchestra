@@ -72,6 +72,12 @@ orchestra learnings --domain global  # only the global lessons
 
 An unknown domain exits non-zero and lists the known domains.
 
+**Lesson hygiene.** The librarian returns item edits, never the whole set. Each lesson has a stable `id`, and an edit is `add`, `update` (new text, extra evidence, optional `helped` true or false) or `remove`, addressed by id. Lessons the librarian does not mention are kept, and a response shaped like a full rewrite is converted into edits (matching lessons are updated, new ones added, nothing is removed). `applyLessonEdits` in `src/learnings.ts` is the only path from model output to the store.
+
+- **Counters.** Each lesson carries `helpful` and `harmful` counts. Older files without them load as zero.
+- **Expiry (opt-in).** Set `learnings.expiryDays` above 0 in `.orchestra/config.json` to drop, after each run, lessons whose newest evidence is older than that many days, or whose harmful count is well above helpful. `0` (the default) never expires anything.
+- **Ablation.** `orchestra evals ablation` replays the locked holdout cases twice, with and without the learnings store, and prints per-case scores, the mean delta and its 95% CI. A positive delta means lessons help. It costs two replays per holdout case. Normal eval replays stay clean-room; only the with-lessons arm of this command reads learnings.
+
 **Contrast evidence.** When [contrastive repair](configuration.md#contrastive) ran, the comparison judge's reasons for why one attempt beat the other are passed to the librarian as lesson evidence, so lessons can cite a concrete winning approach.
 
 ## Factory Eval: `orchestra evals`

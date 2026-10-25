@@ -11,3 +11,5 @@ allowed-tools: Bash(orchestra *)
 Note: the output ends with the eval infra failure rate for the incumbent and candidate (replays are clean-room and interleaved). A non-zero rate means the comparison was inconclusive, so suggest rerunning once the usage limit or network issue clears.
 
 Note: if `evolve.candidates` in `.orchestra/config.json` is above 1, the cycle proposes several variants, screens them cheaply, and composes the survivors before the full evaluation. Mention which version was composed from which parents.
+
+Note: to check whether the accumulated lessons actually help, run `orchestra evals ablation` (background, it replays the holdout twice per case). It prints the with-lessons versus without-lessons delta and 95% CI. Lessons are only ever changed by item edits, and `learnings.expiryDays` (0 = off) retires stale ones.

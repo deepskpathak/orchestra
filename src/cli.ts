@@ -11,11 +11,12 @@ import { atlasStats, loadOrBuildAtlas } from './atlas.ts';
 import { runGoal } from './conductor.ts';
 import { explorationMetrics, renderExploration } from './exploration.ts';
 import { collectOutcomes, renderOutcomes } from './outcomes.ts';
-import { evolutionDue, evolve, harvest, listEvals, metrics } from './evolve.ts';
+import { evaluate, evolutionDue, evolve, harvest, listEvals, metrics } from './evolve.ts';
+import { DEFAULT_RATIOS, splitEvals } from './evalsets.ts';
 import { fakeRunner } from './fake.ts';
 import { excludeOrchestra } from './git.ts';
 import { guardMain } from './guard.ts';
-import { GLOBAL, listDomains, readLearnings } from './learnings.ts';
+import { GLOBAL, lessonAblation, listDomains, readLearnings } from './learnings.ts';
 import { validNetwork } from './container.ts';
 import { detectSandbox, type SandboxBackend } from './sandbox.ts';
 import { PACKAGE_ROOT, currentVersion, packageVersion, listVersions, promote, readArchive, seedHarness } from './harness.ts';
@@ -68,6 +69,7 @@ Usage:
   orchestra bench calibrate --import <file>
                                  Import human grades (id + humanPass) and report human-judge kappa
   orchestra evals                List Factory Eval cases
+  orchestra evals ablation       Replay the locked holdout with and without learnings and report the paired delta and CI
   orchestra --version            Print the installed Orchestra version
   orchestra promote <vN>         Promote a harness version (also used for rollback)
   orchestra doctor               Check Claude CLI and headless auth
@@ -462,6 +464,29 @@ function cmdEvals(): void {
   for (const c of cases) console.log(`${c.id}  base ${c.base.slice(0, 8)}  check ${c.check ?? '-'}\n  ${c.goal}`);
 }
 
+// With-lessons versus without-lessons on the locked holdout. Costs two replays per holdout case.
+async function cmdEvalsAblation(): Promise<void> {
+  const store = storeOrDie();
+  const cfg = store.config().evolve.splits;
+  const { holdout } = splitEvals(listEvals(store), cfg ? { feedback: cfg.feedback, validation: cfg.validation, holdout: cfg.holdout } : DEFAULT_RATIOS);
+  if (!holdout.length) {
+    console.log('No holdout cases yet, so there is nothing to ablate. Harvested evals fill the holdout over time (orchestra evals).');
+    return;
+  }
+  const version = currentVersion(store);
+  const run = runner();
+  const score = async (c: (typeof holdout)[number], learnings: boolean): Promise<number> => {
+    const r = await evaluate(store, run, version, [c], undefined, undefined, { learnings });
+    if (r.inconclusive) die(`Ablation stopped on ${c.id}: ${r.inconclusive}`);
+    return r.detail[c.id] ?? 0;
+  };
+  const res = await lessonAblation((c) => score(holdout.find((h) => h.id === c.id)!, true), (c) => score(holdout.find((h) => h.id === c.id)!, false), holdout);
+  const f = (x: number) => (Number.isFinite(x) ? x.toFixed(3) : String(x));
+  console.log(`Lesson ablation on ${res.n} holdout case${res.n === 1 ? '' : 's'} (harness ${version})`);
+  for (const c of res.cases) console.log(`  ${c.id}  with ${f(c.withLessons)}  without ${f(c.withoutLessons)}  delta ${f(c.delta)}`);
+  console.log(`mean delta ${f(res.meanDelta)}  95% CI [${f(res.ci[0])}, ${f(res.ci[1])}]  => lessons ${res.verdict === 'helps' ? 'help' : res.verdict === 'hurts' ? 'hurt' : 'show no clear effect'}`);
+}
+
 function cmdPromote(args: string[]): void {
   const store = storeOrDie();
   if (!args[0]) die('Usage: orchestra promote <vN>');
@@ -637,7 +662,8 @@ export async function main(argv: string[]): Promise<void> {
       await cmdBench(args);
       break;
     case 'evals':
-      cmdEvals();
+      if (args[0] === 'ablation') await cmdEvalsAblation();
+      else cmdEvals();
       break;
     case 'promote':
       cmdPromote(args);
