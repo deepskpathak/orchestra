@@ -257,7 +257,7 @@ export interface ProjectConfig {
       external?: 'off' | 'auto' | 'ctags' | 'graphify'; // optional external graph input (W9.5); absent means 'off'
     };
   };
-  throughput?: { footprintScheduling: boolean; batchMerge: { enabled: boolean; maxBatch: number } }; // W6.1, W6.2
+  throughput?: { footprintScheduling: boolean; decisionLog?: boolean; batchMerge: { enabled: boolean; maxBatch: number } }; // W6.1, W6.2; decisionLog defaults to footprintScheduling when unset
   oversight?: { riskTiers: RiskTierConfig }; // W7.1
   planner?: { cascade: { enabled: boolean; draftModel: string; confidenceThreshold: number } }; // W6.3: cheap model drafts, harness planner model on low confidence or a failed check
   budgets?: { workerPrompt: { enabled: boolean; maxTurns: number } }; // W6.5: turns and dollars remaining in worker prompts, hard task caps

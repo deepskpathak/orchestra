@@ -130,13 +130,16 @@ External MCP code-graph servers such as codegraph and Serena are user opt-ins. A
 
 ### `throughput` (W6.1, W6.2)
 
-Both keys are off by default. The `throughput` object and `throughput.batchMerge` are merged key by key.
+The keys are off by default. The `throughput` object and `throughput.batchMerge` are merged key by key.
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `throughput.footprintScheduling` | boolean | `false` | Single writer per footprint: a ready task whose planner-declared footprint overlaps an in-flight task waits (a missing footprint overlaps everything). Dependents also get a short "Decisions from merged dependencies" section in the worker prompt. |
+| `throughput.footprintScheduling` | boolean | `false` | Single writer per footprint: a ready task whose planner-declared footprint overlaps an in-flight task waits (a missing footprint overlaps everything). With `decisionLog` unset, dependents also get a short "Decisions from merged dependencies" section in the worker prompt. |
+| `throughput.decisionLog` | boolean | unset | Controls that dependency decision log on its own. Unset follows `footprintScheduling` (so default prompts are unchanged); `true` adds it without footprint scheduling, `false` omits it with it. |
 | `throughput.batchMerge.enabled` | boolean | `false` | Queue judged-pass tasks and merge disjoint-footprint batches into the integration branch with one post-merge test run per batch. On failure the batch is bisected: bad tasks are reset out and go to repair, good ones stay merged. Per-task merge wait is stored as `Task.mergeWaitMs`. |
 | `throughput.batchMerge.maxBatch` | number | `4` | Largest batch. |
+
+Per-call settings (`budgets.workerPrompt`, `throughput.batchMerge.maxBatch`, `context.atlas.query`) are read once when the run starts; editing `config.json` mid-run does not change them for that run.
 
 The conflict rate (merge conflicts / merge attempts) is recorded for every run as `Run.conflictRate` and in the `run.end` event, with these keys on or off.
 

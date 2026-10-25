@@ -359,3 +359,41 @@ test('batch merge: tasks dropped by the union check get the failing output in th
   assert.ok(t3.length > 0, 'T3 is sent to repair');
   for (const i of t3) assert.match(i.text, /UNION-BROKEN/, 'the note carries the failing output, not an empty tail');
 });
+
+test('decision log has its own key: on without footprint scheduling, off with it, and follows it when unset', async () => {
+  async function promptsFor(throughput: any): Promise<Record<string, string>> {
+    const store = tempRepo({ concurrency: 2, throughput });
+    const prompts: Record<string, string> = {};
+    const inner = planned([t('T1', ['a.txt']), { ...t('T2', ['b.txt']), deps: ['T1'] }], {}, 0);
+    const runner: Runner = async (req) => {
+      if (req.role === 'worker') prompts[req.meta?.task ?? ''] = req.prompt;
+      return inner(req);
+    };
+    await runGoal({ store, runner, goal: 'g' });
+    return prompts;
+  }
+  const batch = { enabled: false, maxBatch: 4 };
+  assert.match((await promptsFor({ footprintScheduling: false, decisionLog: true, batchMerge: batch })).T2, /Decisions from merged dependencies/);
+  assert.doesNotMatch((await promptsFor({ footprintScheduling: true, decisionLog: false, batchMerge: batch })).T2, /Decisions from merged dependencies/);
+  assert.match((await promptsFor({ footprintScheduling: true, batchMerge: batch })).T2, /Decisions from merged dependencies/);
+  assert.doesNotMatch((await promptsFor({ footprintScheduling: false, batchMerge: batch })).T2, /Decisions from merged dependencies/);
+});
+
+test('per-call paths (worker caps, budgets) use the config snapshot taken when the run starts', async () => {
+  const store = tempRepo({ budgets: { workerPrompt: { enabled: true, maxTurns: 50 } } });
+  const turnCaps: (number | undefined)[] = [];
+  const inner = fakeRunner({ stepMs: 0, failFirstAttemptOf: ['T1'] });
+  const plan = planned([t('T1')], {}, 0);
+  const runner: Runner = async (req) => {
+    if (req.role === 'worker') {
+      turnCaps.push(req.maxTurns);
+      // Editing the file mid-run must not change what the hot paths see; that is what the snapshot buys.
+      store.writeJson('config.json', { ...store.config(), budgets: { workerPrompt: { enabled: true, maxTurns: 1 } } });
+    }
+    return req.role === 'planner' ? plan(req) : inner(req);
+  };
+  const run = await runGoal({ store, runner, goal: 'g' });
+  assert.equal(run.tasks[0].attempts, 2);
+  assert.equal(turnCaps.length, 2);
+  assert.ok(turnCaps[1]! > 1, `second attempt cap ${turnCaps[1]}`);
+});

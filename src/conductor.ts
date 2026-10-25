@@ -30,7 +30,7 @@ import { DEFAULT_PROVIDER, resolveModel } from './models.ts';
 import { resolveProvider, type ModelProvider } from './provider.ts';
 import { verificationModes } from './outcomes.ts';
 import { AGENTIC_INSTRUCTION, NO_EVIDENCE_NOTE, executedChecksSection, runScenarioChecks, type CheckResult } from './judge-checks.ts';
-import type { ActiveAgent, CriterionResult, OrchestraEvent, PanelRecord, Role, Run, Scenario, Task, Verdict } from './types.ts';
+import type { ActiveAgent, CriterionResult, OrchestraEvent, PanelRecord, ProjectConfig, Role, Run, Scenario, Task, Verdict } from './types.ts';
 
 export interface Ablation {
   scenarios?: boolean; // the judge and contrast comparer see no hidden scenarios
@@ -502,7 +502,8 @@ export class Conductor {
   // Last integration commit whose tests passed. Batch merging parks transient and rejected merge states on
   // the integration worktree while tests run, so new task worktrees branch from this commit, never from HEAD.
   private knownGood = '';
-  private readonly inflightIds = new Set<string>(); // tasks with an attempt in progress (scheduler)
+  private readonly inflight = new Map<string, Promise<void>>(); // tasks with an attempt in progress (scheduler)
+  private readonly cfg: ProjectConfig; // snapshot taken at construction for the per-call hot paths (call, budgets, batch flush, atlas hint)
   private batchQueue: { task: Task; resolve: () => void }[] = []; // W6.2: judged-pass tasks waiting for a batch
   private readonly mergeReadyAt = new Map<string, number>();
   private readonly workerUse = new Map<string, { turns: number; usd: number }>(); // W6.5: worker turns and dollars per task, all attempts
@@ -513,7 +514,8 @@ export class Conductor {
 
   constructor(opts: ConductorOptions) {
     this.store = opts.store;
-    this.provider = resolveProvider(opts.store.config().provider, opts.runner);
+    this.cfg = opts.store.config();
+    this.provider = resolveProvider(this.cfg.provider, opts.runner);
     this.harness = loadHarness(opts.store, opts.harnessVersion);
     this.onUpdate = opts.onUpdate;
     this.sandboxOpt = opts.sandbox;
@@ -524,7 +526,7 @@ export class Conductor {
     this.evalLearnings = opts.evalLearnings ?? false;
     this.wtRoot = opts.store.path('worktrees');
     const id = (opts.kind === 'eval' ? 'e' : '') + newRunId();
-    const modes = verificationModes(opts.store.config().verification);
+    const modes = verificationModes(this.cfg.verification);
     this.run = {
       id,
       goal: opts.goal,
@@ -743,7 +745,7 @@ export class Conductor {
   // and the run proceeds with the old prompts.
   // L2: the query command is only mentioned when the atlas is loaded and context.atlas.query is on.
   private atlasQuery(): boolean {
-    return !!this.atlas && !!this.store.config().context.atlas.query;
+    return !!this.atlas && !!this.cfg.context.atlas.query;
   }
 
   private loadAtlas(): void {
@@ -775,9 +777,8 @@ export class Conductor {
   }
 
   private async schedule(): Promise<void> {
-    const { run } = this;
+    const { run, inflight } = this;
     const cfg = this.store.config();
-    const inflight = new Map<string, Promise<void>>();
 
     for (;;) {
       if (run.costUsd >= cfg.runBudgetUsd) {
@@ -800,13 +801,11 @@ export class Conductor {
         if (cfg.throughput?.footprintScheduling && !canStart(t, running)) continue;
         slots--;
         running.push(t);
-        this.inflightIds.add(t.id);
         const p = this.attempt(t)
           .catch((err) => this.fail(t, `internal error: ${(err as Error).message}`))
           .finally(() => {
             this.warmed();
             inflight.delete(t.id);
-            this.inflightIds.delete(t.id);
             this.pokeBatch();
           });
         inflight.set(t.id, p);
@@ -839,7 +838,7 @@ export class Conductor {
 
     const learnings = (this.run.kind === 'eval' && !this.evalLearnings) || this.ablate.learnings ? {} : readAllLearnings(store);
     const others = this.run.tasks.filter((t) => t.id !== task.id).map((t) => `- ${t.id} ${t.title} [${t.status}]`);
-    const depLog = cfg.throughput?.footprintScheduling ? decisionLog(task.deps.map((d) => this.task(d)).filter((d): d is Task => d?.status === 'merged')) : '';
+    const depLog = (cfg.throughput?.decisionLog ?? cfg.throughput?.footprintScheduling) ? decisionLog(task.deps.map((d) => this.task(d)).filter((d): d is Task => d?.status === 'merged')) : '';
     const prompt = joinPrompt(
       workerPrompt({
         goal: this.run.goal,
@@ -1364,13 +1363,13 @@ export class Conductor {
   // W6.5: worker turns and dollars spent on this task across attempts against the caps.
   private budgetState(task: Task): BudgetState {
     const u = this.workerUse.get(task.id) ?? { turns: 0, usd: 0 };
-    return { turnsUsed: u.turns, maxTurns: this.store.config().budgets?.workerPrompt.maxTurns ?? 0, usdSpent: u.usd, usdCap: this.harness.config.budgetUsd.worker };
+    return { turnsUsed: u.turns, maxTurns: this.cfg.budgets?.workerPrompt.maxTurns ?? 0, usdSpent: u.usd, usdCap: this.harness.config.budgetUsd.worker };
   }
 
   // Session caps for the next worker call: what is left of the task budget. Undefined when the feature is off.
   // `shares` splits what is left between workers that run at the same time (best-of-n), so together they stay inside the cap.
   private workerCap(task: Task, shares = 1): { turns: number; usd: number } | undefined {
-    if (!this.store.config().budgets?.workerPrompt.enabled) return undefined;
+    if (!this.cfg.budgets?.workerPrompt.enabled) return undefined;
     const b = this.budgetState(task);
     return { turns: Math.max(1, Math.floor((b.maxTurns - b.turnsUsed) / shares)), usd: Math.max(0.01, round((b.usdCap - b.usdSpent) / shares, 4)) };
   }
@@ -1459,9 +1458,9 @@ export class Conductor {
   // Flush once the queue is full or every in-flight attempt is already waiting in it, so disjoint
   // tasks that finish around the same time share one post-merge test run.
   private pokeBatch(): void {
-    const max = this.store.config().throughput?.batchMerge.maxBatch ?? 4;
+    const max = this.cfg.throughput?.batchMerge.maxBatch ?? 4;
     const q = this.batchQueue.length;
-    if (!q || (q < max && q < this.inflightIds.size)) return;
+    if (!q || (q < max && q < this.inflight.size)) return;
     const items = this.batchQueue;
     this.batchQueue = [];
     const job = this.mergeChain.then(() => this.mergeBatches(items));
@@ -1469,7 +1468,7 @@ export class Conductor {
   }
 
   private async mergeBatches(items: { task: Task; resolve: () => void }[]): Promise<void> {
-    const max = this.store.config().throughput?.batchMerge.maxBatch ?? 4;
+    const max = this.cfg.throughput?.batchMerge.maxBatch ?? 4;
     try {
       for (const ids of planBatches(items.map((i) => i.task), max)) {
         const batch = ids.map((id) => items.find((i) => i.task.id === id)!.task);
