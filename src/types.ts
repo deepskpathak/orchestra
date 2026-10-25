@@ -211,5 +211,8 @@ export interface ProjectConfig {
     promotionRule: 'gain' | 'paired'; // 'gain' = gain above max(minGain, spread); 'paired' = 95% CI lower bound above zero
     niMargin: number; // paired rule: a task type whose mean delta is below -niMargin vetoes promotion
     minJudgeAgreement?: number | null; // refuse to evolve when the incumbent's judge/hidden-check agreement is below this; null = off
+    budgetUsd?: number; // hard cap on spend per evolve cycle; 0 or unset = no cap
+    sequential?: { enabled: boolean; roundSize: number }; // evaluate in rounds, stop once the CI settles the comparison
+    cost?: { enabled: boolean; maxCostRisePct: number; minGainForCost: number; costWeight: number; timeWeight: number }; // cost-aware objective
   };
 }
