@@ -83,7 +83,12 @@ export function fastPathDecision(goal: string, cfg: { enabled: boolean; maxGoalC
 const PLAN_BODY =
   'Produce the task graph and hidden scenarios.\nAlso set "domain": pick one existing domain slug from EXISTING DOMAINS, or propose at most one new kebab-case slug (e.g. cli, web-ui, docs, config) when none fits.';
 
-export function plannerPrompt(i: { goal: string; files: string[]; testCommand?: string; learnings: string; domains: string[]; fastPath?: boolean; map?: string }): BuiltPrompt {
+// Only asked for when the agentic judge is on: the judge runs these commands, so they must be real and runnable.
+const CHECK_BODY =
+  'Give each scenario an optional "check": one shell command, run from the repository root of the finished change, that exits 0 when the scenario holds and non-zero when it does not (for example `node scripts/smoke.mjs` or a node -e one-liner). Make it deterministic, side-effect free and offline. Leave "check" out for a scenario no command can verify.';
+
+export function plannerPrompt(i: { goal: string; files: string[]; testCommand?: string; learnings: string; domains: string[]; fastPath?: boolean; map?: string; scenarioChecks?: boolean }): BuiltPrompt {
+  const body = i.scenarioChecks ? `${PLAN_BODY}\n${CHECK_BODY}` : PLAN_BODY;
   return {
     prefix: [
       `LEARNINGS:\n${i.learnings}`,
@@ -93,8 +98,8 @@ export function plannerPrompt(i: { goal: string; files: string[]; testCommand?: 
       `GOAL:\n${i.goal}`,
     ].join('\n\n'),
     body: i.fastPath
-      ? `${PLAN_BODY}\nThis goal is small and single-concern: return exactly one task and an empty or minimal scenarios list.`
-      : PLAN_BODY,
+      ? `${body}\nThis goal is small and single-concern: return exactly one task and an empty or minimal scenarios list.`
+      : body,
   };
 }
 
@@ -632,6 +637,7 @@ export class Conductor {
       domains: isEval ? [] : listDomains(store),
       fastPath: fp.fast,
       map: this.map || undefined,
+      scenarioChecks: cfg.verification.agenticJudge.enabled,
     });
     const prompt = joinPrompt(built);
 
@@ -1241,7 +1247,8 @@ export class Conductor {
     }
     const out = runOracles({
       repoRoot: this.store.root,
-      baseRef: this.integration.base,
+      // The commit the task started from, so changes landed by earlier tasks it depends on are not read as drift.
+      baseRef: base,
       tree: cwd,
       taskBase: base,
       oracleDir: dir,

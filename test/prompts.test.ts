@@ -62,6 +62,17 @@ test('planner fast path keeps the prefix and asks for exactly one task', () => {
   assert.doesNotMatch(slow.body, /exactly one task/);
 });
 
+test('planner asks for a scenario check only when scenarioChecks (agentic judge) is on', () => {
+  const base = { goal: 'G', files: ['a.ts'], learnings: 'L', domains: [] as string[] };
+  const off = plannerPrompt(base);
+  const on = plannerPrompt({ ...base, scenarioChecks: true });
+  assert.doesNotMatch(off.body, /check/i);
+  assert.match(on.body, /"check": one shell command/);
+  assert.equal(on.prefix, off.prefix);
+  assert.deepEqual(plannerPrompt({ ...base, scenarioChecks: false }), off);
+  assert.match(plannerPrompt({ ...base, scenarioChecks: true, fastPath: true }).body, /"check"[\s\S]*exactly one task/);
+});
+
 test('progress file path replaces long notes in the repair body, prefix unchanged', () => {
   const long = `first line of issue\n${'detail line\n'.repeat(50)}END-OF-NOTE`;
   const task = mk('T1', { attempts: 2, notes: [long] });

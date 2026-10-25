@@ -69,7 +69,7 @@ export interface OracleOutcome {
 
 export function runOracles(i: {
   repoRoot: string; // for creating the base worktree
-  baseRef: string; // run base commit
+  baseRef: string; // commit the task started from (the integration tip when its worktree was cut)
   tree: string; // worker tree
   taskBase: string; // commit the task started from, to find worker-touched files
   oracleDir: string;

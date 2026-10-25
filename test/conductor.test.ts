@@ -1003,6 +1003,25 @@ test('runOracles: a bad base ref throws but leaves no base worktree behind', () 
   assert.equal(execFileSync('git', ['worktree', 'list'], { cwd: store.root, encoding: 'utf8' }), before);
 });
 
+test('oracles: the differential compares against the task base, so earlier tasks\' changes are not drift', async () => {
+  const store = noTestRepo({});
+  const base = fakeRunner({ failFirstAttemptOf: [], workerFiles: (t) => (t === 'T1' ? { 'src/math.mjs': MATH_BUG } : {}), oracleFiles: { 'probe-add.mjs': ORACLE_PROBE } });
+  const runner: Runner = async (req) => {
+    if (req.role === 'planner') {
+      // T1 changes add() legitimately and has no invariants (no oracles); T2 depends on it and must leave add() alone.
+      return { ok: true, text: '', costUsd: 0, turns: 1, durationMs: 1, structured: { tasks: [
+        { id: 'T1', title: 'change add', description: 'a', acceptance: ['c'], deps: [] },
+        { id: 'T2', title: 'unrelated', description: 'b', acceptance: ['c'], deps: ['T1'], invariants: ['add stays as T1 left it'] },
+      ], scenarios: [] } };
+    }
+    return base(req);
+  };
+  const run = await runGoal({ store, runner, goal: 'g' });
+  const t2 = run.tasks.find((t) => t.id === 'T2')!;
+  assert.equal(t2.status, 'merged', t2.verdict?.issues.join('\n'));
+  assert.ok(!t2.verdict!.issues.some((i) => /differential/.test(i)));
+});
+
 test('oracles disabled: no oracle session and unchanged call counts', async () => {
   const count = async (cfg: Record<string, unknown>) => {
     const store = tempRepo(cfg);
@@ -1016,6 +1035,17 @@ test('oracles disabled: no oracle session and unchanged call counts', async () =
 });
 
 // ---------- agentic judge (W4.2) ----------
+
+test('agentic judge on: the planner is asked for scenario checks; off: it is not', async () => {
+  const bodies = async (cfg: Record<string, unknown>) => {
+    const seen: AgentRequest[] = [];
+    const base = fakeRunner({ failFirstAttemptOf: [] });
+    await runGoal({ store: tempRepo({ concurrency: 1, ...cfg }), runner: async (req) => { seen.push(req); return base(req); }, goal: 'g' });
+    return seen.find((r) => r.role === 'planner')!.prompt;
+  };
+  assert.match(await bodies({ verification: { ...DEFAULT_PROJECT_CONFIG.verification, agenticJudge: { enabled: true, checkTimeoutMs: 20000 } } }), /"check": one shell command/);
+  assert.doesNotMatch(await bodies({}), /"check"/);
+});
 
 test('agentic judge: failing scenario check and its exit code reach the judge prompt', async () => {
   const seen: AgentRequest[] = [];
