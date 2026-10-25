@@ -303,3 +303,35 @@ test('risk tiers: approving the only unmerged task of a held run marks it done w
     else process.env.ORCHESTRA_REQUESTER = prev;
   }
 });
+
+test('approve: with no recorded requester the approval warns that four-eyes is not enforced', async () => {
+  const prev = process.env.ORCHESTRA_REQUESTER;
+  delete process.env.ORCHESTRA_REQUESTER;
+  const prevCfg = process.env.GIT_CONFIG_GLOBAL;
+  process.env.GIT_CONFIG_GLOBAL = '/dev/null'; // no user.name from the developer's global config
+  try {
+    const store = tempRepo({ oversight: { riskTiers: { ...DEFAULT_PROJECT_CONFIG.oversight!.riskTiers, enabled: true } } });
+    const inner = planned([t('T1', ['infra/main.tf'])], {}, 0);
+    const runner: Runner = async (req) => {
+      const res = await inner(req);
+      if (req.role === 'worker') {
+        const { mkdirSync, writeFileSync } = await import('node:fs');
+        mkdirSync(`${req.cwd}/infra`, { recursive: true });
+        writeFileSync(`${req.cwd}/infra/main.tf`, 'resource {}\n');
+      }
+      return res;
+    };
+    const run = await runGoal({ store, runner, goal: 'g' });
+    assert.equal(run.requestedBy, 'unknown');
+    const warnings: string[] = [];
+    const done = await approveTask(store, run.id, 'T1', 'bob', (m) => warnings.push(m));
+    assert.equal(done.tasks[0].status, 'merged');
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /four-eyes is NOT enforced/);
+    assert.ok(store.events(run.id).some((e) => /four-eyes is NOT enforced/.test(e.msg)));
+  } finally {
+    if (prev !== undefined) process.env.ORCHESTRA_REQUESTER = prev;
+    if (prevCfg === undefined) delete process.env.GIT_CONFIG_GLOBAL;
+    else process.env.GIT_CONFIG_GLOBAL = prevCfg;
+  }
+});

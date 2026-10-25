@@ -23,7 +23,7 @@ import { applyLessonEdits, editsFromResponse, expireDomain, formatLearnings, lis
 import { buildSandboxPolicy, preflightSandbox, scrubVerifierEnv, scrubWorkerEnv, type ProbeExec } from './sandbox.ts';
 import { newRunId, type Store } from './store.ts';
 import { bisectBatch, canStart, conflictRate, decisionLog, planBatches } from './throughput.ts';
-import { classifyRisk, onlyHeldForApproval, runSatisfaction } from './oversight.ts';
+import { UNKNOWN_REQUESTER, classifyRisk, onlyHeldForApproval, runSatisfaction } from './oversight.ts';
 import { bestOfNAllowed, budgetExhausted, budgetLine, cacheReadShare, planChecks, selectBestByTests, shouldEscalatePlan, type BudgetState, type TestCandidate } from './cost.ts';
 import { DEFAULT_PROVIDER, resolveModel } from './models.ts';
 import { resolveProvider, type ModelProvider } from './provider.ts';
@@ -1928,7 +1928,7 @@ function detectRequester(root: string): string {
   const env = process.env.ORCHESTRA_REQUESTER?.trim();
   if (env) return env;
   const r = spawnSync('git', ['config', 'user.name'], { cwd: root, encoding: 'utf8' });
-  return (r.status === 0 && r.stdout.trim()) || 'unknown';
+  return (r.status === 0 && r.stdout.trim()) || UNKNOWN_REQUESTER;
 }
 
 function round(n: number, dp = 3): number {

@@ -80,17 +80,25 @@ export function onlyHeldForApproval(tasks: Task[]): boolean {
 }
 
 export interface ApprovalInput { approver: string; requester: string; approverKind?: 'human' | 'agent' }
+export const UNKNOWN_REQUESTER = 'unknown'; // what the conductor records when it cannot tell who asked
 export const AGENT_IDENTITIES = ['planner', 'worker', 'judge', 'librarian', 'evolver', 'orchestra'];
 
 const norm = (s: string | undefined) => (s ?? '').trim().toLowerCase();
 
 // Agents never approve their own work, and a requester never approves their own request.
-export function canApprove(input: ApprovalInput): { ok: boolean; reason: string } {
+// This is advisory, not authentication: both names are free text (--by, and ORCHESTRA_REQUESTER or git user.name at
+// run start), so anyone with shell access can type another name. When the run recorded no requester ("unknown" or
+// empty) the four-eyes comparison cannot be applied; approval is allowed but carries an `advisory` to show the approver.
+export function canApprove(input: ApprovalInput): { ok: boolean; reason: string; advisory?: string } {
   const approver = norm(input.approver);
   if (!approver) return { ok: false, reason: 'approver is empty' };
   if (input.approverKind === 'agent') return { ok: false, reason: 'agents cannot approve' };
   if (AGENT_IDENTITIES.includes(approver)) return { ok: false, reason: `approver "${approver}" is an agent role` };
-  if (approver === norm(input.requester)) return { ok: false, reason: 'approver is the requester' };
+  const requester = norm(input.requester);
+  if (!requester || requester === UNKNOWN_REQUESTER) {
+    return { ok: true, reason: 'ok', advisory: 'the run recorded no requester (set ORCHESTRA_REQUESTER or git user.name before the run), so the requester cannot be excluded: four-eyes is NOT enforced for this approval' };
+  }
+  if (approver === requester) return { ok: false, reason: 'approver is the requester' };
   return { ok: true, reason: 'ok' };
 }
 

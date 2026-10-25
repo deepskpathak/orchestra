@@ -42,6 +42,17 @@ test('canApprove', () => {
   for (const a of ['planner', 'worker', 'judge', 'librarian', 'evolver', 'orchestra']) assert.ok(AGENT_IDENTITIES.includes(a));
 });
 
+test('canApprove: an unknown or empty requester cannot be excluded, so approval carries an advisory', () => {
+  assert.equal(canApprove({ approver: 'alice', requester: 'bob' }).advisory, undefined);
+  for (const requester of ['unknown', 'Unknown', '', '  ']) {
+    const r = canApprove({ approver: 'alice', requester });
+    assert.equal(r.ok, true, requester);
+    assert.match(r.advisory ?? '', /four-eyes is NOT enforced/, requester);
+  }
+  // Agent roles are still refused whatever the requester.
+  assert.equal(canApprove({ approver: 'worker', requester: 'unknown' }).ok, false);
+});
+
 test('oversightMetrics', () => {
   assert.deepEqual(oversightMetrics([]), []);
   assert.deepEqual(oversightMetrics([{ runId: 'r1', taskId: 'T1' }]), [{ runId: 'r1', interruptions: 0, reviewMinutes: 0, edits: 0 }]);

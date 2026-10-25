@@ -55,7 +55,9 @@ Usage:
   orchestra status [runId]       One-shot board of the current or given run
   orchestra approve <runId> <taskId> --by <name>
                                  Land a high-risk task held as awaiting_approval (oversight.riskTiers). The approver must be a
-                                 human other than the run's requester (ORCHESTRA_REQUESTER or git user.name at run start)
+                                 human other than the run's requester (ORCHESTRA_REQUESTER or git user.name at run start).
+                                 Advisory only: names are free text, not authenticated identities. With no recorded requester
+                                 the check cannot run and approve warns
   orchestra stats [--json]       Factory health per harness version, plus the eval infra failure rate, oversight and throughput
                                  metrics (interruptions, review minutes, edits, conflict rate, merge wait, cache-read share)
   orchestra evolve               Propose, evaluate (clean-room, interleaved), and maybe promote a better harness;
@@ -396,7 +398,7 @@ async function cmdApprove(args: string[]): Promise<void> {
   const [runId, taskId] = args.filter((a, j) => !a.startsWith('--') && j !== i + 1);
   if (!runId || !taskId || !by) die('usage: orchestra approve <runId> <taskId> --by <name>');
   try {
-    const run = await approveTask(store, runId, taskId, by);
+    const run = await approveTask(store, runId, taskId, by, (m) => console.error(m));
     console.log(`${taskId} approved by ${by} and merged into ${run.integrationBranch}.`);
   } catch (e) {
     die((e as Error).message);

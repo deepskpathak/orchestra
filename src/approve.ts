@@ -6,7 +6,7 @@ import * as g from './git.ts';
 import type { Store } from './store.ts';
 import type { Run } from './types.ts';
 
-export async function approveTask(store: Store, runId: string, taskId: string, by: string): Promise<Run> {
+export async function approveTask(store: Store, runId: string, taskId: string, by: string, warn: (msg: string) => void = () => {}): Promise<Run> {
   const run = store.loadRun(runId);
   if (!run) throw new Error(`unknown run "${runId}"`);
   const task = run.tasks.find((t) => t.id === taskId);
@@ -14,6 +14,10 @@ export async function approveTask(store: Store, runId: string, taskId: string, b
   if (task.status !== 'awaiting_approval') throw new Error(`${taskId} is ${task.status}, not awaiting_approval`);
   const verdict = canApprove({ approver: by, requester: run.requestedBy ?? '' });
   if (!verdict.ok) throw new Error(`approval refused: ${verdict.reason}`);
+  if (verdict.advisory) {
+    warn(`warning: ${verdict.advisory}`);
+    store.event({ t: Date.now(), run: runId, kind: 'log', msg: `approval of ${taskId} by ${by}: ${verdict.advisory}`, task: taskId });
+  }
   if (!run.integrationBranch || !task.branch) throw new Error(`${taskId} has no branch to merge`);
 
   const path = store.path('worktrees', runId, `_approve-${taskId}`);
