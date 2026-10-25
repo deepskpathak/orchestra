@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Atlas L1 task pack: skeletons come from the base-commit atlas, so a file changed on integration is now annotated "changed since base; symbols and lines as of the base commit" instead of looking current.
 - Atlas build: blobs are sized with `git cat-file --batch-check` and only those within 256KB are read, binary extensions are skipped up front, and a failed chunk read degrades to per-blob reads, so large or binary files can no longer overflow the buffer and abort the build.
 - Atlas cache: `loadOrBuildAtlas` picks at most 8 candidates cheaply (ancestors from one `git rev-list`, then most recently written caches) before diffing instead of diffing every cached sha, and prunes `.orchestra/atlas` to the 16 most recent files.
 - Sandbox: the srt and claude write policy now includes the shared git common dir (hooks and config stay read-only inside it), so a worker's `git commit` in a worktree can write objects, refs and worktree metadata. Matches the docker backend.

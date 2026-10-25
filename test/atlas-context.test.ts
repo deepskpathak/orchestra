@@ -63,7 +63,15 @@ test('buildTaskPack lists footprint, importer, tests and changed files', () => {
   assert.doesNotMatch(pack, /class Session/); // symbols narrowed to the requested one
   assert.match(pack, /Importers and callers:\n {2}src\/server\.ts/);
   assert.match(pack, /Related tests:\n {2}test\/auth\.test\.ts/);
-  assert.match(pack, /since run start:\n {2}src\/billing\.ts\n {4}function invoice/);
+  assert.match(pack, /since run start:\n {2}src\/billing\.ts \(changed since base[^\n]*\n {4}function invoice/);
+});
+
+test('buildTaskPack flags skeletons of files changed on integration as base-commit state', () => {
+  const pack = buildTaskPack(fixture(), { files: ['src/auth.ts'] }, ['src/auth.ts', 'src/billing.ts'], 1500);
+  assert.equal((pack.match(/as of the base commit/g) ?? []).length, 3);
+  assert.match(pack, /src\/auth\.ts \(changed since base/);
+  const clean = buildTaskPack(fixture(), { files: ['src/auth.ts'] }, [], 1500);
+  assert.ok(!clean.includes('as of the base commit'));
 });
 
 test('buildTaskPack respects packTokens', () => {

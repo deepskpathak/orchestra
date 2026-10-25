@@ -197,11 +197,14 @@ export function buildTaskPack(atlas: Atlas, footprint: Footprint, changedSinceSt
   const callers = [...importers].filter((p) => !isTest.has(p)).sort();
 
   const lines: string[] = ['## Task pack'];
+  // Skeletons come from the atlas at the base commit, so a file changed on integration is flagged
+  // rather than presented as current.
+  const changedSet = new Set(changed);
   const section = (title: string, items: string[], withSyms: boolean, only?: string[]) => {
     if (!items.length) return;
     lines.push(`${title}:`);
     for (const p of items.slice(0, MAX_LIST * 2)) {
-      lines.push(`  ${p}`);
+      lines.push(withSyms && inIndex(p) && changedSet.has(p) ? `  ${p} (changed since base; symbols and lines as of the base commit)` : `  ${p}`);
       if (withSyms && inIndex(p)) lines.push(...symLines(fileSymbols(atlas, p, only), '    '));
     }
     if (items.length > MAX_LIST * 2) lines.push(`  ... +${items.length - MAX_LIST * 2} more`);
