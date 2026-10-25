@@ -241,3 +241,65 @@ test('batch merge: tasks that start while a batch is under test branch from the 
   assert.equal(seen.T3, false, 'T3 must not inherit the rejected T1 merge');
   assert.equal(run.tasks.find((x) => x.id === 'T3')!.status, 'merged');
 });
+
+test('risk tiers: a run holding only an approval-gated task is awaiting_approval, not failed, and approval finalises it', async () => {
+  const prev = process.env.ORCHESTRA_REQUESTER;
+  process.env.ORCHESTRA_REQUESTER = 'alice';
+  try {
+    const store = tempRepo({ oversight: { riskTiers: { ...DEFAULT_PROJECT_CONFIG.oversight!.riskTiers, enabled: true } } });
+    const inner = planned([t('T1'), t('T2', ['infra/main.tf']), { ...t('T3'), deps: ['T2'] }], {}, 0);
+    let librarianCalls = 0;
+    const runner: Runner = async (req) => {
+      if (req.role === 'librarian') librarianCalls++;
+      const res = await inner(req);
+      if (req.role === 'worker' && req.meta?.task === 'T2') {
+        const { mkdirSync, writeFileSync } = await import('node:fs');
+        mkdirSync(`${req.cwd}/infra`, { recursive: true });
+        writeFileSync(`${req.cwd}/infra/main.tf`, 'resource {}\n');
+      }
+      return res;
+    };
+    const run = await runGoal({ store, runner, goal: 'g' });
+    assert.equal(run.status, 'awaiting_approval');
+    assert.equal(run.error, undefined);
+    assert.equal(run.satisfaction, undefined, 'satisfaction waits for the held task');
+    assert.equal(librarianCalls, 0, 'learning waits for approval');
+    assert.deepEqual(run.tasks.map((x) => x.status), ['merged', 'awaiting_approval', 'blocked']);
+
+    const after = await approveTask(store, run.id, 'T2', 'bob');
+    // T3 depended on the held task and never ran, so the run cannot be done; it says so instead of looking like a conductor failure.
+    assert.equal(after.status, 'failed');
+    assert.match(after.error!, /T3 blocked behind a task that was held for approval/);
+    assert.equal(typeof after.satisfaction, 'number');
+    assert.ok(after.satisfaction! > 0);
+  } finally {
+    if (prev === undefined) delete process.env.ORCHESTRA_REQUESTER;
+    else process.env.ORCHESTRA_REQUESTER = prev;
+  }
+});
+
+test('risk tiers: approving the only unmerged task of a held run marks it done with satisfaction', async () => {
+  const prev = process.env.ORCHESTRA_REQUESTER;
+  process.env.ORCHESTRA_REQUESTER = 'alice';
+  try {
+    const store = tempRepo({ oversight: { riskTiers: { ...DEFAULT_PROJECT_CONFIG.oversight!.riskTiers, enabled: true } } });
+    const inner = planned([t('T1'), t('T2', ['infra/main.tf'])], {}, 0);
+    const runner: Runner = async (req) => {
+      const res = await inner(req);
+      if (req.role === 'worker' && req.meta?.task === 'T2') {
+        const { mkdirSync, writeFileSync } = await import('node:fs');
+        mkdirSync(`${req.cwd}/infra`, { recursive: true });
+        writeFileSync(`${req.cwd}/infra/main.tf`, 'resource {}\n');
+      }
+      return res;
+    };
+    const run = await runGoal({ store, runner, goal: 'g' });
+    assert.equal(run.status, 'awaiting_approval');
+    const done = await approveTask(store, run.id, 'T2', 'bob');
+    assert.equal(done.status, 'done');
+    assert.ok(done.satisfaction! > 0);
+  } finally {
+    if (prev === undefined) delete process.env.ORCHESTRA_REQUESTER;
+    else process.env.ORCHESTRA_REQUESTER = prev;
+  }
+});

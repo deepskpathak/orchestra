@@ -88,7 +88,8 @@ export interface Scenario {
   check?: string; // optional shell command that checks this scenario (W4.2)
 }
 
-export type RunStatus = 'planning' | 'running' | 'compounding' | 'done' | 'failed';
+// 'awaiting_approval' (W7.1): the only unmerged tasks are held for `orchestra approve` (or blocked behind them); not a failure.
+export type RunStatus = 'planning' | 'running' | 'compounding' | 'awaiting_approval' | 'done' | 'failed';
 
 export interface Run {
   id: string;

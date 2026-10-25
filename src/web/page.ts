@@ -339,7 +339,7 @@ pre { margin: 0; padding: 10px 12px; max-height: 420px; overflow: auto; font: 12
   var $ = function (id) { return document.getElementById(id); };
   var RING = 2 * Math.PI * 52;
   var TONE = { pending: 'idle', running: 'run', repair: 'warn', judging: 'judge', merging: 'accent', merged: 'ok', failed: 'bad', blocked: 'bad', needs_human: 'warn',
-    planning: 'run', compounding: 'accent', done: 'ok' };
+    planning: 'run', compounding: 'accent', awaiting_approval: 'warn', done: 'ok' };
   var LABEL = { pending: 'Queued', running: 'Building', repair: 'Repairing', judging: 'Verifying', merging: 'Merging', merged: 'Merged', failed: 'Failed', blocked: 'Blocked', needs_human: 'Needs human' };
   var ROLE_TONE = { planner: 'accent', worker: 'run', judge: 'judge', librarian: 'ok', evolver: 'warn' };
   var ACTIVE = { running: 1, repair: 1, judging: 1, merging: 1 };

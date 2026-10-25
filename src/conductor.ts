@@ -23,7 +23,7 @@ import { applyLessonEdits, editsFromResponse, expireDomain, formatLearnings, lis
 import { buildSandboxPolicy, preflightSandbox, scrubVerifierEnv, scrubWorkerEnv, type ProbeExec } from './sandbox.ts';
 import { newRunId, type Store } from './store.ts';
 import { bisectBatch, canStart, conflictRate, decisionLog, planBatches } from './throughput.ts';
-import { classifyRisk } from './oversight.ts';
+import { classifyRisk, onlyHeldForApproval, runSatisfaction } from './oversight.ts';
 import { bestOfNAllowed, budgetExhausted, budgetLine, cacheReadShare, planChecks, selectBestByTests, shouldEscalatePlan, type BudgetState, type TestCandidate } from './cost.ts';
 import { DEFAULT_PROVIDER, resolveModel } from './models.ts';
 import { resolveProvider, type ModelProvider } from './provider.ts';
@@ -559,11 +559,18 @@ export class Conductor {
       run.status = 'running';
       this.save();
       await this.schedule();
+      if (onlyHeldForApproval(run.tasks)) {
+        // W7.1: the run is waiting on a human, not failed. Satisfaction, mutation and learning describe the whole
+        // run, so they wait for `orchestra approve` (which finalises satisfaction and status; see src/approve.ts).
+        run.status = 'awaiting_approval';
+        const held = run.tasks.filter((t) => t.status === 'awaiting_approval').map((t) => t.id);
+        this.emit('log', `Run waits for approval of ${held.join(', ')}; satisfaction, mutation score and learning are deferred`, { held });
+        return run;
+      }
       const mutationFailure = await this.mutationPass();
 
       const merged = run.tasks.filter((t) => t.status === 'merged');
-      const meanScore = merged.length ? merged.reduce((s, t) => s + (t.verdict?.score ?? 0), 0) / merged.length : 0;
-      run.satisfaction = round(meanScore * (merged.length / Math.max(1, run.tasks.length)));
+      run.satisfaction = runSatisfaction(run.tasks);
 
       if (run.kind === 'goal') {
         run.status = 'compounding';

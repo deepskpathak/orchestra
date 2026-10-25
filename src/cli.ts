@@ -281,13 +281,14 @@ async function cmdRun(args: string[]): Promise<void> {
     const out = await evolve(store, r, (m) => console.log(`  ${m}`));
     console.log(`♫ evolve: ${out.promoted ? `promoted ${out.candidate}` : `kept ${out.incumbent}`} (${out.reason})`);
   }
-  process.exitCode = run.status === 'done' ? 0 : 1;
+  // A run held for approval is waiting on a human, not failed.
+  process.exitCode = run.status === 'done' || run.status === 'awaiting_approval' ? 0 : 1;
 }
 
 export function summary(run: Run): string {
   const merged = run.tasks.filter((t) => t.status === 'merged').length;
   const lines = [
-    `♫ run ${run.id} ${run.status.toUpperCase()}: ${merged}/${run.tasks.length} tasks merged, satisfaction ${(run.satisfaction ?? 0).toFixed(2)}, cost $${run.costUsd.toFixed(2)}`,
+    `♫ run ${run.id} ${run.status.toUpperCase()}: ${merged}/${run.tasks.length} tasks merged, satisfaction ${run.status === 'awaiting_approval' ? 'pending approval' : (run.satisfaction ?? 0).toFixed(2)}, cost $${run.costUsd.toFixed(2)}`,
   ];
   const human = run.tasks.filter((t) => t.status === 'needs_human');
   const failed = run.tasks.filter((t) => t.status === 'failed').length;
@@ -296,7 +297,8 @@ export function summary(run: Run): string {
   if (human.length || failed || blocked) lines.push(`  ${failed} failed, ${blocked} blocked, ${human.length} need a human`);
   for (const t of human) lines.push(`  ? ${t.id} needs a human: ${t.humanReason ?? 'no reason recorded'}`);
   if (run.error) lines.push(`  ${run.error}`);
-  if (merged && run.integrationBranch) lines.push(`  review: git log --oneline ${run.baseRef?.slice(0, 8)}..${run.integrationBranch}`, `  land:   git merge ${run.integrationBranch}`);
+  for (const t of run.tasks.filter((x) => x.status === 'awaiting_approval')) lines.push(`  ! ${t.id} waits for: orchestra approve ${run.id} ${t.id} --by <name>`);
+  if (merged && run.integrationBranch && run.status !== 'awaiting_approval') lines.push(`  review: git log --oneline ${run.baseRef?.slice(0, 8)}..${run.integrationBranch}`, `  land:   git merge ${run.integrationBranch}`);
   return lines.join('\n');
 }
 

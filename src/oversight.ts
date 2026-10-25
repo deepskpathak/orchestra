@@ -1,4 +1,5 @@
 // Pure oversight helpers (W7.1 risk tiers, W7.2 oversight metrics). No IO, no imports from conductor.
+import type { Task } from './types.ts';
 
 export interface RiskTierConfig {
   enabled: boolean;
@@ -62,6 +63,20 @@ export function classifyRisk(input: RiskInput, cfg: RiskTierConfig = DEFAULT_RIS
     return { tier: 'low', reasons: [`small diff (${input.diffLines} lines) with green deterministic checks`] };
   }
   return { tier: 'normal', reasons: ['no low-risk rule matched'] };
+}
+
+// Mean verdict score of the merged tasks, scaled by the share of tasks that landed.
+export function runSatisfaction(tasks: Task[]): number {
+  const merged = tasks.filter((t) => t.status === 'merged');
+  const mean = merged.length ? merged.reduce((s, t) => s + (t.verdict?.score ?? 0), 0) / merged.length : 0;
+  return Math.round(mean * (merged.length / Math.max(1, tasks.length)) * 1000) / 1000;
+}
+
+// True when the only tasks that did not land are held for approval or blocked behind a held task. A failed or
+// needs_human task makes the run a plain failure, whatever else is held.
+export function onlyHeldForApproval(tasks: Task[]): boolean {
+  if (!tasks.some((t) => t.status === 'awaiting_approval')) return false;
+  return tasks.every((t) => t.status === 'merged' || t.status === 'awaiting_approval' || t.status === 'blocked');
 }
 
 export interface ApprovalInput { approver: string; requester: string; approverKind?: 'human' | 'agent' }
