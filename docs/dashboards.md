@@ -57,7 +57,7 @@ The page follows your system light or dark theme; the half-moon button overrides
 |--------|---------|
 | Interruptions | Tasks stopped as `needs_human`, plus approval requests (`awaiting_approval` under `oversight.riskTiers`) |
 | Review minutes | Time from approval request to `orchestra approve`, summed over decided approvals |
-| Edits before landing | Human commits (not merges, not authored by `Orchestra`) on the integration branch between the approval request and the merge |
+| Edits before landing | Human commits (not merges, not authored by `Orchestra`) made directly on the integration branch's first-parent line between the approval request and the merge; worker commits on merged task branches are not counted, even under your git identity |
 | Conflict rate | Merge conflicts divided by merge attempts (`Run.conflictRate`); pooled across runs |
 | Mean merge wait | Judged-pass to landed, per task (`Task.mergeWaitMs`) |
 | Cache-read share | Cache-read tokens divided by all input tokens (`Run.cacheReadShare`) |

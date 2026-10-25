@@ -86,15 +86,17 @@ export interface OversightSummary {
   total: { runs: number; interruptions: number; reviewMinutes: number; edits: number; conflictRate: number | null; meanMergeWaitMs: number | null; cacheReadShare: number | null };
 }
 
-// Human commits on `branch` made between two instants: not merges and not authored by Orchestra.
+// Human commits on `branch` made between two instants: not merges and not authored by Orchestra. Only the
+// branch's first-parent line counts. Worker commits made under the developer's own git identity live on the task
+// branches and reach the integration branch through Orchestra's merge commits (second parent), so they are not edits.
 export type HumanCommits = (root: string, branch: string, fromMs: number, toMs: number) => number;
 export const gitHumanCommits: HumanCommits = (root, branch, fromMs, toMs) => {
   try {
-    const out = git(root, 'log', branch, '--no-merges', '--format=%at\t%an');
+    const out = git(root, 'log', branch, '--first-parent', '--no-merges', '--format=%at\t%an');
     return out.split('\n').filter(Boolean).filter((l) => {
       const [at, author] = l.split('\t');
       const ms = Number(at) * 1000;
-      return author !== 'Orchestra' && ms >= fromMs - 1000 && ms <= toMs;
+      return author !== 'Orchestra' && ms >= fromMs && ms <= toMs;
     }).length;
   } catch {
     return 0; // branch pruned or not a repo: no edits can be shown
