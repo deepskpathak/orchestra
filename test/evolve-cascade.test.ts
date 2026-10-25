@@ -7,6 +7,7 @@ import { evolve, harnessIntegrity, type EvalCase } from '../src/evolve.ts';
 import { holdoutLeaks, splitEvals } from '../src/evalsets.ts';
 import { fakeRunner } from '../src/fake.ts';
 import { currentVersion, readArchive } from '../src/harness.ts';
+import { selectParent } from '../src/pareto.ts';
 import type { Store } from '../src/store.ts';
 import type { ProjectConfig } from '../src/types.ts';
 import { tempRepo } from './helpers.ts';
@@ -138,4 +139,75 @@ test('splits: above the threshold a win is confirmed on the locked holdout befor
   assert.equal(out.promoted, true, out.reason);
   assert.match(out.reason, /confirmed on the locked holdout/);
   assert.ok(readArchive(store).find((a) => a.version === 'v2')!.holdoutScore! > 0);
+});
+
+const SPLITS = { enabled: true, feedback: 0.3, validation: 0.5, holdout: 0.2, signoffBelow: 3 };
+
+test('pareto: archive persists across cycles and the second parent comes from selectParent', async () => {
+  const { store } = repoWith(8, { pareto: { enabled: true }, autoPromote: false });
+  const s = spy(fakeRunner());
+  await evolve(store, s.runner, quiet);
+  const after1 = readArchive(store);
+  const v2 = after1.find((a) => a.version === 'v2')!;
+  assert.deepEqual(after1.map((a) => a.version).slice(0, 2), ['v1', 'v2']);
+  assert.ok(v2.validationDetail && Object.keys(v2.validationDetail).length > 0);
+  assert.ok((v2.paretoWins ?? 0) > 0 && v2.stepping === true, 'winner kept as a stepping stone');
+  const expected = selectParent(after1)!.version;
+  await evolve(store, s.runner, quiet);
+  const v3 = readArchive(store).find((a) => a.version === 'v3')!;
+  assert.equal(v3.parent, expected);
+  assert.ok(readArchive(store).find((a) => a.version === 'v2'), 'earlier variants survive');
+});
+
+test('pareto: evolver prompt carries the scored history and no holdout numbers', async () => {
+  const { store, cases } = repoWith(8, { pareto: { enabled: true }, splits: SPLITS, autoPromote: false });
+  const s = spy(fakeRunner());
+  await evolve(store, s.runner, quiet);
+  await evolve(store, s.runner, quiet);
+  assert.equal(s.evolverPrompts.length, 2);
+  assert.ok(!s.evolverPrompts[0].includes('v2 parent='));
+  const second = s.evolverPrompts[1];
+  assert.match(second, /SCORED ARCHIVE HISTORY/);
+  assert.match(second, /v2 parent=v1 status=candidate/);
+  const hold = readArchive(store).find((a) => a.version === 'v2')!.holdoutScore;
+  assert.equal(typeof hold, 'number');
+  assert.ok(!/holdoutScore|holdout=/i.test(second));
+  assert.deepEqual(holdoutLeaks(second, splitEvals(cases).holdout), []);
+});
+
+test('pareto: a candidate that wins validation and holdout is promoted and reported confirmed', async () => {
+  const { store } = repoWith(8, { pareto: { enabled: true }, splits: SPLITS });
+  const out = await evolve(store, fakeRunner(), quiet);
+  assert.equal(out.promoted, true, out.reason);
+  assert.equal(out.holdout!.confirmed, true);
+  assert.ok(out.holdout!.candidate > out.holdout!.parent);
+  assert.equal(currentVersion(store), 'v2');
+});
+
+test('pareto: a candidate that wins validation but loses the holdout stays a stepping stone', async () => {
+  const { store, cases } = repoWith(8, { pareto: { enabled: true }, splits: SPLITS });
+  const holdIds = new Set(splitEvals(cases).holdout.map((c) => c.id));
+  // The frozen scorer fails the careful (candidate) diff, but only on holdout goals.
+  const tweak = (req: Parameters<Runner>[0], res: Awaited<ReturnType<Runner>>) => {
+    const onHoldout = [...holdIds].some((id) => req.prompt.includes(cases.find((c) => c.id === id)!.goal));
+    return req.role === 'judge' && req.prompt.startsWith('FROZEN SCORER REPLAY') && onHoldout && /edge-cases-covered/.test(req.prompt)
+      ? { ...res, structured: { pass: false, score: 0.1, summary: 'Regressed' } }
+      : res;
+  };
+  const out = await evolve(store, spy(fakeRunner(), tweak).runner, quiet);
+  assert.equal(out.promoted, false);
+  assert.equal(out.holdout?.confirmed, false, out.reason);
+  assert.match(out.reason, /not confirmed on the locked holdout/);
+  assert.equal(currentVersion(store), 'v1');
+  const v2 = readArchive(store).find((a) => a.version === 'v2')!;
+  assert.equal(v2.status, 'candidate');
+  assert.equal(v2.stepping, true);
+});
+
+test('pareto off: no archive seeding, no history in the prompt, no extra fields', async () => {
+  const { store } = repoWith(4, {});
+  const s = spy(fakeRunner());
+  await evolve(store, s.runner, quiet);
+  assert.ok(!/SCORED ARCHIVE HISTORY/.test(s.evolverPrompts[0]));
+  assert.ok(readArchive(store).every((a) => a.paretoWins === undefined && a.stepping === undefined));
 });

@@ -24,6 +24,7 @@ export const DEFAULT_PROJECT_CONFIG: ProjectConfig = {
     sequential: { enabled: false, roundSize: 3 },
     splits: { enabled: false, feedback: 0.3, validation: 0.5, holdout: 0.2, signoffBelow: 12 },
     cascade: { enabled: false, minibatch: 2, finalists: 2 },
+    pareto: { enabled: false },
     cost: { enabled: false, maxCostRisePct: 25, minGainForCost: 0.02, costWeight: 0.1, timeWeight: 0.02 },
   },
 };
@@ -94,7 +95,7 @@ export class Store {
 
   config(): ProjectConfig {
     const c = this.readJson<Partial<ProjectConfig>>('config.json', {});
-    return { ...DEFAULT_PROJECT_CONFIG, ...c, judgeTiers: { ...DEFAULT_PROJECT_CONFIG.judgeTiers, ...(c.judgeTiers ?? {}) }, preJudge: { ...DEFAULT_PROJECT_CONFIG.preJudge, ...(c.preJudge ?? {}) }, contrastive: { ...DEFAULT_PROJECT_CONFIG.contrastive, ...(c.contrastive ?? {}) }, fastPath: { ...DEFAULT_PROJECT_CONFIG.fastPath, ...(c.fastPath ?? {}) }, context: { ...DEFAULT_PROJECT_CONFIG.context, ...(c.context ?? {}), atlas: { ...DEFAULT_PROJECT_CONFIG.context.atlas, ...(c.context?.atlas ?? {}) } }, learnings: { ...DEFAULT_PROJECT_CONFIG.learnings!, ...(c.learnings ?? {}) }, evolve: { ...DEFAULT_PROJECT_CONFIG.evolve, ...(c.evolve ?? {}), sequential: { ...DEFAULT_PROJECT_CONFIG.evolve.sequential!, ...(c.evolve?.sequential ?? {}) }, cost: { ...DEFAULT_PROJECT_CONFIG.evolve.cost!, ...(c.evolve?.cost ?? {}) }, cascade: { ...DEFAULT_PROJECT_CONFIG.evolve.cascade!, ...(c.evolve?.cascade ?? {}) }, splits: { ...DEFAULT_PROJECT_CONFIG.evolve.splits!, ...(c.evolve?.splits ?? {}) } } };
+    return { ...DEFAULT_PROJECT_CONFIG, ...c, judgeTiers: { ...DEFAULT_PROJECT_CONFIG.judgeTiers, ...(c.judgeTiers ?? {}) }, preJudge: { ...DEFAULT_PROJECT_CONFIG.preJudge, ...(c.preJudge ?? {}) }, contrastive: { ...DEFAULT_PROJECT_CONFIG.contrastive, ...(c.contrastive ?? {}) }, fastPath: { ...DEFAULT_PROJECT_CONFIG.fastPath, ...(c.fastPath ?? {}) }, context: { ...DEFAULT_PROJECT_CONFIG.context, ...(c.context ?? {}), atlas: { ...DEFAULT_PROJECT_CONFIG.context.atlas, ...(c.context?.atlas ?? {}) } }, learnings: { ...DEFAULT_PROJECT_CONFIG.learnings!, ...(c.learnings ?? {}) }, evolve: { ...DEFAULT_PROJECT_CONFIG.evolve, ...(c.evolve ?? {}), sequential: { ...DEFAULT_PROJECT_CONFIG.evolve.sequential!, ...(c.evolve?.sequential ?? {}) }, cost: { ...DEFAULT_PROJECT_CONFIG.evolve.cost!, ...(c.evolve?.cost ?? {}) }, cascade: { ...DEFAULT_PROJECT_CONFIG.evolve.cascade!, ...(c.evolve?.cascade ?? {}) }, splits: { ...DEFAULT_PROJECT_CONFIG.evolve.splits!, ...(c.evolve?.splits ?? {}) }, pareto: { ...DEFAULT_PROJECT_CONFIG.evolve.pareto!, ...(c.evolve?.pareto ?? {}) } } };
   }
 
   // ---- runs ----

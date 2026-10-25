@@ -21,7 +21,9 @@ import {
   promote,
   readArchive,
   updateArchive,
+  writeArchive,
 } from './harness.ts';
+import { archiveHistory, archivePatches, selectParent } from './pareto.ts';
 import { needsHumanSignoff, splitEvals } from './evalsets.ts';
 import { summarizeLearnings } from './learnings.ts';
 import { BudgetTracker, costGate, roundsOf, sequentialDecision, utility } from './selection.ts';
@@ -301,6 +303,7 @@ export interface EvolveOutcome {
   reason: string;
   monitorFireRate?: { incumbent: number; candidate: number }; // integrity-monitor flags per replayed run
   infraFailureRate?: { incumbent: number; candidate: number }; // set when candidate and incumbent were replayed
+  holdout?: { parent: number; candidate: number; confirmed: boolean }; // locked holdout confirmation (parent = the incumbent it must beat); never shown to the evolver
 }
 
 export interface PromotionInput {
@@ -380,9 +383,27 @@ export function promotionDecision(i: PromotionInput): PromotionDecision {
 }
 
 export async function evolve(store: Store, runner: Runner, log: (msg: string) => void, onRun?: (r: Run) => void): Promise<EvolveOutcome> {
+  if (!store.config().evolve.pareto?.enabled) return evolveCycle(store, runner, log, onRun);
+  // The incumbent must be in the archive to compete on the front (v1 is seeded without an entry).
+  const inc = currentVersion(store);
+  if (!readArchive(store).some((a) => a.version === inc)) {
+    writeArchive(store, [{ version: inc, parent: null, createdAt: 0, rationale: 'seed harness', evalScore: null, status: 'promoted' }, ...readArchive(store)]);
+  }
+  try {
+    return await evolveCycle(store, runner, log, onRun);
+  } finally {
+    // Persist Pareto wins and stepping-stone flags on every exit path.
+    for (const [version, patch] of archivePatches(readArchive(store))) updateArchive(store, version, patch);
+  }
+}
+
+async function evolveCycle(store: Store, runner: Runner, log: (msg: string) => void, onRun?: (r: Run) => void): Promise<EvolveOutcome> {
   const incumbent = currentVersion(store);
-  const h = loadHarness(store, incumbent);
   const cfg = store.config();
+  const usePareto = !!cfg.evolve.pareto?.enabled;
+  // Variants derive from a Pareto-selected parent; evaluation and promotion still compare against the incumbent.
+  const parent = (usePareto ? selectParent(readArchive(store))?.version : null) ?? incumbent;
+  const h = loadHarness(store, incumbent);
   const m = metrics(store);
   const blocked = agreementBlock(storeCalibration(store), incumbent, cfg.evolve.minJudgeAgreement);
   if (blocked) return { candidate: null, incumbent, candidateScore: null, incumbentScore: null, promoted: false, reason: blocked };
@@ -392,7 +413,7 @@ export async function evolve(store: Store, runner: Runner, log: (msg: string) =>
     .flatMap((r) => r.tasks.flatMap((t) => [...t.notes, ...(t.status === 'failed' ? [`${t.id} FAILED: ${t.verdict?.summary ?? ''}`] : [])]))
     .filter((n) => !n.includes(MONITOR_MARK))
     .slice(-40);
-  const files = EVOLVABLE_FILES.map((f) => `--- ${f} ---\n${existsSync(store.path('harness', incumbent, f)) ? readFileSync(store.path('harness', incumbent, f), 'utf8') : ''}`).join('\n\n');
+  const files = EVOLVABLE_FILES.map((f) => `--- ${f} ---\n${existsSync(store.path('harness', parent, f)) ? readFileSync(store.path('harness', parent, f), 'utf8') : ''}`).join('\n\n');
   const rejected = readArchive(store)
     .filter((a) => a.status === 'rejected')
     .slice(-5)
@@ -405,12 +426,13 @@ export async function evolve(store: Store, runner: Runner, log: (msg: string) =>
   const budget = new BudgetTracker(cfg.evolve.budgetUsd);
   const prompt = [
     ...(k > 1 ? [`PROPOSE ${k} VARIANTS in one response. Each variant must target a different weakness; do not overlap edits.`] : []),
-    `CURRENT HARNESS ${incumbent}:\n${files}`,
+    `CURRENT HARNESS ${parent}:\n${files}`,
     `METRICS PER VERSION:\n${JSON.stringify(m, null, 2)}`,
     `RECENT REPAIR NOTES AND FAILURES:\n${recentIssues.map((i) => `- ${i.split('\n')[0]}`).join('\n') || '(none)'}`,
     `PREVIOUSLY REJECTED VARIANTS (do not repeat):\n${rejected.join('\n') || '(none)'}`,
     `LEARNINGS SUMMARY (per domain):\n${JSON.stringify(summarizeLearnings(store))}`,
     // With splits on the evolver sees feedback cases only; validation and holdout stay hidden.
+    ...(usePareto ? [`SCORED ARCHIVE HISTORY (validation scores; build on what scored well):\n${archiveHistory(readArchive(store))}`] : []),
     ...(sp ? [`FEEDBACK CASES (the only eval cases you may study):\n${sp.feedback.map((c) => `- ${c.id}: ${c.goal}`).join('\n') || '(none)'}`] : []),
   ].join('\n\n');
 
@@ -441,7 +463,7 @@ export async function evolve(store: Store, runner: Runner, log: (msg: string) =>
   let guardError = '';
   for (const out of proposal.variants.slice(0, k)) {
     try {
-      const version = createVariant(store, incumbent, Object.fromEntries(out.files!.map((f) => [f.name, f.content])), out.rationale ?? '');
+      const version = createVariant(store, parent, Object.fromEntries(out.files!.map((f) => [f.name, f.content])), out.rationale ?? '');
       created.push({ version, rationale: out.rationale ?? '', files: out.files!.map((f) => f.name) });
       log(`Candidate ${version}: ${out.rationale}`);
     } catch (err) {
@@ -483,7 +505,7 @@ export async function evolve(store: Store, runner: Runner, log: (msg: string) =>
     const smoked: string[] = [];
     const smokeFails: string[] = [];
     for (const c of created) {
-      const broken = harnessIntegrity(store, incumbent, c.version);
+      const broken = harnessIntegrity(store, parent, c.version);
       if (broken) {
         updateArchive(store, c.version, { status: 'rejected' });
         smokeFails.push(`${c.version}: ${broken}`);
@@ -569,7 +591,7 @@ export async function evolve(store: Store, runner: Runner, log: (msg: string) =>
       if (out) {
         const parents = survivors.map((s) => s.version);
         try {
-          const version = createVariant(store, incumbent, Object.fromEntries(out.files!.map((f) => [f.name, f.content])), `Composed from ${parents.join(', ')}: ${out.rationale ?? ''}`, parents);
+          const version = createVariant(store, parent, Object.fromEntries(out.files!.map((f) => [f.name, f.content])), `Composed from ${parents.join(', ')}: ${out.rationale ?? ''}`, parents);
           log(`Composed ${version} from ${parents.join(', ')}`);
           finalist = { version, rationale: out.rationale ?? '', files: out.files!.map((f) => f.name), screenScore: 0, detail: {} };
         } catch (err) {
@@ -670,7 +692,8 @@ export async function evolve(store: Store, runner: Runner, log: (msg: string) =>
   const monitor = { incumbent: inc.monitorFireRate ?? 0, candidate: cand.monitorFireRate ?? 0 };
   let better = chosen.better;
   let reason = chosen.reason;
-  const result = (promoted: boolean): EvolveOutcome => ({ candidate, incumbent, candidateScore: cand.score, incumbentScore: inc.score, promoted, reason, infraFailureRate: infra, monitorFireRate: monitor });
+  let holdout: EvolveOutcome['holdout'];
+  const result = (promoted: boolean): EvolveOutcome => ({ candidate, incumbent, candidateScore: cand.score, incumbentScore: inc.score, promoted, reason, infraFailureRate: infra, monitorFireRate: monitor, ...(holdout ? { holdout } : {}) });
 
   if (better && sp) {
     const threshold = cfg.evolve.splits!.signoffBelow;
@@ -688,7 +711,9 @@ export async function evolve(store: Store, runner: Runner, log: (msg: string) =>
       spent(hp.candidate, sp.holdout.length);
       if (hp.incumbent.inconclusive) return { ...result(false), reason: `${reason}; holdout confirmation inconclusive, infrastructure failure (${hp.incumbent.inconclusive}); candidate kept for later evaluation` };
       updateArchive(store, candidate, { holdoutScore: hp.candidate.score });
-      if (!(hp.candidate.score > hp.incumbent.score)) {
+      const confirmed = hp.candidate.score > hp.incumbent.score;
+      holdout = { parent: hp.incumbent.score, candidate: hp.candidate.score, confirmed };
+      if (!confirmed) {
         better = false;
         updateArchive(store, candidate, { status: 'candidate' });
         reason = `${reason}; not confirmed on the locked holdout (candidate ${hp.candidate.score} vs incumbent ${hp.incumbent.score})`;
