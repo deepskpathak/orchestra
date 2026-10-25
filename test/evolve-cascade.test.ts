@@ -6,7 +6,7 @@ import type { Runner } from '../src/agent.ts';
 import { evolve, harnessIntegrity, type EvalCase } from '../src/evolve.ts';
 import { holdoutLeaks, splitEvals } from '../src/evalsets.ts';
 import { fakeRunner } from '../src/fake.ts';
-import { currentVersion, readArchive } from '../src/harness.ts';
+import { currentVersion, readArchive, writeArchive } from '../src/harness.ts';
 import { selectParent } from '../src/pareto.ts';
 import type { Store } from '../src/store.ts';
 import type { ProjectConfig } from '../src/types.ts';
@@ -212,6 +212,47 @@ test('pareto: a candidate that wins validation but loses the holdout stays a ste
   const v2 = readArchive(store).find((a) => a.version === 'v2')!;
   assert.equal(v2.status, 'candidate');
   assert.equal(v2.stepping, true);
+});
+
+// A stepping stone v2 (parent v1) that lacks one of v1's checklist lines and wins a validation case, so selectParent picks it.
+function steppingStoneMissingLine(store: Store): void {
+  writeFileSync(store.path('harness', 'v1', 'checklist.md'), '- keep tests green\n- never lower the bar\n');
+  execFileSync('cp', ['-R', store.path('harness', 'v1'), store.path('harness', 'v2')]);
+  writeFileSync(store.path('harness', 'v2', 'checklist.md'), '- keep tests green\n');
+  writeArchive(store, [
+    { version: 'v1', parent: null, createdAt: 0, rationale: 'seed harness', evalScore: 0.5, status: 'promoted' },
+    { version: 'v2', parent: 'v1', createdAt: 1, rationale: 'old stepping stone', evalScore: 0.9, validationDetail: { 'case-00': 1 }, status: 'candidate' },
+  ]);
+}
+
+test('pareto: a candidate bred from a stepping stone is checked against the live incumbent, not only its parent', async () => {
+  const { store } = repoWith(4, { pareto: { enabled: true } });
+  steppingStoneMissingLine(store);
+  const s = spy(fakeRunner());
+  const out = await evolve(store, s.runner, quiet);
+  const v3 = readArchive(store).find((a) => a.version === 'v3')!;
+  assert.equal(v3.parent, 'v2');
+  // Without the incumbent check the candidate beats v1 on the fake scorer and is promoted with the checklist line dropped.
+  assert.equal(out.promoted, false);
+  assert.match(out.reason, /live incumbent v1.*checklist line removed: - never lower the bar/);
+  assert.equal(currentVersion(store), 'v1');
+  assert.equal(v3.status, 'rejected');
+});
+
+test('pareto: the evolver prompt labels the parent as a stepping stone and states the incumbent constraints', async () => {
+  const { store } = repoWith(4, { pareto: { enabled: true } });
+  steppingStoneMissingLine(store);
+  const s = spy(fakeRunner());
+  await evolve(store, s.runner, quiet);
+  const p = s.evolverPrompts[0];
+  assert.match(p, /PARENT HARNESS v2 \(a Pareto stepping stone, NOT the live harness/);
+  assert.ok(!p.includes('CURRENT HARNESS v2'));
+  assert.match(p, /LIVE INCUMBENT v1[\s\S]*- never lower the bar/);
+  const plain = repoWith(4, {});
+  const s2 = spy(fakeRunner());
+  await evolve(plain.store, s2.runner, quiet);
+  assert.match(s2.evolverPrompts[0], /CURRENT HARNESS v1:/);
+  assert.ok(!/LIVE INCUMBENT/.test(s2.evolverPrompts[0]));
 });
 
 test('pareto off: no archive seeding, no history in the prompt, no extra fields', async () => {

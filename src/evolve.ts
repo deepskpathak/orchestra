@@ -426,7 +426,14 @@ async function evolveCycle(store: Store, runner: Runner, log: (msg: string) => v
   const budget = new BudgetTracker(cfg.evolve.budgetUsd);
   const prompt = [
     ...(k > 1 ? [`PROPOSE ${k} VARIANTS in one response. Each variant must target a different weakness; do not overlap edits.`] : []),
-    `CURRENT HARNESS ${parent}:\n${files}`,
+    // With Pareto on the files may come from a stepping stone, not the live harness; say which, and state what the
+    // incumbent requires, because the variant is scored and promoted against the incumbent.
+    ...(parent === incumbent
+      ? [`CURRENT HARNESS ${parent}:\n${files}`]
+      : [
+          `PARENT HARNESS ${parent} (a Pareto stepping stone, NOT the live harness; these are the files you edit):\n${files}`,
+          `LIVE INCUMBENT ${incumbent} is what your variant is scored and promoted against. It requires passThreshold >= ${h.config.passThreshold} and every one of these checklist lines kept verbatim:\n${h.guidance.checklist.split('\n').map((l) => l.trim()).filter(Boolean).join('\n') || '(none)'}`,
+        ]),
     `METRICS PER VERSION:\n${JSON.stringify(m, null, 2)}`,
     `RECENT REPAIR NOTES AND FAILURES:\n${recentIssues.map((i) => `- ${i.split('\n')[0]}`).join('\n') || '(none)'}`,
     `PREVIOUSLY REJECTED VARIANTS (do not repeat):\n${rejected.join('\n') || '(none)'}`,
@@ -505,7 +512,7 @@ async function evolveCycle(store: Store, runner: Runner, log: (msg: string) => v
     const smoked: string[] = [];
     const smokeFails: string[] = [];
     for (const c of created) {
-      const broken = harnessIntegrity(store, parent, c.version);
+      const broken = harnessIntegrity(store, parent, c.version) ?? (parent === incumbent ? null : harnessIntegrity(store, incumbent, c.version));
       if (broken) {
         updateArchive(store, c.version, { status: 'rejected' });
         smokeFails.push(`${c.version}: ${broken}`);
@@ -582,7 +589,7 @@ async function evolveCycle(store: Store, runner: Runner, log: (msg: string) => v
     if (survivors.length >= 2) {
       const composePrompt = [
         'COMPOSE VARIANTS: merge the surviving variants below into ONE variant. Keep only edits that the per-case screening scores support; drop the rest.',
-        `CURRENT HARNESS ${incumbent}:\n${files}`,
+        `${parent === incumbent ? 'CURRENT' : 'PARENT'} HARNESS ${parent}:\n${files}`,
         ...survivors.map((s) => `SURVIVOR ${s.version}\nrationale: ${s.rationale}\nfiles: ${s.files.join(', ')}\nper-case screening scores (mean ${s.screenScore}): ${JSON.stringify(s.detail)}`),
         `INCUMBENT ${incumbent} per-case screening scores: ${JSON.stringify(sInc.detail)}`,
       ].join('\n\n');
@@ -680,6 +687,15 @@ async function evolveCycle(store: Store, runner: Runner, log: (msg: string) => v
       if (!gate.ok) {
         better = false;
         reason = `cost gate: ${gate.reason}`;
+      }
+    }
+    // A Pareto parent is not the incumbent: the guards createVariant ran compared against the parent only, so a
+    // variant from an old stepping stone may have dropped checklist lines or a raised passThreshold the incumbent has.
+    if (better && parent !== incumbent) {
+      const broken = harnessIntegrity(store, incumbent, v);
+      if (broken) {
+        better = false;
+        reason = `integrity check against the live incumbent ${incumbent} failed: ${broken}`;
       }
     }
     if (res.note) reason = `${reason}; ${res.note}`;

@@ -19,6 +19,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Pareto: a variant bred from a stepping stone is now integrity-checked against the live incumbent (checklist lines, `passThreshold`, models) in the smoke test and before promotion, not only against its parent, so it can no longer silently drop incumbent guards. The evolver prompt labels the files as the `PARENT HARNESS` (not live) and lists the incumbent's constraints.
 - Sequential testing: an early stop can no longer promote on fewer cases than `evolve.minCases`. The round check is skipped until `minCases` cases are evaluated, and the promotion gate receives the configured floor instead of one clamped to the evaluated count.
 - Sequential testing: the per-round CI is now widened for the number of planned rounds (Bonferroni-style alpha spending, `wideningFactor`), so peeking after every round no longer inflates the false promotion rate. `niMargin` is now the reject threshold (reject once the upper bound is below `-niMargin`); the old `hi < 0 || hi < -niMargin` made the margin dead logic.
 - Pareto: `selectParent` only breeds from archive entries with status `promoted` or `candidate` (the front is computed over those) and whose harness directory still exists, so a rejected, retired or deleted variant is never chosen as a parent. With no eligible entry the incumbent is used.
