@@ -172,3 +172,36 @@ test('run summary separates failed, blocked and needs-human tasks', () => {
   const run = { id: 'r1', status: 'failed', satisfaction: 0.5, costUsd: 1, tasks: [t('T1', 'needs_human', { humanReason: 'spec vs test' }), t('T2', 'blocked'), t('T3', 'blocked'), t('T4', 'failed'), t('T5', 'merged')] } as unknown as Run;
   assert.match(summary(run), /1 failed, 2 blocked, 1 need a human/);
 });
+
+test('a skipped mutation pass renders as skipped in the summary and the dashboard, never as a score', () => {
+  const base = { id: 'r1', goal: 'g', harness: 'v1', kind: 'goal', status: 'done', startedAt: 0, costUsd: 0, tasks: [], active: [] } as unknown as Run;
+  const skipped: Run = { ...base, mutation: { total: 0, killed: 0, floor: 0.6, skipped: 'checks already fail without mutation' } };
+  assert.match(summary(skipped), /mutation score skipped \(checks already fail without mutation\)/);
+  const out = renderDashboard(skipped, [], { width: 100, now: 1, color: false, frame: 0 });
+  assert.match(out, /mutation skipped \(checks already fail/);
+  assert.doesNotMatch(out, /mutation 1\.00/);
+  const scored: Run = { ...base, mutation: { total: 4, killed: 3, floor: 0.6, score: 0.75, pass: true } };
+  assert.match(summary(scored), /mutation score 0\.75 \(3\/4 killed, floor 0\.6, pass\)/);
+});
+
+test('runTestsAsync reports exit codes, kills on timeout and does not block the event loop', async () => {
+  const g = await import('../src/git.ts');
+  const dir = process.cwd();
+  assert.deepEqual((await g.runTestsAsync(dir, 'echo hi')).ok, true);
+  const bad = await g.runTestsAsync(dir, 'echo oops >&2; exit 3');
+  assert.equal(bad.ok, false);
+  assert.equal(bad.exit, 3);
+  assert.match(bad.tail, /oops/);
+  let ticks = 0;
+  const timer = setInterval(() => ticks++, 10);
+  const t0 = Date.now();
+  const slow = await g.runTestsAsync(dir, 'sleep 5', 300);
+  clearInterval(timer);
+  assert.equal(slow.ok, false);
+  assert.equal(slow.exit, null);
+  assert.match(slow.tail, /timed out after 300ms/);
+  assert.ok(Date.now() - t0 < 3000, 'the sleeping child was killed, not waited for');
+  assert.ok(ticks >= 10, `event loop kept ticking (${ticks})`);
+  // The env is honoured.
+  assert.match((await g.runTestsAsync(dir, 'echo "[$FOO_X]"', 5000, { PATH: process.env.PATH, FOO_X: 'v' })).tail, /\[v\]/);
+});

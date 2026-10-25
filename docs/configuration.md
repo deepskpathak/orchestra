@@ -7,7 +7,7 @@ Orchestra has two config layers, both plain JSON:
 
 ## Project config (`.orchestra/config.json`)
 
-Defaults come from `DEFAULT_PROJECT_CONFIG` in `src/store.ts`. Missing keys fall back to the defaults, and the `judgeTiers`, `preJudge`, `contrastive`, `fastPath` and `evolve` objects are merged key by key, so older configs get the defaults for newer keys automatically. On `orchestra init`, `testCommand` is filled in by auto-detection (it stays `null` if nothing is detected).
+Defaults come from `DEFAULT_PROJECT_CONFIG` in `src/store.ts`. Missing keys fall back to the defaults, and the `judgeTiers`, `preJudge`, `contrastive`, `fastPath`, `verification` and `evolve` objects are merged key by key, so older configs get the defaults for newer keys automatically. On `orchestra init`, `testCommand` is filled in by auto-detection (it stays `null` if nothing is detected).
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
@@ -21,6 +21,7 @@ Defaults come from `DEFAULT_PROJECT_CONFIG` in `src/store.ts`. Missing keys fall
 | `preJudge` | object | see below | Deterministic checks before any judge call. |
 | `fastPath` | object | see below | Single-task planning for small goals. |
 | `contrastive` | object | see below | Two-worker contrastive repair. |
+| `verification` | object | see below | M4 Verification checks, all off by default. |
 | `context` | object | see below | Repo context settings (`context.atlas`). |
 | `evolve` | object | see below | Self-improvement settings. |
 
@@ -62,6 +63,41 @@ Off by default. When enabled and the goal is short and has no list structure (nu
 |---|---|---|---|
 | `fastPath.enabled` | boolean | `false` | Turn the fast path on. |
 | `fastPath.maxGoalChars` | number | `400` | Goals longer than this never take the fast path. |
+
+### `verification`
+
+M4 Verification. Every part is off by default; later releases fill in the behaviour behind each switch. Nested objects are merged key by key, so a partial block such as `{"mutation": {"floor": 0.8}}` keeps all other defaults. Panel and oracle calls reuse the judge role with a different model, there is no new role.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `verification.contracts.enabled` | boolean | `false` | The planner writes acceptance criteria as a machine-readable contract that workers can only mark passing, never edit. Unresolved ambiguities (a planner `ambiguities` entry with an empty `resolution`) fail the run during planning, before any worker starts. The frozen feature list is written to `.orchestra/runs/<runId>/contract.json` and its sha256 is recorded on `Run.contract`; the guard denies agent writes to it. Before each task is judged the conductor re-hashes the file; a mismatch fails the attempt as an integrity flag (`acceptance contract modified`) and the file is restored from the conductor's copy. When a task merges, the conductor flips its criteria to `passing` (validated by `applyContractUpdate`) and records the new sha256. The judge's acceptance list and the oracle author's invariants are read from the verified file. |
+| `verification.panel.enabled` | boolean | `false` | Score with a panel of judges and record per-judge votes and disagreement. |
+| `verification.panel.judges` | `{model, lineage?}[]` | `[]` | Panel members. `lineage` names the prompt variant used for that judge. |
+| `verification.panel.escalateModel` | string or null | `null` | Model that breaks split votes. `null` uses the harness judge model. A criterion is decided only when more than half of all judges pass it or more than half fail it; anything else (a tie, or criteria some judges did not answer) is a split. Judges number their criteria with `index`, which is how votes line up across differently worded answers. |
+| `verification.agenticJudge.enabled` | boolean | `false` | The judge runs builds, tests and scenario checks per requirement instead of only reading the diff. With this on, the planner is asked to give each scenario an optional `check` command. The conductor runs scenario `check` commands and the test command first and gives the judge the results; criteria should carry `evidence`, and a pass without it adds an advisory issue. |
+| `verification.agenticJudge.checkTimeoutMs` | number | `120000` | Timeout for one check command. |
+| `verification.oracles.enabled` | boolean | `false` | Grade repos without tests with oracles the worker did not write. |
+| `verification.oracles.model` | string or null | `null` | Model that writes oracle tests. `null` uses the judge model, never the worker's. |
+| `verification.oracles.propertyRuns` | number | `50` | Cases per property-based check. |
+| `verification.oracles.seed` | number | `1` | Property test seed, fixed so runs reproduce. |
+| `verification.oracles.differential` | boolean | `true` | Compare unchanged behaviour against the base commit. |
+| `verification.oracles.excludeWorkerTests` | boolean | `true` | A worker's own tests never count towards its grade. |
+| `verification.mutation.enabled` | boolean | `false` | Report a mutation score per run. |
+| `verification.mutation.floor` | number | `0.6` | Minimum share of mutants that tests and scenarios must kill (0 to 1). |
+| `verification.mutation.maxMutants` | number | `20` | Cap on mutants generated per run. |
+| `verification.mutation.failBelowFloor` | boolean | `false` | Fail the run when the score is under the floor. `false` reports only. |
+| `verification.mutation.mutantTimeoutMs` | number | `60000` | Time limit for each check command run against one mutant. A timeout counts as killed (an infinite loop is a caught mutant). Raise it if your test command normally takes longer, or every mutant will look killed. The unmutated baseline run keeps the 10 minute default. |
+
+
+Verification modes are recorded per run: `Run.verificationModes` lists which of `panel`, `agentic`, `contracts`, `oracles`, `mutation` were enabled when the run started (absent when none). `orchestra stats` uses it to split the merged-but-wrong rate and judge agreement by mode. There is no config key for this and nothing to turn on.
+
+With the agentic judge on, the conductor runs each scenario `check` command and the test command once in the task worktree (each bounded by `checkTimeoutMs`), reusing the test result already computed for the task, and gives the results to the judge as an EXECUTED CHECKS section. The judge is told to return `evidence` for every criterion. A criterion that passes without evidence adds the advisory issue `Criterion passed without executed evidence`; it never fails the task by itself. The planner may add a `check` shell command to any scenario.
+
+Oracles run in the judge path, before the LLM judge's verdict is finalised, for tasks whose contract carries `invariants`. A separate oracle session (judge role, `oracles.model` or the harness judge model, never the worker's model when another is configured) writes files into `runs/<id>/oracles/<task>/`, outside the worker worktree. `*.test.mjs` files are `node:test` checks run with `node --test` against the worker tree (`ORACLE_TARGET`, `ORACLE_SEED`, `ORACLE_RUNS` are set). `probe*.mjs` files print outputs of behaviour that must not change; with `differential` on they run in a temporary worktree at the commit the task started from (so work merged by tasks it depends on is part of the baseline) and in the worker tree, and any stdout or exit difference is a mismatch. With `excludeWorkerTests` on, test files the worker added or changed are listed in the verdict issues as non-grading and are never evidence. Any oracle failure fails the verdict. An oracle session that fails or writes no files is logged and the task is graded without oracle evidence, as if oracles were off for that attempt. Tasks without invariants skip oracles.
+
+Mutation scoring runs once, after all merges, in a throwaway worktree. It mutates only source files (`.js .ts .mjs .cjs .jsx .tsx`, not tests) changed on the integration branch, up to `maxMutants`, thinned evenly in source order. The pass runs asynchronously (the TUI and dashboard stay responsive). A mutant is killed when `testCommand` or any scenario `check` fails. The scanner is a heuristic, not a parser: it skips generics, shifts, JSX tags, regex literals and template expressions, and a mutant whose run fails with a syntax or compile error is counted as invalid (`Run.mutation.invalid`) and left out of the score. If there is no command to kill with, the unmutated checks already fail, or there is nothing to mutate, the pass is skipped: `Run.mutation` carries `skipped` with the reason and no `score` or `pass`, the CLI, TUI and web dashboard show it as skipped, and `failBelowFloor` neither passes nor fails on it. The result is on `Run.mutation` and appears in `orchestra status` and the run summary.
+
+With the panel on, `judgeTiers` is bypassed. Each member sees a framing line chosen by `lineage` (`strict`, `literal`, `scenario`, or any custom name; omit or `default` for none). Votes are per criterion; a tie on any criterion calls `escalateModel` once and its verdict decides (`verdict.panel.escalated` is `true`). Members that return no verdict are skipped. `verdict.panel.disagreement` is the mean share of judges in the minority per criterion. Contrastive repair also compares in both orders and picks nothing when the orders disagree.
 
 ### `context.atlas`
 

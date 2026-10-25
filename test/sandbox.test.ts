@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { buildSandboxPolicy, claudeSandboxSettings, detectSandbox, scrubWorkerEnv, srtArgs, srtSandboxSettings } from '../src/sandbox.ts';
+import { buildSandboxPolicy, claudeSandboxSettings, detectSandbox, scrubVerifierEnv, scrubWorkerEnv, srtArgs, srtSandboxSettings } from '../src/sandbox.ts';
 
 const fake = (platform: string, ...present: string[]) => ({ platform, which: (c: string) => present.includes(c) });
 const HIDDEN = ['', 'r', '.orchestra', 'scen'].join('/');
@@ -90,4 +90,9 @@ test('scrubWorkerEnv drops push/publish creds, keeps model creds, does not mutat
   const out = scrubWorkerEnv(env);
   assert.deepEqual(Object.keys(out).sort(), ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_X', 'HOME', 'PATH']);
   assert.deepEqual(env, before);
+});
+
+test('scrubVerifierEnv drops push, publish and model credentials but keeps PATH and HOME', () => {
+  const env = scrubVerifierEnv({ PATH: '/bin', HOME: '/h', GH_TOKEN: 'a', NPM_TOKEN: 'b', ANTHROPIC_API_KEY: 'k', CLAUDE_CODE_OAUTH_TOKEN: 'o', FOO: 'bar' });
+  assert.deepEqual(env, { PATH: '/bin', HOME: '/h', FOO: 'bar' });
 });

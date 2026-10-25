@@ -6,9 +6,10 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import type { AgentRequest, Runner } from '../src/agent.ts';
 import * as g from '../src/git.ts';
-import { runGoal, normalizeTasks, shouldEscalate, missingTestIssues, preJudgeIssues, fastPathDecision, FAST_PLAN_SCHEMA } from '../src/conductor.ts';
+import { runGoal, normalizeTasks, shouldEscalate, missingTestIssues, preJudgeIssues, fastPathDecision, FAST_PLAN_SCHEMA, panelMajorityVerdict, buildVerdict } from '../src/conductor.ts';
 import { DEFAULT_PROJECT_CONFIG } from '../src/store.ts';
 import { fakeRunner } from '../src/fake.ts';
+import { runOracles } from '../src/oracle-run.ts';
 import { readLearnings, writeLearnings } from '../src/learnings.ts';
 import { tempRepo } from './helpers.ts';
 
@@ -683,4 +684,430 @@ test('normalizeTasks sanitises footprints; schema allows them optionally', () =>
   const props = FAST_PLAN_SCHEMA.properties.tasks.items as { properties: Record<string, unknown>; required: string[] };
   assert.ok('footprint' in props.properties);
   assert.ok(!props.required.includes('footprint'));
+});
+
+// ---------- judge panel (W4.1) ----------
+
+const panelJudges = [{ model: 'haiku', lineage: 'strict' }, { model: 'sonnet', lineage: 'literal' }, { model: 'opus-mini' }];
+const crit = (...passes: boolean[]) => passes.map((p, i) => ({ criterion: `c${i + 1}`, pass: p, score: p ? 0.9 : 0.3, note: '' }));
+const panelRunner = (byModel: Record<string, boolean[]>, seen: Array<{ model: string; prompt: string }>): Runner => {
+  const base = fakeRunner({ failFirstAttemptOf: [] });
+  return async (req) => {
+    if (req.role === 'planner') {
+      return { ok: true, text: '', costUsd: 0, turns: 1, durationMs: 1, structured: { tasks: [{ id: 'T1', title: 'a', description: 'a', acceptance: ['c1', 'c2'], deps: [] }], scenarios: [] } };
+    }
+    const passes = req.role === 'judge' ? byModel[req.model] : undefined;
+    if (passes) {
+      seen.push({ model: req.model, prompt: req.prompt });
+      const ok = passes.every(Boolean);
+      return { ok: true, text: '', costUsd: 0.01, turns: 1, durationMs: 1, structured: { pass: ok, score: ok ? 0.9 : 0.4, summary: `by ${req.model}`, issues: [], criteria: crit(...passes) } };
+    }
+    return base(req);
+  };
+};
+
+test('panel: a clear majority records votes and disagreement without escalating', async () => {
+  const seen: Array<{ model: string; prompt: string }> = [];
+  const store = tempRepo({ verification: { ...DEFAULT_PROJECT_CONFIG.verification, panel: { enabled: true, judges: panelJudges, escalateModel: null } } });
+  const run = await runGoal({ store, runner: panelRunner({ haiku: [true, true], sonnet: [true, true], 'opus-mini': [true, false] }, seen), goal: 'g' });
+  const t = run.tasks[0];
+  assert.equal(t.status, 'merged');
+  assert.equal(seen.length, 3);
+  assert.equal(t.verdict!.panel!.votes.length, 3);
+  assert.ok(t.verdict!.panel!.disagreement > 0);
+  assert.equal(t.verdict!.panel!.escalated, false);
+  assert.notEqual(seen[0].prompt, seen[1].prompt, 'lineages produce different prompts');
+  assert.match(seen[0].prompt, /REVIEW STANCE/);
+  assert.ok(store.events(run.id).some((e) => e.kind === 'log' && /judge panel of 3: disagreement 0\.17/.test(e.msg)));
+});
+
+test('panel: reworded criteria matched by index, a judge without criteria is not tallied, and index is only asked for in panel mode', async () => {
+  const seen: AgentRequest[] = [];
+  const base = fakeRunner({ failFirstAttemptOf: [] });
+  const reworded = [{ criterion: 'first', pass: true, score: 0.9, index: 1 }, { criterion: 'second', pass: true, score: 0.9, index: 2 }];
+  const byModel: Record<string, unknown> = {
+    haiku: { pass: true, score: 0.9, summary: 'bare', issues: [] },
+    sonnet: { pass: true, score: 0.9, summary: 'indexed', issues: [], criteria: reworded },
+    'opus-mini': { pass: true, score: 0.9, summary: 'indexed', issues: [], criteria: reworded },
+  };
+  const runner: Runner = async (req) => {
+    seen.push(req);
+    if (req.role === 'planner') return { ok: true, text: '', costUsd: 0, turns: 1, durationMs: 1, structured: { tasks: [{ id: 'T1', title: 'a', description: 'a', acceptance: ['c1', 'c2'], deps: [] }], scenarios: [] } };
+    if (req.role === 'judge' && byModel[req.model]) return { ok: true, text: '', costUsd: 0.01, turns: 1, durationMs: 1, structured: byModel[req.model] };
+    return base(req);
+  };
+  const store = tempRepo({ verification: { ...DEFAULT_PROJECT_CONFIG.verification, panel: { enabled: true, judges: panelJudges, escalateModel: null } } });
+  const run = await runGoal({ store, runner, goal: 'g' });
+  const t = run.tasks[0];
+  assert.equal(t.status, 'merged');
+  assert.equal(t.verdict!.panel!.escalated, false);
+  assert.deepEqual(t.verdict!.panel!.perCriterion.map((c) => [c.criterion, c.pass, c.fail]), [['c1', 2, 0], ['c2', 2, 0]].map(([c, p, f]) => [c, p, f]));
+  assert.deepEqual(t.verdict!.criteria!.map((c) => c.criterion), ['c1', 'c2']);
+  assert.ok(seen.filter((r) => r.role === 'judge').every((r) => /1-based position/.test(r.prompt)));
+  const offSeen: AgentRequest[] = [];
+  const off = await runGoal({ store: tempRepo({ concurrency: 1 }), runner: (req) => { offSeen.push(req); return base(req); }, goal: 'g' });
+  assert.equal(off.status, 'done');
+  assert.ok(offSeen.some((r) => r.role === 'judge'));
+  assert.ok(offSeen.filter((r) => r.role === 'judge').every((r) => !/1-based position/.test(r.prompt) && !JSON.stringify(r.schema ?? {}).includes('"index"')));
+});
+
+test('panel: a split vote makes exactly one escalation call whose verdict decides', async () => {
+  const seen: Array<{ model: string; prompt: string }> = [];
+  const store = tempRepo({ verification: { ...DEFAULT_PROJECT_CONFIG.verification, panel: { enabled: true, judges: panelJudges.slice(0, 2), escalateModel: 'big' } } });
+  const run = await runGoal({ store, runner: panelRunner({ haiku: [true, true], sonnet: [true, false], big: [true, true] }, seen), goal: 'g' });
+  const t = run.tasks[0];
+  assert.equal(seen.filter((s) => s.model === 'big').length, 1);
+  assert.equal(seen.length, 3);
+  assert.equal(t.verdict!.panel!.escalated, true);
+  assert.equal(t.verdict!.panel!.votes.length, 2);
+  assert.equal(t.verdict!.summary, 'by big');
+  assert.equal(t.status, 'merged');
+});
+
+test('panel disabled: one judge call and no panel field', async () => {
+  const { runner, calls } = oneTaskRunner(0);
+  const run = await runGoal({ store: tempRepo(), runner, goal: 'g' });
+  assert.equal(calls.judge, 1);
+  assert.equal('panel' in run.tasks[0].verdict!, false);
+});
+
+test('panel contrast: orders that disagree give no pick; consistent orders pick', async () => {
+  const panel = { ...DEFAULT_PROJECT_CONFIG.verification, panel: { enabled: true, judges: [], escalateModel: null } };
+  // The fake always prefers the displayed B, so the swapped run contradicts the first.
+  const biased = tempRepo({ concurrency: 1, contrastive, verification: panel });
+  const { seen, wrapped } = countBy(fakeRunner({ contrastPick: 'B' }));
+  const run = await runGoal({ store: biased, runner: wrapped, goal: 'g' });
+  assert.equal(seen.compare, 2);
+  assert.equal(run.tasks.find((t) => t.id === 'T2')!.contrast?.picked, null);
+  assert.match(run.tasks.find((t) => t.id === 'T2')!.contrast!.reasons, /not consistent/);
+
+  const steady = tempRepo({ concurrency: 1, contrastive, verification: panel });
+  const base = fakeRunner();
+  const content: Runner = async (req) => {
+    const res = await base(req);
+    if (req.role === 'judge' && /ATTEMPT A DIFF/.test(req.prompt) && res.structured) {
+      const aSection = req.prompt.slice(req.prompt.indexOf('ATTEMPT A DIFF'), req.prompt.indexOf('ATTEMPT B WORKER SUMMARY'));
+      res.structured = { ...(res.structured as object), preferred: /T2-b/.test(aSection) ? 'A' : 'B' };
+    }
+    return res;
+  };
+  const r2 = await runGoal({ store: steady, runner: content, goal: 'g' });
+  assert.equal(r2.tasks.find((t) => t.id === 'T2')!.contrast?.picked, 'B');
+});
+
+// W4.5 mutation pass. changedFiles and exec are injected, the fake runner never touches real source.
+const mutationRepo = (mutation: Record<string, unknown>) => {
+  const store = tempRepo({ testCommand: 'true', verification: { ...DEFAULT_PROJECT_CONFIG.verification, mutation: { ...DEFAULT_PROJECT_CONFIG.verification.mutation, enabled: true, ...mutation } } });
+  writeFileSync(join(store.root, 'calc.js'), 'export const ok = (a, b) => a === b && a < 3;\n');
+  execFileSync('git', ['add', '-A'], { cwd: store.root });
+  execFileSync('git', ['commit', '-qm', 'calc'], { cwd: store.root });
+  return store;
+};
+
+test('mutation enabled sets run.mutation and emits an event; scratch worktree is cleaned up', async () => {
+  const store = mutationRepo({ floor: 0.5 });
+  const seen: string[] = [];
+  const run = await runGoal({ store, runner: fakeRunner(), goal: 'g', mutation: { changedFiles: ['calc.js', 'README.md'], exec: (cwd, c) => { seen.push(cwd); return { ok: true }; } } });
+  assert.equal(run.status, 'done');
+  assert.equal(run.mutation!.total, 3);
+  assert.equal(run.mutation!.killed, 0);
+  assert.equal(run.mutation!.pass, false);
+  assert.ok(store.events(run.id).some((e) => /Mutation score 0\.00/.test(e.msg)));
+  assert.equal(store.readJson<{ mutation?: unknown }>(`runs/${run.id}/run.json`, {}).mutation !== undefined, true);
+  assert.ok(seen.every((d) => d.includes('mutation')));
+  assert.ok(!existsSync(seen[0]));
+});
+
+test('mutation: a deleted or missing changed file skips only that file, not the whole gate', async () => {
+  const store = mutationRepo({ floor: 0.5 });
+  const run = await runGoal({ store, runner: fakeRunner(), goal: 'g', mutation: { changedFiles: ['removed.js', 'calc.js'], exec: () => ({ ok: true }) } });
+  assert.equal(run.mutation!.total, 3);
+  assert.ok(store.events(run.id).some((e) => /left out 1 unreadable file\(s\): removed\.js/.test(e.msg)));
+});
+
+test('changedFiles can leave out deleted files', () => {
+  const store = mutationRepo({});
+  const base = g.head(store.root);
+  execFileSync('git', ['rm', '-q', 'calc.js'], { cwd: store.root });
+  writeFileSync(join(store.root, 'new.js'), 'export const n = 1;\n');
+  execFileSync('git', ['add', '-A'], { cwd: store.root });
+  execFileSync('git', ['commit', '-qm', 'rm calc, add new'], { cwd: store.root });
+  assert.deepEqual(g.changedFiles(store.root, base).sort(), ['calc.js', 'new.js']);
+  assert.deepEqual(g.changedFiles(store.root, base, false), ['new.js']);
+});
+
+test('mutation failBelowFloor fails the run with a clear error; report-only does not', async () => {
+  const low = mutationRepo({ floor: 0.9, failBelowFloor: true });
+  let n = 0;
+  const bad = await runGoal({ store: low, runner: fakeRunner(), goal: 'g', mutation: { changedFiles: ['calc.js'], exec: () => ({ ok: ++n !== 3 }) } });
+  assert.equal(bad.status, 'failed');
+  assert.match(bad.error!, /Mutation score 0\.33 is below the floor 0\.9 \(2 of 3 mutants survived\)/);
+  const soft = mutationRepo({ floor: 0.9 });
+  const ok = await runGoal({ store: soft, runner: fakeRunner(), goal: 'g', mutation: { changedFiles: ['calc.js'], exec: () => ({ ok: true }) } });
+  assert.equal(ok.status, 'done');
+  assert.equal(ok.mutation!.pass, false);
+});
+
+test('mutation skipped (failing baseline, nothing to mutate) is recorded as skipped, not as a passing 1.0, and never gates', async () => {
+  const cases: [string, { changedFiles: string[]; ok: boolean }, RegExp][] = [
+    ['failing baseline', { changedFiles: ['calc.js'], ok: false }, /already fail/],
+    ['no mutable source', { changedFiles: ['README.md'], ok: true }, /no mutable source changes/],
+  ];
+  for (const [name, c, why] of cases) {
+    const store = mutationRepo({ floor: 0.9, failBelowFloor: true });
+    const run = await runGoal({ store, runner: fakeRunner(), goal: 'g', mutation: { changedFiles: c.changedFiles, exec: () => ({ ok: c.ok }) } });
+    assert.equal(run.status, 'done', name);
+    assert.match(run.mutation!.skipped!, why, name);
+    assert.equal(run.mutation!.score, undefined, name);
+    assert.equal(run.mutation!.pass, undefined, name);
+    assert.ok(store.events(run.id).some((e) => /Mutation skipped/.test(e.msg)), name);
+    assert.ok(!store.events(run.id).some((e) => /Mutation score/.test(e.msg)), name);
+  }
+});
+
+test('mutation: mutants that fail with a syntax error are invalid and excluded from the score', async () => {
+  const store = mutationRepo({ floor: 0.5 });
+  let n = 0;
+  const run = await runGoal({ store, runner: fakeRunner(), goal: 'g', mutation: { changedFiles: ['calc.js'], exec: () => (++n === 1 ? { ok: true } : n === 2 ? { ok: false, tail: 'SyntaxError: Unexpected token' } : { ok: false, tail: 'not ok 1' }) } });
+  assert.deepEqual([run.mutation!.total, run.mutation!.killed, run.mutation!.invalid, run.mutation!.score, run.mutation!.pass], [2, 2, 1, 1, true]);
+  assert.ok(store.events(run.id).some((e) => /1 invalid mutant\(s\) excluded/.test(e.msg)));
+});
+
+test('mutation: runs asynchronously with the configured per-mutant timeout (baseline gets none)', async () => {
+  const store = mutationRepo({ floor: 0.5, mutantTimeoutMs: 1234 });
+  const timeouts: (number | undefined)[] = [];
+  let ticks = 0;
+  const timer = setInterval(() => ticks++, 5);
+  const run = await runGoal({ store, runner: fakeRunner(), goal: 'g', mutation: { changedFiles: ['calc.js'], exec: async (_d, _c, t) => { timeouts.push(t); await new Promise((r) => setTimeout(r, 15)); return { ok: timeouts.length === 1 }; } } });
+  clearInterval(timer);
+  assert.equal(run.mutation!.total, 3);
+  assert.deepEqual(timeouts, [undefined, 1234, 1234, 1234]);
+  assert.ok(ticks > 3, 'the event loop kept running during the mutation pass');
+});
+
+test('mutation disabled leaves the run without mutation', async () => {
+  const store = tempRepo();
+  const run = await runGoal({ store, runner: fakeRunner(), goal: 'g', mutation: { changedFiles: ['calc.js'], exec: () => { throw new Error('must not run'); } } });
+  assert.equal(run.mutation, undefined);
+});
+
+// ---- W4.4 oracle wiring: a repo with no tests graded by files the worker never touched ----
+
+const ORACLE_TEST = `import test from 'node:test';
+import assert from 'node:assert/strict';
+import { pathToFileURL } from 'node:url';
+const m = await import(pathToFileURL(process.env.ORACLE_TARGET + '/src/math.mjs').href);
+test('double is 2x', () => {
+  for (let x = -5; x <= 5; x++) assert.equal(m.double(x), 2 * x);
+});
+`;
+const ORACLE_PROBE = `import { pathToFileURL } from 'node:url';
+const m = await import(pathToFileURL(process.env.ORACLE_TARGET + '/src/math.mjs').href);
+console.log(m.add(2, 3));
+`;
+const OWN_TEST = `import test from 'node:test';\ntest('worker own test', () => {});\n`;
+const MATH_OK = 'export const add = (a, b) => a + b;\nexport const double = (x) => x * 2;\n';
+const MATH_BUG = 'export const add = (a, b) => a + b + 1;\nexport const double = (x) => x * 3;\n';
+
+function noTestRepo(oracles: Record<string, unknown>) {
+  const store = tempRepo({ verification: { ...DEFAULT_PROJECT_CONFIG.verification, oracles: { ...DEFAULT_PROJECT_CONFIG.verification.oracles, enabled: true, ...oracles } } });
+  mkdirSync(join(store.root, 'src'), { recursive: true });
+  writeFileSync(join(store.root, 'src', 'math.mjs'), MATH_OK);
+  execFileSync('git', ['add', '-A'], { cwd: store.root });
+  execFileSync('git', ['commit', '-qm', 'math'], { cwd: store.root });
+  return store;
+}
+
+test('oracles: the oracle files, not the worker test, grade a repo without tests', async () => {
+  const store = noTestRepo({ model: 'oracle-model' });
+  const runner = fakeRunner({
+    failFirstAttemptOf: [],
+    invariants: ['double(x) equals 2x', 'add is unchanged'],
+    workerFiles: (t) => (t === 'T1' ? { 'test/own.test.mjs': OWN_TEST, 'src/math.mjs': MATH_BUG } : {}),
+    oracleFiles: { 'invariants.test.mjs': ORACLE_TEST, 'probe-add.mjs': ORACLE_PROBE },
+  });
+  const run = await runGoal({ store, runner, goal: 'g' });
+  const t1 = run.tasks.find((t) => t.id === 'T1')!;
+  assert.equal(t1.status, 'failed');
+  assert.ok(t1.verdict && !t1.verdict.pass);
+  assert.ok(t1.verdict!.issues.some((i) => /^oracle: independent tests failed/.test(i)), t1.verdict!.issues.join('\n'));
+  // The differential probe flags the untouched add() whose output changed.
+  assert.ok(t1.verdict!.issues.some((i) => /differential mismatch.*probe-add\.mjs/.test(i)));
+  // The worker's own passing test is listed as non-grading.
+  assert.ok(t1.verdict!.issues.some((i) => /non-grading: worker test file test\/own\.test\.mjs/.test(i)));
+  // Oracle files live in the run-owned dir, never in the worker tree.
+  assert.ok(existsSync(store.path('runs', run.id, 'oracles', 'T1', 'invariants.test.mjs')));
+  assert.equal(existsSync(join(t1.worktree!, 'invariants.test.mjs')), false);
+  // Tasks that leave the code alone pass the oracles and merge.
+  assert.equal(run.tasks.find((t) => t.id === 'T2')!.status, 'merged');
+  // The oracle session used the configured model, not the worker's.
+  const rows = store.ledgerRows().filter((r) => r.task === 'T1' && r.role === 'judge' && r.model === 'oracle-model');
+  assert.ok(rows.length >= 1);
+  assert.ok(!store.ledgerRows().some((r) => r.role === 'worker' && r.model === 'oracle-model'));
+});
+
+test('oracles: default model is the judge model, differential can be turned off', async () => {
+  const store = noTestRepo({ differential: false });
+  const runner = fakeRunner({
+    failFirstAttemptOf: [],
+    invariants: ['double(x) equals 2x'],
+    workerFiles: (t) => (t === 'T1' ? { 'src/math.mjs': 'export const add = (a, b) => a + b + 1;\nexport const double = (x) => x * 2;\n' } : {}),
+    oracleFiles: { 'invariants.test.mjs': ORACLE_TEST, 'probe-add.mjs': ORACLE_PROBE },
+  });
+  const run = await runGoal({ store, runner, goal: 'g' });
+  const t1 = run.tasks.find((t) => t.id === 'T1')!;
+  // double is right and the differential is off, so the oracles pass.
+  assert.equal(t1.status, 'merged');
+  assert.ok(!t1.verdict!.issues.some((i) => /differential/.test(i)));
+});
+
+test('oracles: a failed or empty oracle session degrades to the normal judge instead of failing the task', async () => {
+  const base = fakeRunner({ failFirstAttemptOf: [], invariants: ['double(x) equals 2x'], oracleFiles: { 'invariants.test.mjs': ORACLE_TEST } });
+  const crashing: Runner = async (req) => (req.prompt.startsWith('ORACLE TESTS') ? { ok: false, text: '', costUsd: 0, turns: 1, durationMs: 1, error: 'oracle crash' } : base(req));
+  const empty = fakeRunner({ failFirstAttemptOf: [], invariants: ['double(x) equals 2x'] });
+  for (const [name, runner, log] of [['crash', crashing, /oracle session failed/], ['empty', empty, /wrote no files/]] as const) {
+    const store = noTestRepo({});
+    const run = await runGoal({ store, runner, goal: 'g' });
+    assert.equal(run.status, 'done', name);
+    const t1 = run.tasks.find((t) => t.id === 'T1')!;
+    assert.equal(t1.status, 'merged', name);
+    assert.ok(!t1.verdict!.issues.some((i) => /oracle/.test(i)), `${name}: ${t1.verdict!.issues.join('\n')}`);
+    assert.ok(store.events(run.id).some((e) => log.test(e.msg) && /no oracle evidence/.test(e.msg)), name);
+  }
+});
+
+test('oracles: an exception in the oracle pass is logged and judging continues', async () => {
+  const store = noTestRepo({});
+  const base = fakeRunner({ failFirstAttemptOf: [], invariants: ['double(x) equals 2x'], oracleFiles: { 'invariants.test.mjs': ORACLE_TEST } });
+  // Planner runs in the integration worktree: <root>/.orchestra/worktrees/<runId>/_integration. Squat the oracles dir with a file so mkdir throws.
+  const runner: Runner = async (req) => {
+    if (req.role === 'planner') {
+      const runId = req.cwd.split('/').slice(-2)[0];
+      mkdirSync(store.path('runs', runId), { recursive: true });
+      writeFileSync(store.path('runs', runId, 'oracles'), 'not a directory');
+    }
+    return base(req);
+  };
+  const run = await runGoal({ store, runner, goal: 'g' });
+  assert.equal(run.status, 'done');
+  assert.ok(run.tasks.every((t) => t.status === 'merged'));
+  assert.ok(store.events(run.id).some((e) => /oracles failed, grading with no oracle evidence/.test(e.msg)));
+});
+
+test('runOracles: a bad base ref throws but leaves no base worktree behind', () => {
+  const store = tempRepo();
+  const dir = mkdtempSync(join(tmpdir(), 'orchestra-oracle-dir-'));
+  writeFileSync(join(dir, 'probe-a.mjs'), 'console.log(1);\n');
+  const before = execFileSync('git', ['worktree', 'list'], { cwd: store.root, encoding: 'utf8' });
+  assert.throws(() => runOracles({ repoRoot: store.root, baseRef: 'no-such-ref', tree: store.root, taskBase: g.head(store.root), oracleDir: dir, env: { seed: 1, propertyRuns: 1 }, differential: true, excludeWorkerTests: true }));
+  assert.equal(execFileSync('git', ['worktree', 'list'], { cwd: store.root, encoding: 'utf8' }), before);
+});
+
+test('oracles: the differential compares against the task base, so earlier tasks\' changes are not drift', async () => {
+  const store = noTestRepo({});
+  const base = fakeRunner({ failFirstAttemptOf: [], workerFiles: (t) => (t === 'T1' ? { 'src/math.mjs': MATH_BUG } : {}), oracleFiles: { 'probe-add.mjs': ORACLE_PROBE } });
+  const runner: Runner = async (req) => {
+    if (req.role === 'planner') {
+      // T1 changes add() legitimately and has no invariants (no oracles); T2 depends on it and must leave add() alone.
+      return { ok: true, text: '', costUsd: 0, turns: 1, durationMs: 1, structured: { tasks: [
+        { id: 'T1', title: 'change add', description: 'a', acceptance: ['c'], deps: [] },
+        { id: 'T2', title: 'unrelated', description: 'b', acceptance: ['c'], deps: ['T1'], invariants: ['add stays as T1 left it'] },
+      ], scenarios: [] } };
+    }
+    return base(req);
+  };
+  const run = await runGoal({ store, runner, goal: 'g' });
+  const t2 = run.tasks.find((t) => t.id === 'T2')!;
+  assert.equal(t2.status, 'merged', t2.verdict?.issues.join('\n'));
+  assert.ok(!t2.verdict!.issues.some((i) => /differential/.test(i)));
+});
+
+test('oracles disabled: no oracle session and unchanged call counts', async () => {
+  const count = async (cfg: Record<string, unknown>) => {
+    const store = tempRepo(cfg);
+    await runGoal({ store, runner: fakeRunner({ invariants: ['x'], oracleFiles: { 'a.test.mjs': 'x' } }), goal: 'g' });
+    return store.ledgerRows().filter((r) => r.role === 'judge').length;
+  };
+  const off = await count({});
+  const on = await count({ verification: { ...DEFAULT_PROJECT_CONFIG.verification, oracles: { ...DEFAULT_PROJECT_CONFIG.verification.oracles, enabled: true } } });
+  assert.equal(off, 5, 'four tasks plus one repair judge, no oracle sessions');
+  assert.ok(on > off);
+});
+
+// ---------- agentic judge (W4.2) ----------
+
+test('agentic judge on: the planner is asked for scenario checks; off: it is not', async () => {
+  const bodies = async (cfg: Record<string, unknown>) => {
+    const seen: AgentRequest[] = [];
+    const base = fakeRunner({ failFirstAttemptOf: [] });
+    await runGoal({ store: tempRepo({ concurrency: 1, ...cfg }), runner: async (req) => { seen.push(req); return base(req); }, goal: 'g' });
+    return seen.find((r) => r.role === 'planner')!.prompt;
+  };
+  assert.match(await bodies({ verification: { ...DEFAULT_PROJECT_CONFIG.verification, agenticJudge: { enabled: true, checkTimeoutMs: 20000 } } }), /"check": one shell command/);
+  assert.doesNotMatch(await bodies({}), /"check"/);
+});
+
+test('agentic judge: failing scenario check and its exit code reach the judge prompt', async () => {
+  const seen: AgentRequest[] = [];
+  const base = fakeRunner({ failFirstAttemptOf: [] });
+  const runner: Runner = async (req) => {
+    seen.push(req);
+    if (req.role === 'planner') {
+      return { ok: true, text: '', costUsd: 0, turns: 1, durationMs: 1, structured: { tasks: [{ id: 'T1', title: 'a', description: 'a', acceptance: ['c1'], deps: [] }], scenarios: [{ id: 'S1', given: 'g', when: 'w', then: 't', check: 'echo bad >&2; exit 4' }] } };
+    }
+    return base(req);
+  };
+  const store = tempRepo({ concurrency: 1, testCommand: 'true', verification: { ...DEFAULT_PROJECT_CONFIG.verification, agenticJudge: { enabled: true, checkTimeoutMs: 20000 } } });
+  await runGoal({ store, runner, goal: 'g' });
+  const judge = seen.find((r) => r.role === 'judge')!;
+  assert.match(judge.prompt, /EXECUTED CHECKS/);
+  assert.match(judge.prompt, /S1: `echo bad >&2; exit 4` FAILED \(exit 4\)/);
+  assert.match(judge.prompt, /tests: `true` PASSED \(exit 0\)/);
+});
+
+test('agentic judge: scenario checks run with a scrubbed env, so credentials never reach worker code or the judge prompt', async () => {
+  const seen: AgentRequest[] = [];
+  const base = fakeRunner({ failFirstAttemptOf: [] });
+  const runner: Runner = async (req) => {
+    seen.push(req);
+    if (req.role === 'planner') {
+      return { ok: true, text: '', costUsd: 0, turns: 1, durationMs: 1, structured: { tasks: [{ id: 'T1', title: 'a', description: 'a', acceptance: ['c1'], deps: [] }], scenarios: [{ id: 'S1', given: 'g', when: 'w', then: 't', check: 'echo "tok=[$GH_TOKEN][$ANTHROPIC_API_KEY]"' }] } };
+    }
+    return base(req);
+  };
+  const saved = { GH_TOKEN: process.env.GH_TOKEN, ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY };
+  process.env.GH_TOKEN = 'secret-gh';
+  process.env.ANTHROPIC_API_KEY = 'secret-model';
+  try {
+    const store = tempRepo({ concurrency: 1, verification: { ...DEFAULT_PROJECT_CONFIG.verification, agenticJudge: { enabled: true, checkTimeoutMs: 20000 } } });
+    await runGoal({ store, runner, goal: 'g' });
+  } finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+  const judge = seen.find((r) => r.role === 'judge')!;
+  assert.match(judge.prompt, /tok=\[\]\[\]/);
+  assert.doesNotMatch(judge.prompt, /secret-/);
+});
+
+test('agentic judge + panel: majority verdict keeps per-criterion evidence so passes are not flagged', () => {
+  const crit = (evidence?: string) => [{ criterion: 'c1', pass: true, score: 1, ...(evidence ? { evidence } : {}) }];
+  const raws = [
+    { pass: true, score: 1, summary: 's', issues: [], criteria: crit() },
+    { pass: true, score: 1, summary: 's', issues: [], criteria: crit('ran npm test: ok') },
+  ];
+  const merged = panelMajorityVerdict(raws, { c1: true }, ['c1']);
+  assert.equal(merged.criteria![0].evidence, 'ran npm test: ok');
+  const v = buildVerdict(merged, true, 0.7, undefined, true);
+  assert.ok(!v.issues.some((i) => i.includes('without executed evidence')));
+});
+
+test('run records the verification modes enabled at start, and nothing when all are off', async () => {
+  const off = await runGoal({ store: tempRepo({ concurrency: 1 }), runner: fakeRunner({ failFirstAttemptOf: [] }), goal: 'g' });
+  assert.equal(off.verificationModes, undefined);
+  const store = tempRepo({ concurrency: 1, verification: { ...DEFAULT_PROJECT_CONFIG.verification, agenticJudge: { enabled: true, checkTimeoutMs: 20000 }, contracts: { enabled: true } } });
+  const on = await runGoal({ store, runner: fakeRunner({ failFirstAttemptOf: [] }), goal: 'g' });
+  assert.deepEqual(on.verificationModes, ['agentic', 'contracts']);
 });

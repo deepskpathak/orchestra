@@ -2,7 +2,7 @@
 // branch + worktree cut from the integration tip. Nothing touches the user's checkout,
 // so a run is fully reversible: delete the orchestra/<run>/* branches.
 
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 
@@ -84,8 +84,11 @@ export function diffStat(cwd: string, base: string, maxChars = 4000): string {
   return d.length > maxChars ? d.slice(0, maxChars) + '\n... [stat truncated]' : d;
 }
 
-export function changedFiles(cwd: string, base: string): string[] {
-  return git(cwd, 'diff', '--name-only', base).split('\n').filter(Boolean);
+// Files that differ from base. Deleted files are included unless `includeDeleted` is false (callers that
+// read the files afterwards, such as the mutation pass, cannot use a path that no longer exists).
+export function changedFiles(cwd: string, base: string, includeDeleted = true): string[] {
+  const args = includeDeleted ? ['diff', '--name-only', base] : ['diff', '--name-only', '--diff-filter=d', base];
+  return git(cwd, ...args).split('\n').filter(Boolean);
 }
 
 export function hasChangesSince(cwd: string, base: string): boolean {
@@ -136,12 +139,49 @@ export function deleteBranch(root: string, branch: string): void {
   tryGit(root, 'branch', '-D', branch);
 }
 
-export function runTests(cwd: string, command: string, timeoutMs = 10 * 60_000): { ok: boolean; tail: string } {
-  const r = spawnSync('sh', ['-c', command], { cwd, encoding: 'utf8', timeout: timeoutMs, env: { ...process.env, CI: '1' } });
+export function runTests(cwd: string, command: string, timeoutMs = 10 * 60_000, env: Record<string, string | undefined> = process.env): { ok: boolean; exit: number | null; tail: string } {
+  const r = spawnSync('sh', ['-c', command], { cwd, encoding: 'utf8', timeout: timeoutMs, env: { ...env, CI: '1' } });
   const out = `${r.stdout ?? ''}${r.stderr ?? ''}`;
   const tail = out.length > 4000 ? '...' + out.slice(-4000) : out;
-  if (r.error) return { ok: false, tail: `${r.error.message}\n${tail}` };
-  return { ok: r.status === 0, tail };
+  if (r.error) return { ok: false, exit: null, tail: `${r.error.message}\n${tail}` };
+  return { ok: r.status === 0, exit: r.status, tail };
+}
+
+// Same contract as runTests, but asynchronous so the event loop (TUI, dashboard) keeps running while a long
+// command executes. The command runs in its own process group, so a timeout kills the whole tree.
+export function runTestsAsync(cwd: string, command: string, timeoutMs = 10 * 60_000, env: Record<string, string | undefined> = process.env): Promise<{ ok: boolean; exit: number | null; tail: string }> {
+  return new Promise((resolve) => {
+    const keep = 4000;
+    let out = '';
+    let timedOut = false;
+    let settled = false;
+    const finish = (r: { ok: boolean; exit: number | null; error?: string }) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      const tail = out.length > keep ? '...' + out.slice(-keep) : out;
+      const note = timedOut ? `timed out after ${timeoutMs}ms` : r.error;
+      resolve({ ok: r.ok && !timedOut, exit: timedOut ? null : r.exit, tail: note ? `${note}\n${tail}` : tail });
+    };
+    const child = spawn('sh', ['-c', command], { cwd, env: { ...env, CI: '1' } as NodeJS.ProcessEnv, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
+    const collect = (b: Buffer) => {
+      out += b.toString('utf8');
+      if (out.length > keep * 4) out = out.slice(-keep * 2);
+    };
+    child.stdout.on('data', collect);
+    child.stderr.on('data', collect);
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try {
+        process.kill(-child.pid!, 'SIGKILL');
+      } catch {
+        child.kill('SIGKILL');
+      }
+    }, timeoutMs);
+    child.on('error', (e) => finish({ ok: false, exit: null, error: e.message }));
+    // 'close' fires after the stdio streams end, so the tail is complete.
+    child.on('close', (code) => finish({ ok: code === 0, exit: code }));
+  });
 }
 
 export function trackedFiles(root: string, limit = 300): string[] {

@@ -79,6 +79,31 @@ export function calibrate(allRows: BenchRow[], passThreshold: number, grades: Ma
   });
 }
 
+export interface ModeCalibration {
+  mode: string;
+  n: number;
+  agreement: number | null;
+  kappa: number | null;
+}
+
+// Judge agreement with the hidden check, split by the verification modes each bench run was graded under (H2).
+// `modesByRun` maps runId to its modes; rows whose run is unknown count as 'none'. A row counts under every mode of its run.
+export function calibrateByMode(allRows: BenchRow[], passThreshold: number, modesByRun: Map<string, string[]>): ModeCalibration[] {
+  const rows = allRows.filter(hasJudge);
+  const modes = new Set<string>();
+  const per = rows.map((r) => {
+    const m = modesByRun.get(r.runId)?.length ? modesByRun.get(r.runId)! : ['none'];
+    for (const x of m) modes.add(x);
+    return m;
+  });
+  return [...modes].sort().map((mode) => {
+    const idx = rows.map((_, i) => i).filter((i) => per[i].includes(mode));
+    const judge = idx.map((i) => judgePass(rows[i], passThreshold));
+    const check = idx.map((i) => rows[i].checkPass);
+    return { mode, n: idx.length, agreement: idx.length ? judge.filter((j, i) => j === check[i]).length / idx.length : null, kappa: idx.length ? cohensKappa(judge, check) : null };
+  });
+}
+
 // Small deterministic PRNG so the same seed gives the same sample.
 function mulberry32(seed: number): () => number {
   let a = seed >>> 0;
@@ -192,6 +217,23 @@ export function agreementBlock(cal: HarnessCalibration[], incumbent: string, flo
   if (!c || c.agreement === null || c.n < minSample) return null;
   if (c.agreement >= floor) return null;
   return `judge agreement with hidden checks for ${incumbent} is ${c.agreement.toFixed(2)} over ${c.n} bench runs, below evolve.minJudgeAgreement ${floor}; evolution blocked until the judge is recalibrated`;
+}
+
+export function storeCalibrationByMode(store: Store): ModeCalibration[] {
+  const modes = new Map<string, string[]>();
+  for (const id of store.listRuns()) {
+    const run = store.loadRun(id);
+    if (run) modes.set(id, run.verificationModes ?? []);
+  }
+  return calibrateByMode(readBenchRows(store), store.config().passThreshold, modes);
+}
+
+export function renderCalibrationByMode(cal: ModeCalibration[]): string {
+  if (!cal.length) return 'Judge agreement by verification mode: no bench results yet.';
+  const f = (x: number | null) => (x === null ? 'n/a' : x.toFixed(2));
+  const lines = ['Judge agreement by verification mode (a run counts under each mode it used)', `${'mode'.padEnd(10)} ${'n'.padStart(4)} ${'agree'.padStart(6)} ${'kappa'.padStart(6)}`];
+  for (const c of cal) lines.push(`${c.mode.padEnd(10)} ${String(c.n).padStart(4)} ${f(c.agreement).padStart(6)} ${f(c.kappa).padStart(6)}`);
+  return lines.join('\n');
 }
 
 export function renderCalibration(cal: HarnessCalibration[]): string {

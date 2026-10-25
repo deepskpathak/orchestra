@@ -5,7 +5,7 @@ import { existsSync, mkdtempSync, openSync, readFileSync, writeFileSync } from '
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { claudeRunner, preflight, type Runner } from './agent.ts';
-import { importGrades, readBenchRows, renderCalibration, storeCalibration, writeSample } from './calibration.ts';
+import { importGrades, readBenchRows, renderCalibration, renderCalibrationByMode, storeCalibration, storeCalibrationByMode, writeSample } from './calibration.ts';
 import { ABLATION_ARMS, SINGLE_SESSION_ARM, ablationTable, defaultReference, loadArms, referenceError, renderAblationTable, summarize, renderSummary, runBench, verifyOracles } from './bench.ts';
 import { atlasStats, loadOrBuildAtlas } from './atlas.ts';
 import { runGoal } from './conductor.ts';
@@ -17,6 +17,7 @@ import { REGRESSION_TAG, auditCases, buildAddedCase, buildHarvestedCase, filterB
 import { fakeRunner } from './fake.ts';
 import { commitExists, excludeOrchestra, fixDiff, tryGit } from './git.ts';
 import { guardMain } from './guard.ts';
+import { mutationLine } from './mutation.ts';
 import { GLOBAL, lessonAblation, listDomains, readAllLearnings, readLearnings } from './learnings.ts';
 import { validNetwork } from './container.ts';
 import { detectSandbox, type SandboxBackend } from './sandbox.ts';
@@ -281,6 +282,7 @@ export function summary(run: Run): string {
   const human = run.tasks.filter((t) => t.status === 'needs_human');
   const failed = run.tasks.filter((t) => t.status === 'failed').length;
   const blocked = run.tasks.filter((t) => t.status === 'blocked').length;
+  if (run.mutation) lines.push(`  mutation score ${mutationLine(run.mutation)}`);
   if (human.length || failed || blocked) lines.push(`  ${failed} failed, ${blocked} blocked, ${human.length} need a human`);
   for (const t of human) lines.push(`  ? ${t.id} needs a human: ${t.humanReason ?? 'no reason recorded'}`);
   if (run.error) lines.push(`  ${run.error}`);
@@ -396,6 +398,7 @@ function cmdStats(args: string[]): void {
   console.log(`\n${renderOutcomes(collectOutcomes(store))}`);
   console.log(`\n${renderExploration(explorationMetrics(store.ledgerRows()))}`);
   console.log(`\n${renderCalibration(storeCalibration(store))}`);
+  console.log(`\n${renderCalibrationByMode(storeCalibrationByMode(store))}`);
 }
 
 async function cmdEvolve(): Promise<void> {

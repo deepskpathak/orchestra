@@ -183,3 +183,34 @@ test('a rebase landing is not counted as its own fixup, but a real later fix sti
   g('commit', '-qam', 'fix: f broke on two');
   assert.equal(collectOutcomes(store).breakageRate, 1);
 });
+
+test('merged-but-wrong rate is split by verification mode; a run counts under each of its modes', () => {
+  const runs = [
+    mkRun('a'),
+    mkRun('b', { verificationModes: ['panel', 'agentic'] }),
+    mkRun('c', { verificationModes: ['agentic'] }),
+    mkRun('d', { verificationModes: ['panel'] }),
+  ];
+  const m = computeOutcomes(runs, {
+    a: { landed: true, reverted: true },
+    b: { landed: true },
+    c: { landed: true, fixups: 1 },
+    d: { landed: false },
+  });
+  const by = Object.fromEntries(m.byVerification.map((x) => [x.mode, x]));
+  assert.deepEqual(m.byVerification.map((x) => x.mode), ['none', 'panel', 'agentic']);
+  assert.equal(by.none.wrongRate, 1);
+  assert.equal(by.agentic.wrong, 1);
+  assert.equal(by.agentic.accepted, 2);
+  assert.equal(by.panel.accepted, 1);
+  assert.equal(by.panel.wrongRate, 0);
+  assert.match(renderOutcomes(m), /merged-but-wrong by verification mode: none 100% \(1\/1 landed, 1 run\), panel 0%/);
+});
+
+test('verificationModes lists exactly the enabled M4 modes', async () => {
+  const { verificationModes } = await import('../src/outcomes.ts');
+  const { DEFAULT_PROJECT_CONFIG } = await import('../src/store.ts');
+  const v = DEFAULT_PROJECT_CONFIG.verification;
+  assert.deepEqual(verificationModes(v), []);
+  assert.deepEqual(verificationModes({ ...v, mutation: { ...v.mutation, enabled: true }, agenticJudge: { ...v.agenticJudge, enabled: true } }), ['agentic', 'mutation']);
+});

@@ -3,20 +3,27 @@
 // Planners never code, workers never judge, judges never edit (role separation).
 
 import { spawnSync } from 'node:child_process';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { extractJson, parseWorkerOutcome, type AgentRequest, type AgentResult, type Runner } from './agent.ts';
 import * as g from './git.ts';
 import { alternateWorkerSection, comparePrompt, COMPARE_SCHEMA, contrastApplies, resolveContrast } from './contrast.ts';
+import { aggregatePanel, lineageFraming, pairwiseBothOrders, type PanelJudgeVote } from './panel.ts';
 import { isExcludedPath, loadOrBuildAtlas, type Atlas } from './atlas.ts';
 import { buildTaskPack, renderMap } from './atlas-context.ts';
 import { plannedFiles } from './exploration.ts';
+import { applyContractUpdate, buildContract, contractSha, criteriaForTask, isContractPath, markPassing, unresolvedAmbiguities, type Contract } from './contracts.ts';
 import { analyzeDiff, MONITOR_MARK, type IntegrityFlag } from './integrity.ts';
+import { mutationScore, runMutation } from './mutation.ts';
+import { listOracleFiles, runOracles, type OracleOutcome } from './oracle-run.ts';
 import { loadHarness, type Harness } from './harness.ts';
 import { applyLessonEdits, editsFromResponse, expireDomain, formatLearnings, listDomains, normalizeDomain, readAllLearnings, readLearnings, GLOBAL } from './learnings.ts';
-import { buildSandboxPolicy, preflightSandbox, scrubWorkerEnv, type ProbeExec } from './sandbox.ts';
+import { buildSandboxPolicy, preflightSandbox, scrubVerifierEnv, scrubWorkerEnv, type ProbeExec } from './sandbox.ts';
 import { newRunId, type Store } from './store.ts';
-import type { ActiveAgent, CriterionResult, OrchestraEvent, Role, Run, Scenario, Task, Verdict } from './types.ts';
+import { verificationModes } from './outcomes.ts';
+import { AGENTIC_INSTRUCTION, NO_EVIDENCE_NOTE, executedChecksSection, runScenarioChecks, type CheckResult } from './judge-checks.ts';
+import type { ActiveAgent, CriterionResult, OrchestraEvent, PanelRecord, Role, Run, Scenario, Task, Verdict } from './types.ts';
 
 export interface Ablation {
   scenarios?: boolean; // the judge and contrast comparer see no hidden scenarios
@@ -43,6 +50,8 @@ export interface ConductorOptions {
   unattended?: boolean;
   // Injectable exec for the sandbox pre-flight probes (tests). Defaults to spawnSync.
   preflightExec?: ProbeExec;
+  // Injectable inputs for the W4.5 mutation pass (tests). Default: files changed on the integration branch, real exec.
+  mutation?: { changedFiles?: string[]; exec?: (cwd: string, command: string, timeoutMs?: number) => { ok: boolean; tail?: string } | Promise<{ ok: boolean; tail?: string }> };
 }
 
 // ---------- prompt builders ----------
@@ -74,7 +83,12 @@ export function fastPathDecision(goal: string, cfg: { enabled: boolean; maxGoalC
 const PLAN_BODY =
   'Produce the task graph and hidden scenarios.\nAlso set "domain": pick one existing domain slug from EXISTING DOMAINS, or propose at most one new kebab-case slug (e.g. cli, web-ui, docs, config) when none fits.';
 
-export function plannerPrompt(i: { goal: string; files: string[]; testCommand?: string; learnings: string; domains: string[]; fastPath?: boolean; map?: string }): BuiltPrompt {
+// Only asked for when the agentic judge is on: the judge runs these commands, so they must be real and runnable.
+const CHECK_BODY =
+  'Give each scenario an optional "check": one shell command, run from the repository root of the finished change, that exits 0 when the scenario holds and non-zero when it does not (for example `node scripts/smoke.mjs` or a node -e one-liner). Make it deterministic, side-effect free and offline. Leave "check" out for a scenario no command can verify.';
+
+export function plannerPrompt(i: { goal: string; files: string[]; testCommand?: string; learnings: string; domains: string[]; fastPath?: boolean; map?: string; scenarioChecks?: boolean }): BuiltPrompt {
+  const body = i.scenarioChecks ? `${PLAN_BODY}\n${CHECK_BODY}` : PLAN_BODY;
   return {
     prefix: [
       `LEARNINGS:\n${i.learnings}`,
@@ -84,8 +98,8 @@ export function plannerPrompt(i: { goal: string; files: string[]; testCommand?: 
       `GOAL:\n${i.goal}`,
     ].join('\n\n'),
     body: i.fastPath
-      ? `${PLAN_BODY}\nThis goal is small and single-concern: return exactly one task and an empty or minimal scenarios list.`
-      : PLAN_BODY,
+      ? `${body}\nThis goal is small and single-concern: return exactly one task and an empty or minimal scenarios list.`
+      : body,
   };
 }
 
@@ -188,21 +202,104 @@ export function judgePrompt(i: {
   diff: string;
   tools?: string;
   checklist?: string;
+  agentic?: CheckResult[]; // set (even when empty) in agentic mode (W4.2)
+  indexed?: boolean; // panel mode: ask each criterion entry for its 1-based `index`, so panel votes line up by position
 }): BuiltPrompt {
   const { task, tests } = i;
   const base = `HIDDEN SCENARIOS for the whole goal (judge only the parts this task is responsible for):\n${i.scenarios
     .map((s) => `- ${s.id}: GIVEN ${s.given} WHEN ${s.when} THEN ${s.then}`)
-    .join('\n') || '(none)'}\n\nAlso return criteria: one entry per acceptance criterion, in order, each with pass, score and a short note.`;
+    .join('\n') || '(none)'}\n\nAlso return criteria: one entry per acceptance criterion, in order, each with pass, score and a short note${i.indexed ? ', plus `index`: its 1-based position in the ACCEPTANCE CRITERIA list' : ''}.`;
   return {
-    prefix: [base, guidanceSection('TOOL GUIDANCE', i.tools), guidanceSection('REVIEW CHECKLIST', i.checklist)].filter(Boolean).join('\n\n'),
+    prefix: [base, guidanceSection('TOOL GUIDANCE', i.tools), guidanceSection('REVIEW CHECKLIST', i.checklist), i.agentic ? AGENTIC_INSTRUCTION : ''].filter(Boolean).join('\n\n'),
     body: [
       `TASK ${task.id}: ${task.title}\n${task.description}`,
       `ACCEPTANCE CRITERIA:\n${bullets(task.acceptance)}`,
       `WORKER SUMMARY (unverified):\n${i.workerText.slice(0, 3000)}`,
       tests ? `TEST RESULT (${i.testCommand}): ${tests.ok ? 'PASSED' : 'FAILED'}\n${tests.tail}` : 'TEST RESULT: no test command configured',
+      ...(i.agentic ? [executedChecksSection(i.agentic)] : []),
       `DIFF vs base:\n${i.diff}`,
     ].join('\n\n'),
   };
+}
+
+// Stand-in key for a judge that gave no usable per-criterion answers. It is never tallied once any judge keyed real criteria.
+export const OVERALL = 'overall';
+
+const normText = (t: string): string => t.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+
+// One stable, unique label per acceptance criterion (the text; later duplicates get a "(#n)" suffix).
+export function criterionLabels(acceptance: string[]): string[] {
+  const seen = new Map<string, number>();
+  return acceptance.map((a) => {
+    const n = (seen.get(a) ?? 0) + 1;
+    seen.set(a, n);
+    return n === 1 ? a : `${a} (#${n})`;
+  });
+}
+
+type SlotCriterion = CriterionResult & { scored: boolean }; // scored: the judge gave a finite score
+
+// Maps a judge's criteria onto acceptance slots (0-based). In order of trust: the judge's own 1-based `index`, then
+// the normalised criterion text, then position when the count matches. Anything still unmatched is dropped, so two
+// judges can never end up with disjoint keys that each look like a lone vote.
+export function matchCriteria(raw: unknown, acceptance: string[]): Map<number, SlotCriterion> {
+  const entries = (Array.isArray(raw) ? raw : []).flatMap((c: any) => {
+    const n = normalizeCriterion(c);
+    return n ? [{ n: { ...n, scored: Number.isFinite(c.score) }, index: Number.isInteger(c.index) ? (c.index as number) : undefined }] : [];
+  });
+  const slots = new Map<number, SlotCriterion>();
+  const byIndex = entries.map((e, pos) => ({ ...e, pos }));
+  const afterIndex = byIndex.filter((e) => {
+    const k = e.index === undefined ? -1 : e.index - 1;
+    if (k >= 0 && k < acceptance.length && !slots.has(k)) {
+      slots.set(k, e.n);
+      return false;
+    }
+    return true;
+  });
+  const texts = acceptance.map(normText);
+  const afterText = afterIndex.filter((e) => {
+    const t = normText(e.n.criterion);
+    const k = t ? texts.findIndex((x, i) => x === t && !slots.has(i)) : -1;
+    if (k >= 0) slots.set(k, e.n);
+    return k < 0;
+  });
+  if (entries.length === acceptance.length) for (const e of afterText) if (!slots.has(e.pos)) slots.set(e.pos, e.n);
+  return slots;
+}
+
+// One judge's per-criterion binary verdicts keyed by acceptance label. A judge with no matchable criteria
+// contributes a single synthetic `overall` verdict instead.
+export function panelCriteria(v: Partial<Verdict>, acceptance: string[]): Record<string, boolean> {
+  const slots = matchCriteria(v.criteria, acceptance);
+  if (!slots.size) return { [OVERALL]: Boolean(v.pass) };
+  const labels = criterionLabels(acceptance);
+  return Object.fromEntries([...slots].sort(([a], [b]) => a - b).map(([k, c]) => [labels[k], c.pass]));
+}
+
+const mean = (xs: number[]): number => xs.reduce((a, b) => a + b, 0) / xs.length;
+
+// Clear-majority panel verdict: per-criterion majority, mean scores, issues from every judge. Non-finite scores are ignored.
+export function panelMajorityVerdict(raws: Partial<Verdict>[], majority: Record<string, boolean>, acceptance: string[]): Partial<Verdict> {
+  const real = Object.keys(majority).filter((k) => k !== OVERALL);
+  const passVotes = raws.filter((x) => x.pass).length;
+  const finite = raws.map((r) => Number(r.score)).filter(Number.isFinite);
+  const score = finite.length ? mean(finite) : passVotes * 2 > raws.length ? 1 : 0;
+  const issues = [...new Set(raws.flatMap((r) => r.issues ?? []))];
+  const lead = raws.find((r) => r.pass === (passVotes * 2 > raws.length)) ?? raws[0];
+  const labels = criterionLabels(acceptance);
+  const slotsOf = raws.map((r) => matchCriteria(r.criteria, acceptance));
+  const perCriterion = real.length ? real.map((criterion) => {
+    const found = slotsOf.flatMap((m) => {
+      const c = m.get(labels.indexOf(criterion));
+      return c ? [c] : [];
+    });
+    const scores = found.filter((c) => c.scored).map((c) => c.score);
+    // W4.2 + W4.1: keep the evidence of the first judge that sided with the majority, so agentic mode can still see it.
+    const evidence = found.find((c) => c.pass === majority[criterion] && c.evidence)?.evidence;
+    return { criterion, pass: majority[criterion], score: scores.length ? mean(scores) : majority[criterion] ? 1 : 0, ...(evidence ? { evidence } : {}) };
+  }) : undefined;
+  return { pass: Object.values(majority).every(Boolean), score, summary: lead.summary ?? '', issues, ...(perCriterion ? { criteria: perCriterion } : {}) };
 }
 
 const PLAN_SCHEMA = {
@@ -220,6 +317,7 @@ const PLAN_SCHEMA = {
           description: { type: 'string' },
           acceptance: { type: 'array', items: { type: 'string' } },
           deps: { type: 'array', items: { type: 'string' } },
+          invariants: { type: 'array', items: { type: 'string' } },
           footprint: {
             type: 'object',
             properties: { files: { type: 'array', items: { type: 'string' } }, symbols: { type: 'array', items: { type: 'string' } } },
@@ -229,11 +327,15 @@ const PLAN_SCHEMA = {
         required: ['id', 'title', 'description', 'acceptance', 'deps'],
       },
     },
+    ambiguities: {
+      type: 'array',
+      items: { type: 'object', properties: { question: { type: 'string' }, resolution: { type: 'string' } }, required: ['question'] },
+    },
     scenarios: {
       type: 'array',
       items: {
         type: 'object',
-        properties: { id: { type: 'string' }, given: { type: 'string' }, when: { type: 'string' }, then: { type: 'string' } },
+        properties: { id: { type: 'string' }, given: { type: 'string' }, when: { type: 'string' }, then: { type: 'string' }, check: { type: 'string' } },
         required: ['id', 'given', 'when', 'then'],
       },
     },
@@ -247,28 +349,54 @@ export const FAST_PLAN_SCHEMA = {
   required: ['tasks'],
 };
 
+// A well-formed criterion entry with its score clamped to 0..1 (non-finite scores become 0); null for anything malformed.
+function normalizeCriterion(c: any): CriterionResult | null {
+  if (!c || typeof c !== 'object' || typeof c.criterion !== 'string' || typeof c.pass !== 'boolean') return null;
+  const n = Number.isFinite(c.score) ? Math.min(1, Math.max(0, c.score)) : 0;
+  return { criterion: c.criterion, pass: c.pass, score: n, ...(typeof c.note === 'string' ? { note: c.note } : {}), ...(typeof c.evidence === 'string' && c.evidence.trim() ? { evidence: c.evidence } : {}) };
+}
+
 // Per-criterion judging: mean score, and pass only when every criterion passes. Malformed entries are skipped.
-export function aggregateCriteria(criteria: unknown): { score: number; pass: boolean; failing: CriterionResult[]; list: CriterionResult[] } | undefined {
+// In agentic mode, `unevidenced` lists criteria that passed without evidence (advisory only).
+export function aggregateCriteria(criteria: unknown, agentic = false): { score: number; pass: boolean; failing: CriterionResult[]; list: CriterionResult[]; unevidenced: CriterionResult[] } | undefined {
   if (!Array.isArray(criteria)) return undefined;
   const list: CriterionResult[] = [];
   for (const c of criteria) {
-    if (!c || typeof c !== 'object' || typeof c.criterion !== 'string' || typeof c.pass !== 'boolean') continue;
-    const n = Number.isFinite(c.score) ? Math.min(1, Math.max(0, c.score)) : 0;
-    list.push({ criterion: c.criterion, pass: c.pass, score: n, ...(typeof c.note === 'string' ? { note: c.note } : {}) });
+    const n = normalizeCriterion(c);
+    if (n) list.push(n);
   }
   if (!list.length) return undefined;
-  return { score: list.reduce((a, c) => a + c.score, 0) / list.length, pass: list.every((c) => c.pass), failing: list.filter((c) => !c.pass), list };
+  return { score: list.reduce((a, c) => a + c.score, 0) / list.length, pass: list.every((c) => c.pass), failing: list.filter((c) => !c.pass), list, unevidenced: agentic ? list.filter((c) => c.pass && !c.evidence) : [] };
 }
 
 // Combines the judge's raw verdict with test results and per-criterion results (when given).
-export function buildVerdict(v: Partial<Verdict>, testsOk: boolean | null, passThreshold: number, testIssue?: string): Verdict {
-  const agg = aggregateCriteria(v.criteria);
+export function buildVerdict(v: Partial<Verdict>, testsOk: boolean | null, passThreshold: number, testIssue?: string, agentic = false): Verdict {
+  const agg = aggregateCriteria(v.criteria, agentic);
   const score = agg ? agg.score : (v.score as number);
   const pass = Boolean(v.pass) && score >= passThreshold && testsOk !== false && (agg?.pass ?? true);
   const issues = [...(v.issues ?? [])];
   if (agg) issues.unshift(...agg.failing.map((c) => `Criterion failed: ${c.criterion}${c.note ? `: ${c.note}` : ''}`));
+  if (agg?.unevidenced.length) issues.push(...agg.unevidenced.map((c) => `${NO_EVIDENCE_NOTE}: ${c.criterion}`));
   if (testsOk === false && testIssue) issues.unshift(testIssue);
   return { pass, score: round(score), summary: v.summary ?? '', issues, testsPassed: testsOk, ...(agg ? { criteria: agg.list } : {}) };
+}
+
+export function oraclePrompt(i: { task: Task; invariants: string[]; target: string; dir: string }): string {
+  return [
+    `ORACLE TESTS for task ${i.task.id}: ${i.task.title}`,
+    'You write independent checks. You did not write the code under test and must not edit it.',
+    `Acceptance criteria:\n${bullets(i.task.acceptance)}`,
+    `Invariants to check:\n${bullets(i.invariants)}`,
+    `The code under test is at ${i.target} (read only). The environment variable ORACLE_TARGET holds that path when your files run; import code from it.`,
+    `Write files only inside ${i.dir}:`,
+    '- *.test.mjs: node:test files with property-style checks. Use process.env.ORACLE_SEED and process.env.ORACLE_RUNS for a deterministic seed and case count.',
+    '- probe*.mjs: scripts that print the output of functions that must NOT change. They run on the base commit and on the worker tree and their stdout must match.',
+  ].join('\n\n');
+}
+
+export function applyOracle(v: Verdict, o: OracleOutcome): Verdict {
+  if (o.pass) return o.issues.length ? { ...v, issues: [...v.issues, ...o.issues] } : v;
+  return { ...v, pass: false, summary: `Oracle checks failed. ${v.summary}`.trim(), issues: [...o.issues, ...v.issues] };
 }
 
 const VERDICT_SCHEMA = {
@@ -282,12 +410,21 @@ const VERDICT_SCHEMA = {
       type: 'array',
       items: {
         type: 'object',
-        properties: { criterion: { type: 'string' }, pass: { type: 'boolean' }, score: { type: 'number', minimum: 0, maximum: 1 }, note: { type: 'string' } },
+        properties: { criterion: { type: 'string' }, pass: { type: 'boolean' }, score: { type: 'number', minimum: 0, maximum: 1 }, note: { type: 'string' }, evidence: { type: 'string' } },
         required: ['criterion', 'pass', 'score'],
       },
     },
   },
   required: ['pass', 'score', 'summary', 'issues'],
+};
+
+// Panel judges also number their criteria so votes can be matched by position, not by free text.
+const PANEL_VERDICT_SCHEMA = {
+  ...VERDICT_SCHEMA,
+  properties: {
+    ...VERDICT_SCHEMA.properties,
+    criteria: { ...VERDICT_SCHEMA.properties.criteria, items: { ...VERDICT_SCHEMA.properties.criteria.items, properties: { ...VERDICT_SCHEMA.properties.criteria.items.properties, index: { type: 'integer', minimum: 1 } } } },
+  },
 };
 
 const EVIDENCE_SCHEMA = {
@@ -338,6 +475,8 @@ export class Conductor {
   private readonly harness: Harness;
   private readonly onUpdate?: (run: Run) => void;
   private scenarios: Scenario[] = [];
+  private mutationOpts?: ConductorOptions['mutation'];
+  private contract?: Contract; // W4.3: the conductor's own copy of the contract; the file under .orchestra is checked against it
   private atlas?: Atlas;
   private map = '';
   private ablate: Ablation;
@@ -353,11 +492,13 @@ export class Conductor {
     this.onUpdate = opts.onUpdate;
     this.sandboxOpt = opts.sandbox;
     this.preflightExec = opts.preflightExec;
+    this.mutationOpts = opts.mutation;
     this.scrubEnv = Boolean(opts.sandbox || opts.unattended);
     this.ablate = opts.ablate ?? {};
     this.evalLearnings = opts.evalLearnings ?? false;
     this.wtRoot = opts.store.path('worktrees');
     const id = (opts.kind === 'eval' ? 'e' : '') + newRunId();
+    const modes = verificationModes(opts.store.config().verification);
     this.run = {
       id,
       goal: opts.goal,
@@ -369,6 +510,7 @@ export class Conductor {
       costUsd: 0,
       active: [],
       baseRef: opts.baseRef,
+      ...(modes.length ? { verificationModes: modes } : {}),
     };
   }
 
@@ -390,6 +532,7 @@ export class Conductor {
       run.status = 'running';
       this.save();
       await this.schedule();
+      const mutationFailure = await this.mutationPass();
 
       const merged = run.tasks.filter((t) => t.status === 'merged');
       const meanScore = merged.length ? merged.reduce((s, t) => s + (t.verdict?.score ?? 0), 0) / merged.length : 0;
@@ -400,7 +543,8 @@ export class Conductor {
         this.save();
         await this.learn();
       }
-      run.status = merged.length === run.tasks.length ? 'done' : 'failed';
+      run.status = merged.length === run.tasks.length && !mutationFailure ? 'done' : 'failed';
+      if (mutationFailure && !run.error) run.error = mutationFailure;
       if (run.status === 'failed' && !run.error) {
         const human = run.tasks.filter((t) => t.status === 'needs_human').length;
         const blocked = run.tasks.filter((t) => t.status === 'blocked').length;
@@ -426,6 +570,55 @@ export class Conductor {
 
   // ---------- phases ----------
 
+  // W4.5: mutate the source files this run changed, in a scratch worktree, and see whether the test
+  // command and scenario checks notice. Returns an error message only when failBelowFloor trips.
+  private async mutationPass(): Promise<string | undefined> {
+    const { run, store } = this;
+    const cfg = store.config().verification.mutation;
+    if (!cfg.enabled || !run.tasks.some((t) => t.status === 'merged')) return undefined;
+    const testCommand = store.config().testCommand;
+    let wt: { path: string; branch: string } | undefined;
+    try {
+      const changed = this.mutationOpts?.changedFiles ?? g.changedFiles(this.integration.path, this.integration.base, false);
+      const files = changed.filter((f) => /\.(?:[cm]?[jt]s|[jt]sx)$/.test(f) && !/(?:^|\/)(?:tests?|__tests__)\/|\.(?:test|spec)\./.test(f));
+      wt = g.createTaskWorktree(store.root, this.wtRoot, run.id, 'mutation', g.head(this.integration.path));
+      const cwd = wt.path;
+      const exec = this.mutationOpts?.exec ?? ((d: string, c: string, t?: number) => g.runTestsAsync(d, c, t, scrubVerifierEnv(process.env)));
+      const out = await runMutation({
+        files,
+        max: cfg.maxMutants,
+        commands: [...(testCommand ? [testCommand] : []), ...this.scenarios.flatMap((s) => (s.check ? [s.check] : []))],
+        read: (f) => readFileSync(join(cwd, f), 'utf8'),
+        write: (f, c) => writeFileSync(join(cwd, f), c),
+        exec: (c, t) => exec(cwd, c, t),
+        mutantTimeoutMs: cfg.mutantTimeoutMs,
+      });
+      if (out.unreadable) this.emit('log', `Mutation left out ${out.unreadable.length} unreadable file(s): ${out.unreadable.join(', ')}`);
+      // A skipped pass (no checks, failing baseline, nothing to mutate) has no score. Recording a vacuous
+      // 1.0 pass would read as evidence the tests are strong, so record it as skipped and never gate on it.
+      const m = mutationScore(out.results, cfg.floor);
+      const skipped = out.skipped ?? (out.results.length === 0 ? 'no mutable source changes' : m.total === 0 ? 'every mutant failed to compile' : undefined);
+      if (skipped) {
+        run.mutation = { total: 0, killed: 0, floor: cfg.floor, skipped };
+        this.emit('log', `Mutation skipped: ${skipped}`, { mutation: run.mutation });
+        this.save();
+        return undefined;
+      }
+      run.mutation = { total: m.total, killed: m.killed, score: m.score, floor: m.floor, pass: m.pass, ...(m.invalid ? { invalid: m.invalid } : {}) };
+      this.emit('log', `Mutation score ${m.score.toFixed(2)} (${m.killed}/${m.total} killed, floor ${m.floor}${m.invalid ? `, ${m.invalid} invalid mutant(s) excluded` : ''}) ${m.pass ? 'pass' : 'below floor'}`, { mutation: run.mutation });
+      this.save();
+      if (!m.pass && cfg.failBelowFloor) return `Mutation score ${m.score.toFixed(2)} is below the floor ${m.floor} (${m.survived} of ${m.total} mutants survived)`;
+    } catch (e) {
+      this.emit('log', `Mutation pass failed, continuing without a score: ${(e as Error).message.split('\n')[0]}`);
+    } finally {
+      if (wt) {
+        g.removeWorktree(store.root, wt.path);
+        g.deleteBranch(store.root, wt.branch);
+      }
+    }
+    return undefined;
+  }
+
   private async plan(): Promise<void> {
     const { run, store, harness } = this;
     // Eval replays are clean-room: they never read the learnings store, so the lessons a harness
@@ -444,6 +637,7 @@ export class Conductor {
       domains: isEval ? [] : listDomains(store),
       fastPath: fp.fast,
       map: this.map || undefined,
+      scenarioChecks: cfg.verification.agenticJudge.enabled,
     });
     const prompt = joinPrompt(built);
 
@@ -453,10 +647,22 @@ export class Conductor {
       schema: fp.fast ? FAST_PLAN_SCHEMA : PLAN_SCHEMA,
       tools: ['Read', 'Grep', 'Glob'],
     });
-    const out = extractJson(res) as { tasks?: any[]; scenarios?: Scenario[]; domain?: unknown } | undefined;
+    const out = extractJson(res) as { tasks?: any[]; scenarios?: Scenario[]; domain?: unknown; ambiguities?: unknown } | undefined;
     if (!res.ok || !out?.tasks?.length) throw new Error(`Planner failed: ${res.error ?? 'no tasks returned'}`);
 
+    // W4.3: an unresolved ambiguity blocks the plan before any task exists, so no worker starts.
+    if (cfg.verification.contracts.enabled) {
+      const open = unresolvedAmbiguities(out.ambiguities);
+      if (open.length) throw new Error(`Plan blocked by ${open.length} unresolved ambiguit${open.length === 1 ? 'y' : 'ies'}:\n${open.map((q) => `- ${q}`).join('\n')}`);
+    }
     run.tasks = normalizeTasks(out.tasks);
+    if (cfg.verification.contracts.enabled) {
+      const contract = buildContract(run.tasks);
+      const rel = `runs/${run.id}/contract.json`;
+      store.writeJson(rel, contract);
+      run.contract = { path: rel, sha256: contractSha(contract) };
+      this.contract = contract;
+    }
     // One domain per run, so at most one new domain can appear per run.
     const domain = normalizeDomain(out.domain);
     if (domain && domain !== GLOBAL) run.domain = domain;
@@ -619,6 +825,8 @@ export class Conductor {
   // files were tampered with, re-run the test command with the base versions restored and grade on
   // that. Returns a failing verdict (with an automatic repair note) in that case, else null.
   private integrityVerdict(task: Task, cwd: string, base: string): Verdict | null {
+    const broken = this.contractVerdict(task, cwd, base);
+    if (broken) return broken;
     const flags = analyzeDiff(g.diffSince(cwd, base, Infinity), g.changedFiles(cwd, base));
     if (!flags.length) return null;
     task.integrityFlags = [...(task.integrityFlags ?? []), ...flags];
@@ -643,6 +851,67 @@ export class Conductor {
     this.ledgerOutcome(task, 'integrity_flag');
     const issue = `${MONITOR_MARK} Your change touched grading files that must not be edited: ${list(tampered).join('; ')}. Revert them to their original content and fix the code instead. If a test change is truly required, stop and report FLAG_FOR_HUMAN with the reason.${tail}`;
     return { pass: false, score: 0, summary: `${MONITOR_MARK} grading surface modified: ${files.join(', ')}`, issues: [issue], testsPassed };
+  }
+
+  // W4.3: the contract file lives under .orchestra, outside every worktree, so a worktree diff cannot show an
+  // edit to it. Re-verify its sha256 against the value recorded at planning (and against the worker's changed
+  // paths, for repos that track .orchestra). A mismatch fails the attempt like any grading-surface edit, and the
+  // file is rewritten from the conductor's copy so later reads (judge, oracles) see the frozen contract.
+  private contractVerdict(task: Task, cwd: string, base: string): Verdict | null {
+    const ref = this.run.contract;
+    if (!ref || !this.contract) return null;
+    let actual: string;
+    try {
+      actual = contractSha(this.store.readJson<Contract>(ref.path, { criteria: [] }));
+    } catch {
+      actual = 'unreadable';
+    }
+    const touched = g.changedFiles(cwd, base).filter(isContractPath);
+    if (actual === ref.sha256 && !touched.length) return null;
+    const detail = actual === ref.sha256 ? `the worker diff touches ${touched.join(', ')}` : `sha256 ${actual.slice(0, 12)} does not match the recorded ${ref.sha256.slice(0, 12)}`;
+    this.store.writeJson(ref.path, this.contract);
+    task.integrityFlags = [...(task.integrityFlags ?? []), { kind: 'grading-surface', file: ref.path, detail: `acceptance contract modified: ${detail}` }];
+    this.emit('log', `${task.id} integrity monitor: acceptance contract ${detail}; contract restored`, undefined, task.id);
+    this.ledgerOutcome(task, 'integrity_flag');
+    const issue = `${MONITOR_MARK} The acceptance contract is frozen and was modified (${detail}). It has been restored. Do not edit anything under .orchestra; implement the task against the stated criteria instead.`;
+    return { pass: false, score: 0, summary: `${MONITOR_MARK} acceptance contract modified`, issues: [issue], testsPassed: null };
+  }
+
+  // The task's acceptance text and invariants as frozen in the verified contract file; null when contracts are
+  // off or the file does not verify, in which case callers use the in-memory plan (the tamper is flagged elsewhere).
+  private frozenCriteria(task: Task): { acceptance: string[]; invariants: string[] } | null {
+    const ref = this.run.contract;
+    if (!ref) return null;
+    try {
+      const onDisk = this.store.readJson<Contract>(ref.path, { criteria: [] });
+      if (contractSha(onDisk) !== ref.sha256) return null;
+      const own = criteriaForTask(onDisk, task.id);
+      return own.acceptance.length ? own : null;
+    } catch {
+      return null;
+    }
+  }
+
+  // Merged means every criterion of the task passed judging. Flip them failing -> passing in the contract,
+  // through the same validator that guards worker proposals, then record the new sha256.
+  private markCriteriaPassing(task: Task): void {
+    const ref = this.run.contract;
+    if (!ref || !this.contract) return;
+    try {
+      const results = task.verdict?.criteria;
+      let next = this.contract;
+      task.acceptance.forEach((_, i) => {
+        const res = results && results.length === task.acceptance.length ? results[i] : undefined;
+        if (!res || res.pass) next = markPassing(next, `${task.id}.c${i + 1}`);
+      });
+      const checked = applyContractUpdate(this.contract, next);
+      if (!checked.ok) throw new Error(checked.errors.join('; '));
+      this.contract = checked.contract;
+      this.store.writeJson(ref.path, this.contract);
+      ref.sha256 = contractSha(this.contract);
+    } catch (e) {
+      this.emit('log', `${task.id} contract update failed: ${(e as Error).message.split('\n')[0]}`, undefined, task.id);
+    }
   }
 
   // Pre-judge outcome for one attempt: a failing verdict when it never reaches the judge, else null.
@@ -719,34 +988,57 @@ export class Conductor {
       const testsB = testsOf(wtB.path);
       const headA = g.head(wtA.path);
       const headB = g.head(wtB.path);
+      const diffA = g.diffSince(wtA.path, baseA);
+      const diffB = g.diffSince(wtB.path, baseB);
       const prompt = joinPrompt(
-        comparePrompt({ task, scenarios: this.scenarios, workerTextA: workA.text, workerTextB: workB.text, diffA: g.diffSince(wtA.path, baseA), diffB: g.diffSince(wtB.path, baseB) }),
+        comparePrompt({ task, scenarios: this.scenarios, workerTextA: workA.text, workerTextB: workB.text, diffA, diffB }),
       );
-      let raw: unknown;
-      let error: string | undefined;
-      for (let tryNo = 1; tryNo <= 2 && raw === undefined; tryNo++) {
-        const res = await this.call('judge', task, task.attempts, {
-          prompt,
-          cwd: wtA.path,
-          schema: COMPARE_SCHEMA,
-          tools: ['Read', 'Grep', 'Glob', 'Bash'],
-          allowedTools: ['Read', 'Grep', 'Glob', 'Bash'],
-          disallowedTools: ['Edit', 'Write', 'Bash(git commit:*)', 'Bash(git reset:*)', 'Bash(rm:*)'],
-          permissionMode: 'default',
-        });
-        // Judges never edit. If one did anyway, discard it in both worktrees.
-        g.resetTo(wtA.path, headA);
-        g.resetTo(wtB.path, headB);
-        const out = extractJson(res) as { a?: { score?: unknown }; b?: { score?: unknown } } | undefined;
-        if (res.ok && out && typeof out.a?.score === 'number' && typeof out.b?.score === 'number') raw = out;
-        else {
-          error = res.error ?? 'no verdict';
-          if (tryNo === 1) this.emit('log', `${task.id} comparison judge failed (${error}), retrying once`, undefined, task.id);
+      const compareOnce = async (text: string): Promise<{ raw?: unknown; error?: string }> => {
+        let raw: unknown;
+        let error: string | undefined;
+        for (let tryNo = 1; tryNo <= 2 && raw === undefined; tryNo++) {
+          const res = await this.call('judge', task, task.attempts, {
+            prompt: text,
+            cwd: wtA.path,
+            schema: COMPARE_SCHEMA,
+            tools: ['Read', 'Grep', 'Glob', 'Bash'],
+            allowedTools: ['Read', 'Grep', 'Glob', 'Bash'],
+            disallowedTools: ['Edit', 'Write', 'Bash(git commit:*)', 'Bash(git reset:*)', 'Bash(rm:*)'],
+            permissionMode: 'default',
+          });
+          // Judges never edit. If one did anyway, discard it in both worktrees.
+          g.resetTo(wtA.path, headA);
+          g.resetTo(wtB.path, headB);
+          const out = extractJson(res) as { a?: { score?: unknown }; b?: { score?: unknown } } | undefined;
+          if (res.ok && out && typeof out.a?.score === 'number' && typeof out.b?.score === 'number') raw = out;
+          else {
+            error = res.error ?? 'no verdict';
+            if (tryNo === 1) this.emit('log', `${task.id} comparison judge failed (${error}), retrying once`, undefined, task.id);
+          }
+        }
+        return { raw, error };
+      };
+      const first = await compareOnce(prompt);
+      if (first.raw === undefined) return this.contrastJudgeError(task, wtB, first.error ?? 'no verdict');
+      const r = resolveContrast(first.raw, testsA, testsB, threshold);
+      ({ a: vA, b: vB, picked, reasons } = r);
+      if (cfg.verification.panel.enabled) {
+        // Both orders: the same comparison with the candidates swapped. A pick that flips with position is position bias, so no pick.
+        const swapped = joinPrompt(
+          comparePrompt({ task, scenarios: this.scenarios, workerTextA: workB.text, workerTextB: workA.text, diffA: diffB, diffB: diffA }),
+        );
+        const second = await compareOnce(swapped);
+        const pref = (x: unknown): 'A' | 'B' | null => {
+          const p = (x as { preferred?: unknown } | undefined)?.preferred;
+          return p === 'A' || p === 'B' ? p : null;
+        };
+        const consistent = pairwiseBothOrders(pref(first.raw), pref(second.raw));
+        this.emit('log', `${task.id} comparison in both orders: ${second.raw === undefined ? 'swapped run failed' : consistent ? `consistent pick ${consistent}` : 'orders disagree'}`, { consistent }, task.id);
+        if (!consistent) {
+          picked = null;
+          reasons = `Panel comparison in both orders was not consistent (${second.raw === undefined ? `swapped run failed: ${second.error}` : 'position bias'}), so no attempt was picked. ${reasons}`.trim();
         }
       }
-      if (raw === undefined) return this.contrastJudgeError(task, wtB, error ?? 'no verdict');
-      const r = resolveContrast(raw, testsA, testsB, threshold);
-      ({ a: vA, b: vB, picked, reasons } = r);
     }
 
     task.contrast = { attempt: task.attempts, a: { branch: wtA.branch, verdict: vA }, b: { branch: wtB.branch, verdict: vB }, picked, reasons };
@@ -798,10 +1090,12 @@ export class Conductor {
     const cfg = this.store.config();
     const tests = cfg.testCommand ? g.runTests(cwd, cfg.testCommand) : null;
     if (tests) this.emit('log', `${task.id} tests ${tests.ok ? 'passed' : 'FAILED'}`, undefined, task.id);
+    const agentic = cfg.verification.agenticJudge.enabled ? cfg.verification.agenticJudge : undefined;
+    const panelOn = cfg.verification.panel.enabled && cfg.verification.panel.judges.length > 0;
     const headBefore = g.head(cwd);
-    const prompt = joinPrompt(
-      judgePrompt({
-        task,
+    const frozen = this.frozenCriteria(task);
+    const built = judgePrompt({
+        task: frozen ? { ...task, acceptance: frozen.acceptance } : task,
         scenarios: this.scenarios,
         workerText: work.text,
         testCommand: cfg.testCommand,
@@ -809,19 +1103,22 @@ export class Conductor {
         diff: g.diffSince(cwd, base),
         tools: this.harness.guidance.tools,
         checklist: this.harness.guidance.checklist,
-      }),
-    );
+        indexed: panelOn,
+        agentic: agentic ? await runScenarioChecks({ cwd, scenarios: this.scenarios, testCommand: cfg.testCommand, testsResult: tests, timeoutMs: agentic.checkTimeoutMs, exec: (d, c, t) => g.runTestsAsync(d, c, t, scrubVerifierEnv(process.env)) }) : undefined,
+      });
+    const prompt = joinPrompt(built);
+    const oracle = await this.oraclePass(task, cwd, base, frozen?.invariants);
 
     const testsOk = tests ? tests.ok : null;
-    const runJudge = async (model?: string): Promise<{ res: AgentResult; v?: Partial<Verdict> }> => {
+    const runJudge = async (model?: string, framing = ''): Promise<{ res: AgentResult; v?: Partial<Verdict> }> => {
       const res = await this.call(
         'judge',
         task,
         task.attempts,
         {
-          prompt,
+          prompt: framing ? joinPrompt({ ...built, prefix: `${framing}\n\n${built.prefix}` }) : prompt,
           cwd,
-          schema: VERDICT_SCHEMA,
+          schema: panelOn ? PANEL_VERDICT_SCHEMA : VERDICT_SCHEMA,
           tools: ['Read', 'Grep', 'Glob', 'Bash'],
           allowedTools: ['Read', 'Grep', 'Glob', 'Bash'],
           disallowedTools: ['Edit', 'Write', 'Bash(git commit:*)', 'Bash(git reset:*)', 'Bash(rm:*)'],
@@ -839,7 +1136,41 @@ export class Conductor {
     let v: Partial<Verdict> | undefined;
     let error: string | undefined;
     const tiers = cfg.judgeTiers;
-    if (tiers.enabled) {
+    const panelCfg = cfg.verification.panel;
+    let panel: PanelRecord | undefined;
+    let retryModel: string | undefined;
+    if (panelOn) {
+      // Panel judging (opt-in): every member votes per criterion; a split vote goes to the escalation model.
+      const votes: PanelJudgeVote[] = [];
+      const raws: Partial<Verdict>[] = [];
+      for (const [i, member] of panelCfg.judges.entries()) {
+        const lineage = member.lineage ?? 'default';
+        const r = await runJudge(member.model, lineageFraming(lineage));
+        if (!r.v) {
+          this.emit('log', `${task.id} panel judge ${i + 1} (${member.model}) gave no verdict (${r.res.error ?? 'no verdict'}), skipped`, undefined, task.id);
+          continue;
+        }
+        votes.push({ judge: `j${i + 1}`, model: member.model, lineage, criteria: panelCriteria(r.v, task.acceptance) });
+        raws.push(r.v);
+      }
+      if (votes.length) {
+        // The synthetic `overall` answer of a judge without usable criteria is only tallied when no judge keyed real
+        // criteria; and every acceptance criterion must be decided by a true majority of the judges.
+        const keyed = votes.some((vt) => Object.keys(vt.criteria).some((k) => k !== OVERALL));
+        const tallied = keyed ? votes.map((vt) => ({ ...vt, criteria: Object.fromEntries(Object.entries(vt.criteria).filter(([k]) => k !== OVERALL)) })) : votes;
+        const agg = aggregatePanel(tallied, keyed ? criterionLabels(task.acceptance) : []);
+        const escalated = agg.split;
+        panel = {
+          votes: votes.map((vote, i) => ({ judge: vote.judge, model: vote.model, lineage: vote.lineage, pass: Boolean(raws[i].pass), score: Number.isFinite(Number(raws[i].score)) ? Number(raws[i].score) : 0, criteria: vote.criteria })),
+          disagreement: round(agg.disagreement),
+          perCriterion: agg.perCriterion.map((c) => ({ criterion: c.criterion, pass: c.pass, fail: c.fail, disagreement: round(c.disagreement) })),
+          escalated,
+        };
+        this.emit('log', `${task.id} judge panel of ${votes.length}: disagreement ${panel.disagreement.toFixed(2)}${escalated ? ', split vote, escalating' : ''}`, { disagreement: panel.disagreement, judges: votes.length, escalated }, task.id);
+        if (escalated) retryModel = panelCfg.escalateModel ?? this.harness.config.models.judge;
+        else v = panelMajorityVerdict(raws, agg.majority, task.acceptance);
+      }
+    } else if (tiers.enabled) {
       const cheap = await runJudge(tiers.cheapModel);
       if (cheap.v && !shouldEscalate(cheap.v, testsOk, this.harness.config.passThreshold, tiers.margin)) v = cheap.v;
       else this.emit('log', `${task.id} cheap judge not decisive, escalating to ${this.harness.config.models.judge}`, undefined, task.id);
@@ -847,7 +1178,7 @@ export class Conductor {
 
     // A judge crash or budget exhaustion says nothing about the worker: retry the judge alone, once.
     for (let tryNo = 1; tryNo <= 2 && !v; tryNo++) {
-      const r = await runJudge();
+      const r = await runJudge(retryModel);
       v = r.v;
       if (v) break;
       error = r.res.error ?? 'no verdict';
@@ -856,7 +1187,77 @@ export class Conductor {
     if (!v || typeof v.score !== 'number') {
       return { pass: false, score: 0, summary: `Judge failed twice: ${error}`, issues: [], testsPassed: tests?.ok ?? null, judgeError: error };
     }
-    return buildVerdict(v, testsOk, this.harness.config.passThreshold, testsOk === false ? `Test command \`${cfg.testCommand}\` fails. Output tail:\n${tests!.tail.slice(-1200)}` : undefined);
+    const verdict = buildVerdict(v, testsOk, this.harness.config.passThreshold, testsOk === false ? `Test command \`${cfg.testCommand}\` fails. Output tail:\n${tests!.tail.slice(-1200)}` : undefined, Boolean(agentic));
+    const withOracle = oracle ? applyOracle(verdict, oracle) : verdict;
+    return panel ? { ...withOracle, panel } : withOracle;
+  }
+
+  // W4.4 (opt-in): oracle tests written by a separate session into a run-owned directory outside the
+  // worker worktree, then executed against the worker's tree. Returns null when oracles do not apply.
+  // Any failure here (git worktree add, mkdir, a missing base ref) is logged and degrades to no oracle
+  // evidence, the same way a failed mutation pass does, so it can never abort judging.
+  private async oraclePass(task: Task, cwd: string, base: string, frozenInvariants?: string[]): Promise<OracleOutcome | null> {
+    if (!this.store.config().verification.oracles.enabled) return null;
+    try {
+      return await this.runOraclePass(task, cwd, base, frozenInvariants);
+    } catch (e) {
+      this.emit('log', `${task.id} oracles failed, grading with no oracle evidence: ${(e as Error).message.split('\n')[0]}`, undefined, task.id);
+      return null;
+    }
+  }
+
+  private async runOraclePass(task: Task, cwd: string, base: string, frozenInvariants?: string[]): Promise<OracleOutcome | null> {
+    const cfg = this.store.config().verification.oracles;
+    // With contracts on the invariants come from the verified contract file, not the in-memory plan.
+    const invariants = frozenInvariants ?? task.invariants ?? [];
+    if (!invariants.length) {
+      this.emit('log', `${task.id} oracles skipped: the contract has no invariants for this task`, undefined, task.id);
+      return null;
+    }
+    const models = this.harness.config.models;
+    let model = cfg.model ?? models.judge;
+    if (model === models.worker && models.judge !== models.worker) model = models.judge;
+    const dir = this.store.path('runs', this.run.id, 'oracles', task.id);
+    rmSync(dir, { recursive: true, force: true });
+    mkdirSync(dir, { recursive: true });
+    const res = await this.call(
+      'judge',
+      task,
+      task.attempts,
+      {
+        prompt: oraclePrompt({ task, invariants, target: cwd, dir }),
+        cwd: dir,
+        tools: ['Read', 'Grep', 'Glob', 'Write'],
+        allowedTools: ['Read', 'Grep', 'Glob', 'Write'],
+        disallowedTools: ['Edit', 'Bash'],
+        permissionMode: 'default',
+      },
+      model,
+    );
+    // No session or no files means no oracle evidence. Running anyway would report an empty independent
+    // result as a failure and sink a healthy task, so degrade to the normal judge instead.
+    if (!res.ok) {
+      this.emit('log', `${task.id} oracle session failed (${res.error ?? 'error'}); grading with no oracle evidence`, undefined, task.id);
+      return null;
+    }
+    const written = listOracleFiles(dir);
+    if (!written.tests.length && !written.probes.length) {
+      this.emit('log', `${task.id} oracle session wrote no files; grading with no oracle evidence`, undefined, task.id);
+      return null;
+    }
+    const out = runOracles({
+      repoRoot: this.store.root,
+      // The commit the task started from, so changes landed by earlier tasks it depends on are not read as drift.
+      baseRef: base,
+      tree: cwd,
+      taskBase: base,
+      oracleDir: dir,
+      env: { seed: cfg.seed, propertyRuns: cfg.propertyRuns },
+      differential: cfg.differential,
+      excludeWorkerTests: cfg.excludeWorkerTests,
+    });
+    this.emit('log', `${task.id} oracles ${out.pass ? 'passed' : 'FAILED'} (${out.files.length} file(s)${out.nonGrading.length ? `, ${out.nonGrading.length} worker test(s) non-grading` : ''})`, undefined, task.id);
+    return out;
   }
 
   // Refinery: merges are serialized; post-merge tests guard the integration branch.
@@ -887,6 +1288,7 @@ export class Conductor {
     }
     task.status = 'merged';
     task.endedAt = Date.now();
+    this.markCriteriaPassing(task);
     this.ledgerOutcome(task, 'merged', footprint);
     this.emit('task.merged', `${task.id} merged (attempt ${task.attempts})`, undefined, task.id);
     this.save();
@@ -1192,6 +1594,7 @@ export function normalizeTasks(raw: any[]): Task[] {
       title: String(r.title ?? id),
       description: String(r.description ?? ''),
       acceptance: Array.isArray(r.acceptance) ? r.acceptance.map(String) : [],
+      ...(Array.isArray(r.invariants) && r.invariants.length ? { invariants: r.invariants.map(String) } : {}),
       deps: Array.isArray(r.deps) ? r.deps.map(String) : [],
       ...(footprint ? { footprint } : {}),
       status: 'pending',
