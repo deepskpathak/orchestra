@@ -97,6 +97,12 @@ Off by default. Without a test command the judge scores a single attempt with no
 }
 ```
 
+### `learnings`
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `learnings.expiryDays` | number | `0` | Drop lessons whose newest evidence is older than this many days, or whose harmful count is well above helpful, after each run. `0` disables expiry. See [self-improvement.md](self-improvement.md#learnings-orchestra-learnings). |
+
 ### `evolve`
 
 | Field | Type | Default | Meaning |

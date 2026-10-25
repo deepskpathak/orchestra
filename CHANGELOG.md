@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- Lesson hygiene (W3.7): the librarian now returns item edits (add, update, remove by lesson id) applied by `applyLessonEdits`, so no code path replaces a domain's lessons from model output. Lessons carry stable ids and helpful/harmful counters (old files load with zeros). Opt-in `learnings.expiryDays` (default 0 = off) expires stale or harmful lessons. New `orchestra evals ablation` replays the holdout with and without learnings and reports the paired delta and CI.
+
 ### Fixed
 
 - Atlas: the atlas schema is now version 2 and persists `skipped` (oversized, binary or unreadable paths). Older caches are ignored and rebuilt, and incremental builds re-extract only changed and genuinely new paths instead of re-reading skipped files every time.

@@ -13,7 +13,7 @@ import { buildTaskPack, renderMap } from './atlas-context.ts';
 import { plannedFiles } from './exploration.ts';
 import { analyzeDiff, MONITOR_MARK, type IntegrityFlag } from './integrity.ts';
 import { loadHarness, type Harness } from './harness.ts';
-import { formatLearnings, listDomains, normalizeDomain, readAllLearnings, readLearnings, writeLearnings, GLOBAL, type Lesson } from './learnings.ts';
+import { applyLessonEdits, editsFromResponse, expireDomain, formatLearnings, listDomains, normalizeDomain, readAllLearnings, readLearnings, GLOBAL } from './learnings.ts';
 import { buildSandboxPolicy, preflightSandbox, scrubWorkerEnv, type ProbeExec } from './sandbox.ts';
 import { newRunId, type Store } from './store.ts';
 import type { ActiveAgent, CriterionResult, OrchestraEvent, Role, Run, Scenario, Task, Verdict } from './types.ts';
@@ -34,6 +34,8 @@ export interface ConductorOptions {
   kind?: 'goal' | 'eval';
   // Opt-in ablation: turn one component off. Unset keeps the normal behaviour.
   ablate?: Ablation;
+  // Opt-in: an eval replay reads the learnings store (the with-lessons arm of `evals ablation`). Default is clean-room.
+  evalLearnings?: boolean;
   onUpdate?: (run: Run) => void;
   // Opt-in OS sandbox for write-capable roles (worker). Unset keeps spawning exactly as before.
   sandbox?: { backend: 'srt' | 'claude' | 'docker'; allowedHosts?: string[]; image?: string; gvisor?: boolean; network?: string };
@@ -288,29 +290,34 @@ const VERDICT_SCHEMA = {
   required: ['pass', 'score', 'summary', 'issues'],
 };
 
+const EVIDENCE_SCHEMA = {
+  type: 'array',
+  minItems: 1,
+  items: { type: 'object', properties: { run: { type: 'string' }, task: { type: 'string' } }, required: ['run'] },
+};
+
+// Item edits only: the librarian addresses lessons by id and never returns the whole set.
 const LESSONS_SCHEMA = {
   type: 'object',
   properties: {
-    lessons: {
+    edits: {
       type: 'array',
       maxItems: 25,
       items: {
         type: 'object',
         properties: {
+          op: { type: 'string', enum: ['add', 'update', 'remove'] },
+          id: { type: 'string' },
           role: { type: 'string', enum: ['planner', 'worker', 'judge'] },
           lesson: { type: 'string' },
-          evidence: {
-            type: 'array',
-            minItems: 1,
-            items: { type: 'object', properties: { run: { type: 'string' }, task: { type: 'string' } }, required: ['run'] },
-          },
-          hits: { type: 'number' },
+          evidence: EVIDENCE_SCHEMA,
+          helped: { type: 'boolean' },
         },
-        required: ['role', 'lesson', 'evidence'],
+        required: ['op'],
       },
     },
   },
-  required: ['lessons'],
+  required: ['edits'],
 };
 
 const TIMEOUT_MS: Record<Role, number> = {
@@ -334,6 +341,7 @@ export class Conductor {
   private atlas?: Atlas;
   private map = '';
   private ablate: Ablation;
+  private evalLearnings: boolean;
   private integration!: { path: string; branch: string; base: string };
   private mergeChain: Promise<unknown> = Promise.resolve();
   private readonly wtRoot: string;
@@ -347,6 +355,7 @@ export class Conductor {
     this.preflightExec = opts.preflightExec;
     this.scrubEnv = Boolean(opts.sandbox || opts.unattended);
     this.ablate = opts.ablate ?? {};
+    this.evalLearnings = opts.evalLearnings ?? false;
     this.wtRoot = opts.store.path('worktrees');
     const id = (opts.kind === 'eval' ? 'e' : '') + newRunId();
     this.run = {
@@ -422,7 +431,7 @@ export class Conductor {
     // Eval replays are clean-room: they never read the learnings store, so the lessons a harness
     // accumulated on past goals cannot leak into the comparison.
     const isEval = run.kind === 'eval';
-    const learnings = isEval || this.ablate.learnings ? {} : readAllLearnings(store);
+    const learnings = (isEval && !this.evalLearnings) || this.ablate.learnings ? {} : readAllLearnings(store);
     const cfg = store.config();
     const files = g.trackedFiles(this.integration.path);
     this.loadAtlas();
@@ -539,7 +548,7 @@ export class Conductor {
     this.emit('task.start', `${task.id} attempt ${task.attempts}: ${task.title}`, undefined, task.id);
     this.save();
 
-    const learnings = this.run.kind === 'eval' || this.ablate.learnings ? {} : readAllLearnings(store);
+    const learnings = (this.run.kind === 'eval' && !this.evalLearnings) || this.ablate.learnings ? {} : readAllLearnings(store);
     const others = this.run.tasks.filter((t) => t.id !== task.id).map((t) => `- ${t.id} ${t.title} [${t.status}]`);
     const prompt = joinPrompt(
       workerPrompt({
@@ -975,7 +984,7 @@ export class Conductor {
     const existing = { domain: run.domain ?? GLOBAL, lessons: readLearnings(store, run.domain), global: run.domain ? readLearnings(store) : [] };
     const res = await this.call('librarian', undefined, 1, {
       prompt: [
-        `RUN ID: ${run.id}\nTASK IDS: ${run.tasks.map((t) => t.id).join(', ')}\nDOMAIN: ${run.domain ?? GLOBAL}\nEvery lesson must cite evidence ({run, task?}); lessons without evidence are dropped. Return the full revised lesson set for this domain.`,
+        `RUN ID: ${run.id}\nTASK IDS: ${run.tasks.map((t) => t.id).join(', ')}\nDOMAIN: ${run.domain ?? GLOBAL}\nEvery lesson must cite evidence ({run, task?}); lessons without evidence are dropped. Return item edits only (add, update or remove by lesson id); lessons you do not mention are kept.`,
         `RUN REPORT\nGoal: ${run.goal}\nSatisfaction: ${run.satisfaction}\nCost: $${run.costUsd.toFixed(2)}\n${report}`,
         `REPAIRS AND FAILURES:\n${events || '(none)'}`,
         `EXISTING LEARNINGS:\n${JSON.stringify(existing, null, 2)}`,
@@ -984,11 +993,13 @@ export class Conductor {
       schema: LESSONS_SCHEMA,
       tools: [],
     });
-    const out = extractJson(res) as { lessons?: Lesson[] } | undefined;
-    if (res.ok && Array.isArray(out?.lessons)) {
-      writeLearnings(store, out.lessons, run.id, run.domain);
+    const out = extractJson(res) as { edits?: unknown; lessons?: unknown } | undefined;
+    if (res.ok && (Array.isArray(out?.edits) || Array.isArray(out?.lessons))) {
+      // Model output only ever becomes item edits, even when it is shaped like a full rewrite.
+      const applied = applyLessonEdits(store, run.domain, editsFromResponse(out, existing.lessons), run.id);
+      const expired = expireDomain(store, run.domain, store.config().learnings?.expiryDays ?? 0, run.id);
       const kept = readLearnings(store, run.domain).length;
-      const dropped = Math.max(0, out.lessons.length - kept);
+      const dropped = applied.removed + applied.evicted + expired;
       this.emit('learn', `Learnings updated: ${kept} lessons kept, ${dropped} dropped (${run.domain ?? GLOBAL})`, { count: kept, kept, dropped, domain: run.domain ?? GLOBAL });
     } else {
       this.emit('log', `Librarian failed: ${res.error ?? 'no lessons'}`);

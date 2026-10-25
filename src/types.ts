@@ -201,6 +201,7 @@ export interface ProjectConfig {
       packTokens: number; // budget for one L1 pack
     };
   };
+  learnings?: { expiryDays: number }; // drop lessons with evidence older than this many days; 0 = off
   evolve: {
     every: number; // auto-evolve after every N completed runs, 0 disables
     autoPromote: boolean;

@@ -132,8 +132,8 @@ interface CaseOutcome {
 
 // One clean-room replay: runGoal gives every eval run its own fresh worktree cut from the case's
 // base commit (unique run id, nothing reused), and eval runs bypass the learnings store.
-async function evalCase(store: Store, runner: Runner, version: string, c: EvalCase, onRun: ((r: Run) => void) | undefined, scorer: Scorer): Promise<CaseOutcome> {
-  const run = await runGoal({ store, runner, goal: c.goal, harnessVersion: version, baseRef: c.base, kind: 'eval', onUpdate: onRun });
+async function evalCase(store: Store, runner: Runner, version: string, c: EvalCase, onRun: ((r: Run) => void) | undefined, scorer: Scorer, withLearnings = false): Promise<CaseOutcome> {
+  const run = await runGoal({ store, runner, goal: c.goal, harnessVersion: version, baseRef: c.base, kind: 'eval', onUpdate: onRun, ...(withLearnings ? { evalLearnings: true } : {}) });
   let cost = run.costUsd;
   if (isInfraFailure(run)) {
     deleteRunBranches(store, run);
@@ -201,10 +201,10 @@ class EvalTally {
   }
 }
 
-export async function evaluate(store: Store, runner: Runner, version: string, cases: EvalCase[], onRun?: (r: Run) => void, scorer: Scorer = loadScorer()): Promise<EvalResult> {
+export async function evaluate(store: Store, runner: Runner, version: string, cases: EvalCase[], onRun?: (r: Run) => void, scorer: Scorer = loadScorer(), opts: { learnings?: boolean } = {}): Promise<EvalResult> {
   const tally = new EvalTally(version);
   for (const c of cases) {
-    tally.add(c, await evalCase(store, runner, version, c, onRun, scorer));
+    tally.add(c, await evalCase(store, runner, version, c, onRun, scorer, opts.learnings));
     if (tally.inconclusive) break;
   }
   return tally.result();
