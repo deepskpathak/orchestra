@@ -835,6 +835,14 @@ test('mutation skipped (failing baseline, nothing to mutate) is recorded as skip
   }
 });
 
+test('mutation: mutants that fail with a syntax error are invalid and excluded from the score', async () => {
+  const store = mutationRepo({ floor: 0.5 });
+  let n = 0;
+  const run = await runGoal({ store, runner: fakeRunner(), goal: 'g', mutation: { changedFiles: ['calc.js'], exec: () => (++n === 1 ? { ok: true } : n === 2 ? { ok: false, tail: 'SyntaxError: Unexpected token' } : { ok: false, tail: 'not ok 1' }) } });
+  assert.deepEqual([run.mutation!.total, run.mutation!.killed, run.mutation!.invalid, run.mutation!.score, run.mutation!.pass], [2, 2, 1, 1, true]);
+  assert.ok(store.events(run.id).some((e) => /1 invalid mutant\(s\) excluded/.test(e.msg)));
+});
+
 test('mutation disabled leaves the run without mutation', async () => {
   const store = tempRepo();
   const run = await runGoal({ store, runner: fakeRunner(), goal: 'g', mutation: { changedFiles: ['calc.js'], exec: () => { throw new Error('must not run'); } } });

@@ -51,7 +51,7 @@ export interface ConductorOptions {
   // Injectable exec for the sandbox pre-flight probes (tests). Defaults to spawnSync.
   preflightExec?: ProbeExec;
   // Injectable inputs for the W4.5 mutation pass (tests). Default: files changed on the integration branch, real exec.
-  mutation?: { changedFiles?: string[]; exec?: (cwd: string, command: string) => { ok: boolean } };
+  mutation?: { changedFiles?: string[]; exec?: (cwd: string, command: string) => { ok: boolean; tail?: string } };
 }
 
 // ---------- prompt builders ----------
@@ -523,16 +523,16 @@ export class Conductor {
       if (out.unreadable) this.emit('log', `Mutation left out ${out.unreadable.length} unreadable file(s): ${out.unreadable.join(', ')}`);
       // A skipped pass (no checks, failing baseline, nothing to mutate) has no score. Recording a vacuous
       // 1.0 pass would read as evidence the tests are strong, so record it as skipped and never gate on it.
-      const skipped = out.skipped ?? (out.results.length === 0 ? 'no mutable source changes' : undefined);
+      const m = mutationScore(out.results, cfg.floor);
+      const skipped = out.skipped ?? (out.results.length === 0 ? 'no mutable source changes' : m.total === 0 ? 'every mutant failed to compile' : undefined);
       if (skipped) {
         run.mutation = { total: 0, killed: 0, floor: cfg.floor, skipped };
         this.emit('log', `Mutation skipped: ${skipped}`, { mutation: run.mutation });
         this.save();
         return undefined;
       }
-      const m = mutationScore(out.results, cfg.floor);
-      run.mutation = { total: m.total, killed: m.killed, score: m.score, floor: m.floor, pass: m.pass };
-      this.emit('log', `Mutation score ${m.score.toFixed(2)} (${m.killed}/${m.total} killed, floor ${m.floor}) ${m.pass ? 'pass' : 'below floor'}`, { mutation: run.mutation });
+      run.mutation = { total: m.total, killed: m.killed, score: m.score, floor: m.floor, pass: m.pass, ...(m.invalid ? { invalid: m.invalid } : {}) };
+      this.emit('log', `Mutation score ${m.score.toFixed(2)} (${m.killed}/${m.total} killed, floor ${m.floor}${m.invalid ? `, ${m.invalid} invalid mutant(s) excluded` : ''}) ${m.pass ? 'pass' : 'below floor'}`, { mutation: run.mutation });
       this.save();
       if (!m.pass && cfg.failBelowFloor) return `Mutation score ${m.score.toFixed(2)} is below the floor ${m.floor} (${m.survived} of ${m.total} mutants survived)`;
     } catch (e) {

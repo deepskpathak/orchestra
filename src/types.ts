@@ -102,7 +102,7 @@ export interface Run {
   satisfaction?: number;
   active: ActiveAgent[];
   error?: string;
-  mutation?: { total: number; killed: number; score?: number; floor: number; pass?: boolean; skipped?: string }; // W4.5; skipped (with a reason) means no score was computed, so there is no score or pass
+  mutation?: { total: number; killed: number; score?: number; floor: number; pass?: boolean; invalid?: number; skipped?: string }; // W4.5; skipped (with a reason) means no score was computed, so there is no score or pass
   contract?: { path: string; sha256: string }; // W4.3 the acceptance contract workers cannot edit
   verificationModes?: string[]; // M4 modes enabled when the run started (panel, agentic, contracts, oracles, mutation); absent = none
 }
