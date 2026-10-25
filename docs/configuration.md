@@ -74,7 +74,7 @@ M4 Verification. Every part is off by default; later releases fill in the behavi
 | `verification.panel.enabled` | boolean | `false` | Score with a panel of judges and record per-judge votes and disagreement. |
 | `verification.panel.judges` | `{model, lineage?}[]` | `[]` | Panel members. `lineage` names the prompt variant used for that judge. |
 | `verification.panel.escalateModel` | string or null | `null` | Model that breaks split votes. `null` uses the harness judge model. |
-| `verification.agenticJudge.enabled` | boolean | `false` | The judge runs builds, tests and scenario checks per requirement instead of only reading the diff. |
+| `verification.agenticJudge.enabled` | boolean | `false` | The judge runs builds, tests and scenario checks per requirement instead of only reading the diff. The conductor runs scenario `check` commands and the test command first and gives the judge the results; criteria should carry `evidence`, and a pass without it adds an advisory issue. |
 | `verification.agenticJudge.checkTimeoutMs` | number | `120000` | Timeout for one check command. |
 | `verification.oracles.enabled` | boolean | `false` | Grade repos without tests with oracles the worker did not write. |
 | `verification.oracles.model` | string or null | `null` | Model that writes oracle tests. `null` uses the judge model, never the worker's. |

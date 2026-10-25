@@ -21,6 +21,7 @@ import { loadHarness, type Harness } from './harness.ts';
 import { applyLessonEdits, editsFromResponse, expireDomain, formatLearnings, listDomains, normalizeDomain, readAllLearnings, readLearnings, GLOBAL } from './learnings.ts';
 import { buildSandboxPolicy, preflightSandbox, scrubWorkerEnv, type ProbeExec } from './sandbox.ts';
 import { newRunId, type Store } from './store.ts';
+import { AGENTIC_INSTRUCTION, NO_EVIDENCE_NOTE, executedChecksSection, runScenarioChecks, type CheckResult } from './judge-checks.ts';
 import type { ActiveAgent, CriterionResult, OrchestraEvent, PanelRecord, Role, Run, Scenario, Task, Verdict } from './types.ts';
 
 export interface Ablation {
@@ -195,18 +196,20 @@ export function judgePrompt(i: {
   diff: string;
   tools?: string;
   checklist?: string;
+  agentic?: CheckResult[]; // set (even when empty) in agentic mode (W4.2)
 }): BuiltPrompt {
   const { task, tests } = i;
   const base = `HIDDEN SCENARIOS for the whole goal (judge only the parts this task is responsible for):\n${i.scenarios
     .map((s) => `- ${s.id}: GIVEN ${s.given} WHEN ${s.when} THEN ${s.then}`)
     .join('\n') || '(none)'}\n\nAlso return criteria: one entry per acceptance criterion, in order, each with pass, score and a short note.`;
   return {
-    prefix: [base, guidanceSection('TOOL GUIDANCE', i.tools), guidanceSection('REVIEW CHECKLIST', i.checklist)].filter(Boolean).join('\n\n'),
+    prefix: [base, guidanceSection('TOOL GUIDANCE', i.tools), guidanceSection('REVIEW CHECKLIST', i.checklist), i.agentic ? AGENTIC_INSTRUCTION : ''].filter(Boolean).join('\n\n'),
     body: [
       `TASK ${task.id}: ${task.title}\n${task.description}`,
       `ACCEPTANCE CRITERIA:\n${bullets(task.acceptance)}`,
       `WORKER SUMMARY (unverified):\n${i.workerText.slice(0, 3000)}`,
       tests ? `TEST RESULT (${i.testCommand}): ${tests.ok ? 'PASSED' : 'FAILED'}\n${tests.tail}` : 'TEST RESULT: no test command configured',
+      ...(i.agentic ? [executedChecksSection(i.agentic)] : []),
       `DIFF vs base:\n${i.diff}`,
     ].join('\n\n'),
   };
@@ -272,7 +275,7 @@ const PLAN_SCHEMA = {
       type: 'array',
       items: {
         type: 'object',
-        properties: { id: { type: 'string' }, given: { type: 'string' }, when: { type: 'string' }, then: { type: 'string' } },
+        properties: { id: { type: 'string' }, given: { type: 'string' }, when: { type: 'string' }, then: { type: 'string' }, check: { type: 'string' } },
         required: ['id', 'given', 'when', 'then'],
       },
     },
@@ -287,25 +290,27 @@ export const FAST_PLAN_SCHEMA = {
 };
 
 // Per-criterion judging: mean score, and pass only when every criterion passes. Malformed entries are skipped.
-export function aggregateCriteria(criteria: unknown): { score: number; pass: boolean; failing: CriterionResult[]; list: CriterionResult[] } | undefined {
+// In agentic mode, `unevidenced` lists criteria that passed without evidence (advisory only).
+export function aggregateCriteria(criteria: unknown, agentic = false): { score: number; pass: boolean; failing: CriterionResult[]; list: CriterionResult[]; unevidenced: CriterionResult[] } | undefined {
   if (!Array.isArray(criteria)) return undefined;
   const list: CriterionResult[] = [];
   for (const c of criteria) {
     if (!c || typeof c !== 'object' || typeof c.criterion !== 'string' || typeof c.pass !== 'boolean') continue;
     const n = Number.isFinite(c.score) ? Math.min(1, Math.max(0, c.score)) : 0;
-    list.push({ criterion: c.criterion, pass: c.pass, score: n, ...(typeof c.note === 'string' ? { note: c.note } : {}) });
+    list.push({ criterion: c.criterion, pass: c.pass, score: n, ...(typeof c.note === 'string' ? { note: c.note } : {}), ...(typeof c.evidence === 'string' && c.evidence.trim() ? { evidence: c.evidence } : {}) });
   }
   if (!list.length) return undefined;
-  return { score: list.reduce((a, c) => a + c.score, 0) / list.length, pass: list.every((c) => c.pass), failing: list.filter((c) => !c.pass), list };
+  return { score: list.reduce((a, c) => a + c.score, 0) / list.length, pass: list.every((c) => c.pass), failing: list.filter((c) => !c.pass), list, unevidenced: agentic ? list.filter((c) => c.pass && !c.evidence) : [] };
 }
 
 // Combines the judge's raw verdict with test results and per-criterion results (when given).
-export function buildVerdict(v: Partial<Verdict>, testsOk: boolean | null, passThreshold: number, testIssue?: string): Verdict {
-  const agg = aggregateCriteria(v.criteria);
+export function buildVerdict(v: Partial<Verdict>, testsOk: boolean | null, passThreshold: number, testIssue?: string, agentic = false): Verdict {
+  const agg = aggregateCriteria(v.criteria, agentic);
   const score = agg ? agg.score : (v.score as number);
   const pass = Boolean(v.pass) && score >= passThreshold && testsOk !== false && (agg?.pass ?? true);
   const issues = [...(v.issues ?? [])];
   if (agg) issues.unshift(...agg.failing.map((c) => `Criterion failed: ${c.criterion}${c.note ? `: ${c.note}` : ''}`));
+  if (agg?.unevidenced.length) issues.push(...agg.unevidenced.map((c) => `${NO_EVIDENCE_NOTE}: ${c.criterion}`));
   if (testsOk === false && testIssue) issues.unshift(testIssue);
   return { pass, score: round(score), summary: v.summary ?? '', issues, testsPassed: testsOk, ...(agg ? { criteria: agg.list } : {}) };
 }
@@ -339,7 +344,7 @@ const VERDICT_SCHEMA = {
       type: 'array',
       items: {
         type: 'object',
-        properties: { criterion: { type: 'string' }, pass: { type: 'boolean' }, score: { type: 'number', minimum: 0, maximum: 1 }, note: { type: 'string' } },
+        properties: { criterion: { type: 'string' }, pass: { type: 'boolean' }, score: { type: 'number', minimum: 0, maximum: 1 }, note: { type: 'string' }, evidence: { type: 'string' } },
         required: ['criterion', 'pass', 'score'],
       },
     },
@@ -932,6 +937,7 @@ export class Conductor {
     const cfg = this.store.config();
     const tests = cfg.testCommand ? g.runTests(cwd, cfg.testCommand) : null;
     if (tests) this.emit('log', `${task.id} tests ${tests.ok ? 'passed' : 'FAILED'}`, undefined, task.id);
+    const agentic = cfg.verification.agenticJudge.enabled ? cfg.verification.agenticJudge : undefined;
     const headBefore = g.head(cwd);
     const built = judgePrompt({
         task,
@@ -942,6 +948,7 @@ export class Conductor {
         diff: g.diffSince(cwd, base),
         tools: this.harness.guidance.tools,
         checklist: this.harness.guidance.checklist,
+        agentic: agentic ? runScenarioChecks({ cwd, scenarios: this.scenarios, testCommand: cfg.testCommand, timeoutMs: agentic.checkTimeoutMs, exec: (d, c, t) => g.runTests(d, c, t) }) : undefined,
       });
     const prompt = joinPrompt(built);
     const oracle = await this.oraclePass(task, cwd, base);
@@ -1020,7 +1027,7 @@ export class Conductor {
     if (!v || typeof v.score !== 'number') {
       return { pass: false, score: 0, summary: `Judge failed twice: ${error}`, issues: [], testsPassed: tests?.ok ?? null, judgeError: error };
     }
-    const verdict = buildVerdict(v, testsOk, this.harness.config.passThreshold, testsOk === false ? `Test command \`${cfg.testCommand}\` fails. Output tail:\n${tests!.tail.slice(-1200)}` : undefined);
+    const verdict = buildVerdict(v, testsOk, this.harness.config.passThreshold, testsOk === false ? `Test command \`${cfg.testCommand}\` fails. Output tail:\n${tests!.tail.slice(-1200)}` : undefined, Boolean(agentic));
     const withOracle = oracle ? applyOracle(verdict, oracle) : verdict;
     return panel ? { ...withOracle, panel } : withOracle;
   }
