@@ -256,7 +256,10 @@ export interface MutationDeps {
   commands: string[]; // test command plus scenario checks; a mutant is killed when any fails
   read: (file: string) => string;
   write: (file: string, content: string) => void;
-  exec: (command: string) => { ok: boolean; tail?: string };
+  // May be asynchronous. `timeoutMs` is set for mutant runs (a timeout reports ok: false, which counts as killed)
+  // and undefined for the baseline run, which keeps the executor's own, longer default.
+  exec: (command: string, timeoutMs?: number) => { ok: boolean; tail?: string } | Promise<{ ok: boolean; tail?: string }>;
+  mutantTimeoutMs?: number;
 }
 
 export interface MutationRun {
@@ -269,10 +272,10 @@ export interface MutationRun {
 const COMPILE_ERROR = /SyntaxError|ERR_INVALID_TYPESCRIPT_SYNTAX|ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX|error TS\d+|Transform failed|ParseError|Parsing error|Unexpected token|Unexpected identifier|Unterminated|Invalid or unexpected token/;
 export const isCompileError = (tail: string | undefined): boolean => COMPILE_ERROR.test(tail ?? '');
 
-const failsAny = (deps: MutationDeps): { failed: boolean; invalid: boolean } => {
+const failsAny = async (deps: MutationDeps, timeoutMs?: number): Promise<{ failed: boolean; invalid: boolean }> => {
   for (const cmd of deps.commands) {
     try {
-      const r = deps.exec(cmd);
+      const r = await deps.exec(cmd, timeoutMs);
       if (!r.ok) return { failed: true, invalid: isCompileError(r.tail) };
     } catch {
       return { failed: true, invalid: false }; // an exec that throws counts as a failing check
@@ -281,9 +284,9 @@ const failsAny = (deps: MutationDeps): { failed: boolean; invalid: boolean } => 
   return { failed: false, invalid: false };
 };
 
-export function runMutation(deps: MutationDeps): MutationRun {
+export async function runMutation(deps: MutationDeps): Promise<MutationRun> {
   if (deps.commands.length === 0) return { results: [], skipped: 'no test command or scenario checks to kill mutants with' };
-  if (failsAny(deps).failed) return { results: [], skipped: 'checks already fail without mutation' };
+  if ((await failsAny(deps)).failed) return { results: [], skipped: 'checks already fail without mutation' };
   const results: MutantResult[] = [];
   const unreadable: string[] = [];
   let budget = deps.max;
@@ -300,7 +303,7 @@ export function runMutation(deps: MutationDeps): MutationRun {
       let outcome: { failed: boolean; invalid: boolean };
       try {
         deps.write(file, m.source);
-        outcome = failsAny(deps);
+        outcome = await failsAny(deps, deps.mutantTimeoutMs);
       } finally {
         deps.write(file, original);
       }

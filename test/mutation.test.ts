@@ -58,10 +58,10 @@ const fs = (init: Record<string, string>) => {
   return { files, read: (f: string) => files[f], write: (f: string, c: string) => { files[f] = c; } };
 };
 
-test('runner counts killed and survived and restores the source', () => {
+test('runner counts killed and survived and restores the source', async () => {
   const io = fs({ 'a.ts': 'x === y; p < q;' });
   const orig = io.files['a.ts'];
-  const run = runMutation({
+  const run = await runMutation({
     files: ['a.ts'], max: 10, commands: ['t'], read: io.read, write: io.write,
     exec: () => ({ ok: !io.files['a.ts'].includes('!==') }), // only the === mutant is caught
   });
@@ -69,10 +69,10 @@ test('runner counts killed and survived and restores the source', () => {
   assert.equal(io.files['a.ts'], orig);
 });
 
-test('runner restores the source when exec throws, and a throw counts as killed', () => {
+test('runner restores the source when exec throws, and a throw counts as killed', async () => {
   const io = fs({ 'a.ts': 'x === y;' });
   let calls = 0;
-  const run = runMutation({
+  const run = await runMutation({
     files: ['a.ts'], max: 10, commands: ['t'], read: io.read, write: io.write,
     exec: () => { if (++calls > 1) throw new Error('boom'); return { ok: true }; },
   });
@@ -80,19 +80,19 @@ test('runner restores the source when exec throws, and a throw counts as killed'
   assert.equal(io.files['a.ts'], 'x === y;');
 });
 
-test('runner skips with no commands or a failing baseline, and honours max across files', () => {
+test('runner skips with no commands or a failing baseline, and honours max across files', async () => {
   const io = fs({ 'a.ts': 'a === b; c === d;', 'b.ts': 'e === f;' });
   const base = { files: ['a.ts', 'b.ts'], max: 2, read: io.read, write: io.write };
-  assert.match(runMutation({ ...base, commands: [], exec: () => ({ ok: true }) }).skipped!, /no test command/);
-  assert.match(runMutation({ ...base, commands: ['t'], exec: () => ({ ok: false }) }).skipped!, /already fail/);
-  const r = runMutation({ ...base, commands: ['t'], exec: () => ({ ok: true }) });
+  assert.match((await runMutation({ ...base, commands: [], exec: () => ({ ok: true }) })).skipped!, /no test command/);
+  assert.match((await runMutation({ ...base, commands: ['t'], exec: () => ({ ok: false }) })).skipped!, /already fail/);
+  const r = await runMutation({ ...base, commands: ['t'], exec: () => ({ ok: true }) });
   assert.equal(r.results.length, 2);
   assert.ok(r.results.every((x) => x.file === 'a.ts'));
 });
 
-test('a file that cannot be read is left out and the rest are still mutated', () => {
+test('a file that cannot be read is left out and the rest are still mutated', async () => {
   const io = fs({ 'a.ts': 'x === y;' });
-  const run = runMutation({
+  const run = await runMutation({
     files: ['gone.ts', 'a.ts'], max: 10, commands: ['t'], write: io.write,
     read: (f) => { if (f === 'gone.ts') throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }); return io.read(f); },
     exec: () => ({ ok: true }),
@@ -123,10 +123,10 @@ test('regex literals, apostrophes in prose and JSX tags do not hide or corrupt l
   assert.deepEqual(ops('const el = <Foo<string> bar={a} />;\nconst t = `${a === b ? "x" : `y${c}`}`; const k = p || q;'), ['|| -> &&']);
 });
 
-test('a mutant whose failure is a syntax or compile error is invalid and excluded from the score', () => {
+test('a mutant whose failure is a syntax or compile error is invalid and excluded from the score', async () => {
   const io = fs({ 'a.ts': 'x === y; p < q;' });
   let calls = 0;
-  const run = runMutation({
+  const run = await runMutation({
     files: ['a.ts'], max: 10, commands: ['t'], read: io.read, write: io.write,
     exec: () => (++calls === 1 ? { ok: true } : calls === 2 ? { ok: false, tail: 'SyntaxError: Unexpected token' } : { ok: false, tail: '1 failing test' }),
   });
@@ -137,4 +137,11 @@ test('a mutant whose failure is a syntax or compile error is invalid and exclude
   assert.equal(score.invalid, 1);
   assert.equal(isCompileError('error TS2304: Cannot find name'), true);
   assert.equal(isCompileError('AssertionError: expected 1 to equal 2'), false);
+});
+
+test('mutants run with the per-mutant timeout; the baseline run gets none', async () => {
+  const io = fs({ 'a.ts': 'x === y;' });
+  const seen: (number | undefined)[] = [];
+  await runMutation({ files: ['a.ts'], max: 10, commands: ['t'], read: io.read, write: io.write, mutantTimeoutMs: 1234, exec: async (_c, t) => { seen.push(t); await new Promise((r) => setTimeout(r, 1)); return { ok: true }; } });
+  assert.deepEqual(seen, [undefined, 1234]);
 });

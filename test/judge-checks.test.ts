@@ -11,9 +11,9 @@ const sc = [
   { id: 'S3', given: 'g', when: 'w', then: 't', check: 'boom' },
 ];
 
-test('runScenarioChecks records ok/exit/tail, skips scenarios without check, passes timeout', () => {
+test('runScenarioChecks records ok/exit/tail, skips scenarios without check, passes timeout', async () => {
   const seen: [string, number][] = [];
-  const res = runScenarioChecks({
+  const res = await runScenarioChecks({
     cwd: '/x', scenarios: sc, testCommand: 'npm test', timeoutMs: 77,
     exec: (_c, cmd, t) => { seen.push([cmd, t]); return cmd === 'boom' ? { ok: false, exit: 2, tail: 'bad' } : { ok: true, tail: 'fine' }; },
   });
@@ -21,8 +21,8 @@ test('runScenarioChecks records ok/exit/tail, skips scenarios without check, pas
   assert.ok(seen.every(([, t]) => t === 77));
 });
 
-test('runScenarioChecks turns an exec throw into a failed result', () => {
-  const res = runScenarioChecks({ cwd: '/x', scenarios: sc, timeoutMs: 1, exec: () => { throw new Error('nope'); } });
+test('runScenarioChecks turns an exec throw into a failed result', async () => {
+  const res = await runScenarioChecks({ cwd: '/x', scenarios: sc, timeoutMs: 1, exec: () => { throw new Error('nope'); } });
   assert.equal(res.length, 2);
   assert.equal(res[0].ok, false);
   assert.match(res[0].tail, /nope/);
@@ -60,9 +60,9 @@ test('aggregateCriteria keeps evidence; no-evidence note only in agentic mode', 
   assert.deepEqual(on.issues, ['Criterion passed without executed evidence: b']);
 });
 
-test('runScenarioChecks reuses the supplied tests result instead of re-running the test command', () => {
+test('runScenarioChecks reuses the supplied tests result instead of re-running the test command', async () => {
   const ran: string[] = [];
-  const res = runScenarioChecks({
+  const res = await runScenarioChecks({
     cwd: '/x', scenarios: sc, testCommand: 'npm test', testsResult: { ok: false, exit: 3, tail: 'red' }, timeoutMs: 1,
     exec: (_c, cmd) => { ran.push(cmd); return { ok: true, tail: '' }; },
   });
@@ -73,4 +73,14 @@ test('runScenarioChecks reuses the supplied tests result instead of re-running t
 test('git.runTests reports the real exit code', () => {
   assert.equal(g.runTests(process.cwd(), 'exit 7').exit, 7);
   assert.equal(g.runTests(process.cwd(), 'true').exit, 0);
+});
+
+test('runScenarioChecks awaits asynchronous executors, one check after another', async () => {
+  const order: string[] = [];
+  const res = await runScenarioChecks({
+    cwd: '/x', scenarios: sc, timeoutMs: 5,
+    exec: async (_c, cmd) => { order.push(`start ${cmd}`); await new Promise((r) => setTimeout(r, 5)); order.push(`end ${cmd}`); return { ok: true, tail: cmd }; },
+  });
+  assert.deepEqual(order, ['start echo one', 'end echo one', 'start boom', 'end boom']);
+  assert.deepEqual(res.map((r) => r.tail), ['echo one', 'boom']);
 });

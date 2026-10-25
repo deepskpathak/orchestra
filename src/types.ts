@@ -205,6 +205,7 @@ export interface VerificationConfig {
     floor: number; // minimum share of mutants that tests and scenarios must kill, 0..1
     maxMutants: number; // cap on mutants generated per run
     failBelowFloor: boolean; // fail the run when the score is under the floor; false = report only
+    mutantTimeoutMs: number; // time limit for each check command run against one mutant; a timeout counts as killed
   };
 }
 

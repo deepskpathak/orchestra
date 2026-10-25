@@ -21,7 +21,7 @@ export const DEFAULT_PROJECT_CONFIG: ProjectConfig = {
     panel: { enabled: false, judges: [], escalateModel: null },
     agenticJudge: { enabled: false, checkTimeoutMs: 120000 },
     oracles: { enabled: false, model: null, propertyRuns: 50, seed: 1, differential: true, excludeWorkerTests: true },
-    mutation: { enabled: false, floor: 0.6, maxMutants: 20, failBelowFloor: false },
+    mutation: { enabled: false, floor: 0.6, maxMutants: 20, failBelowFloor: false, mutantTimeoutMs: 60000 },
   },
   fastPath: { enabled: false, maxGoalChars: 400 },
   context: { atlas: { enabled: false, mapTokens: 1024, packs: false, packTokens: 1500 } },

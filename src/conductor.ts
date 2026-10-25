@@ -51,7 +51,7 @@ export interface ConductorOptions {
   // Injectable exec for the sandbox pre-flight probes (tests). Defaults to spawnSync.
   preflightExec?: ProbeExec;
   // Injectable inputs for the W4.5 mutation pass (tests). Default: files changed on the integration branch, real exec.
-  mutation?: { changedFiles?: string[]; exec?: (cwd: string, command: string) => { ok: boolean; tail?: string } };
+  mutation?: { changedFiles?: string[]; exec?: (cwd: string, command: string, timeoutMs?: number) => { ok: boolean; tail?: string } | Promise<{ ok: boolean; tail?: string }> };
 }
 
 // ---------- prompt builders ----------
@@ -527,7 +527,7 @@ export class Conductor {
       run.status = 'running';
       this.save();
       await this.schedule();
-      const mutationFailure = this.mutationPass();
+      const mutationFailure = await this.mutationPass();
 
       const merged = run.tasks.filter((t) => t.status === 'merged');
       const meanScore = merged.length ? merged.reduce((s, t) => s + (t.verdict?.score ?? 0), 0) / merged.length : 0;
@@ -567,7 +567,7 @@ export class Conductor {
 
   // W4.5: mutate the source files this run changed, in a scratch worktree, and see whether the test
   // command and scenario checks notice. Returns an error message only when failBelowFloor trips.
-  private mutationPass(): string | undefined {
+  private async mutationPass(): Promise<string | undefined> {
     const { run, store } = this;
     const cfg = store.config().verification.mutation;
     if (!cfg.enabled || !run.tasks.some((t) => t.status === 'merged')) return undefined;
@@ -578,14 +578,15 @@ export class Conductor {
       const files = changed.filter((f) => /\.(?:[cm]?[jt]s|[jt]sx)$/.test(f) && !/(?:^|\/)(?:tests?|__tests__)\/|\.(?:test|spec)\./.test(f));
       wt = g.createTaskWorktree(store.root, this.wtRoot, run.id, 'mutation', g.head(this.integration.path));
       const cwd = wt.path;
-      const exec = this.mutationOpts?.exec ?? ((d: string, c: string) => g.runTests(d, c, undefined, scrubVerifierEnv(process.env)));
-      const out = runMutation({
+      const exec = this.mutationOpts?.exec ?? ((d: string, c: string, t?: number) => g.runTestsAsync(d, c, t, scrubVerifierEnv(process.env)));
+      const out = await runMutation({
         files,
         max: cfg.maxMutants,
         commands: [...(testCommand ? [testCommand] : []), ...this.scenarios.flatMap((s) => (s.check ? [s.check] : []))],
         read: (f) => readFileSync(join(cwd, f), 'utf8'),
         write: (f, c) => writeFileSync(join(cwd, f), c),
-        exec: (c) => exec(cwd, c),
+        exec: (c, t) => exec(cwd, c, t),
+        mutantTimeoutMs: cfg.mutantTimeoutMs,
       });
       if (out.unreadable) this.emit('log', `Mutation left out ${out.unreadable.length} unreadable file(s): ${out.unreadable.join(', ')}`);
       // A skipped pass (no checks, failing baseline, nothing to mutate) has no score. Recording a vacuous
@@ -1097,7 +1098,7 @@ export class Conductor {
         tools: this.harness.guidance.tools,
         checklist: this.harness.guidance.checklist,
         indexed: panelOn,
-        agentic: agentic ? runScenarioChecks({ cwd, scenarios: this.scenarios, testCommand: cfg.testCommand, testsResult: tests, timeoutMs: agentic.checkTimeoutMs, exec: (d, c, t) => g.runTests(d, c, t, scrubVerifierEnv(process.env)) }) : undefined,
+        agentic: agentic ? await runScenarioChecks({ cwd, scenarios: this.scenarios, testCommand: cfg.testCommand, testsResult: tests, timeoutMs: agentic.checkTimeoutMs, exec: (d, c, t) => g.runTestsAsync(d, c, t, scrubVerifierEnv(process.env)) }) : undefined,
       });
     const prompt = joinPrompt(built);
     const oracle = await this.oraclePass(task, cwd, base, frozen?.invariants);

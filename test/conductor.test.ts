@@ -873,6 +873,18 @@ test('mutation: mutants that fail with a syntax error are invalid and excluded f
   assert.ok(store.events(run.id).some((e) => /1 invalid mutant\(s\) excluded/.test(e.msg)));
 });
 
+test('mutation: runs asynchronously with the configured per-mutant timeout (baseline gets none)', async () => {
+  const store = mutationRepo({ floor: 0.5, mutantTimeoutMs: 1234 });
+  const timeouts: (number | undefined)[] = [];
+  let ticks = 0;
+  const timer = setInterval(() => ticks++, 5);
+  const run = await runGoal({ store, runner: fakeRunner(), goal: 'g', mutation: { changedFiles: ['calc.js'], exec: async (_d, _c, t) => { timeouts.push(t); await new Promise((r) => setTimeout(r, 15)); return { ok: timeouts.length === 1 }; } } });
+  clearInterval(timer);
+  assert.equal(run.mutation!.total, 3);
+  assert.deepEqual(timeouts, [undefined, 1234, 1234, 1234]);
+  assert.ok(ticks > 3, 'the event loop kept running during the mutation pass');
+});
+
 test('mutation disabled leaves the run without mutation', async () => {
   const store = tempRepo();
   const run = await runGoal({ store, runner: fakeRunner(), goal: 'g', mutation: { changedFiles: ['calc.js'], exec: () => { throw new Error('must not run'); } } });

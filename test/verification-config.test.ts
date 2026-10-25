@@ -21,6 +21,7 @@ test('verification defaults apply when the block is omitted, all disabled', () =
   assert.equal(v.oracles.excludeWorkerTests, true);
   assert.equal(v.mutation.enabled, false);
   assert.equal(v.mutation.floor, 0.6);
+  assert.equal(v.mutation.mutantTimeoutMs, 60000);
 });
 
 test('a partial verification block keeps the other defaults', () => {

@@ -11,27 +11,29 @@ export interface CheckResult {
 }
 
 // Same shape as git.runTests plus an optional exit code, so tests can inject a fake.
-export type CheckExec = (cwd: string, command: string, timeoutMs: number) => { ok: boolean; exit?: number | null; tail: string };
+export type CheckExec = (cwd: string, command: string, timeoutMs: number) => { ok: boolean; exit?: number | null; tail: string } | Promise<{ ok: boolean; exit?: number | null; tail: string }>;
 
 const TAIL_CHARS = 1200;
 
 // Runs every scenario that has a check command, then the test command (when given). Scenarios without a check are skipped.
-export function runScenarioChecks(i: { cwd: string; scenarios: Scenario[]; testCommand?: string; testsResult?: { ok: boolean; exit?: number | null; tail: string } | null; timeoutMs: number; exec: CheckExec }): CheckResult[] {
+// Asynchronous so a slow check never blocks the event loop; checks still run one after another.
+export async function runScenarioChecks(i: { cwd: string; scenarios: Scenario[]; testCommand?: string; testsResult?: { ok: boolean; exit?: number | null; tail: string } | null; timeoutMs: number; exec: CheckExec }): Promise<CheckResult[]> {
   const jobs: { id: string; command: string }[] = [];
   for (const s of i.scenarios) if (s.check && s.check.trim()) jobs.push({ id: s.id, command: s.check });
-  const run = (j: { id: string; command: string }): CheckResult => {
+  const run = async (j: { id: string; command: string }): Promise<CheckResult> => {
     try {
-      const r = i.exec(i.cwd, j.command, i.timeoutMs);
+      const r = await i.exec(i.cwd, j.command, i.timeoutMs);
       return { id: j.id, command: j.command, ok: r.ok, exit: r.exit ?? (r.ok ? 0 : null), tail: r.tail.slice(-TAIL_CHARS) };
     } catch (err) {
       return { id: j.id, command: j.command, ok: false, exit: null, tail: `check could not run: ${(err as Error).message}` };
     }
   };
-  const results = jobs.map(run);
+  const results: CheckResult[] = [];
+  for (const j of jobs) results.push(await run(j));
   // The conductor already ran the test command for the TEST RESULT section, so reuse it instead of running it twice.
   if (i.testCommand) {
     const r = i.testsResult;
-    results.push(r ? { id: 'tests', command: i.testCommand, ok: r.ok, exit: r.exit ?? (r.ok ? 0 : null), tail: r.tail.slice(-TAIL_CHARS) } : run({ id: 'tests', command: i.testCommand }));
+    results.push(r ? { id: 'tests', command: i.testCommand, ok: r.ok, exit: r.exit ?? (r.ok ? 0 : null), tail: r.tail.slice(-TAIL_CHARS) } : await run({ id: 'tests', command: i.testCommand }));
   }
   return results;
 }

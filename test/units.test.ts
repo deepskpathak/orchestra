@@ -183,3 +183,25 @@ test('a skipped mutation pass renders as skipped in the summary and the dashboar
   const scored: Run = { ...base, mutation: { total: 4, killed: 3, floor: 0.6, score: 0.75, pass: true } };
   assert.match(summary(scored), /mutation score 0\.75 \(3\/4 killed, floor 0\.6, pass\)/);
 });
+
+test('runTestsAsync reports exit codes, kills on timeout and does not block the event loop', async () => {
+  const g = await import('../src/git.ts');
+  const dir = process.cwd();
+  assert.deepEqual((await g.runTestsAsync(dir, 'echo hi')).ok, true);
+  const bad = await g.runTestsAsync(dir, 'echo oops >&2; exit 3');
+  assert.equal(bad.ok, false);
+  assert.equal(bad.exit, 3);
+  assert.match(bad.tail, /oops/);
+  let ticks = 0;
+  const timer = setInterval(() => ticks++, 10);
+  const t0 = Date.now();
+  const slow = await g.runTestsAsync(dir, 'sleep 5', 300);
+  clearInterval(timer);
+  assert.equal(slow.ok, false);
+  assert.equal(slow.exit, null);
+  assert.match(slow.tail, /timed out after 300ms/);
+  assert.ok(Date.now() - t0 < 3000, 'the sleeping child was killed, not waited for');
+  assert.ok(ticks >= 10, `event loop kept ticking (${ticks})`);
+  // The env is honoured.
+  assert.match((await g.runTestsAsync(dir, 'echo "[$FOO_X]"', 5000, { PATH: process.env.PATH, FOO_X: 'v' })).tail, /\[v\]/);
+});
