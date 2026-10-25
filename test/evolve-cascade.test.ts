@@ -3,7 +3,7 @@ import { writeFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { Runner } from '../src/agent.ts';
-import { evolve, harnessIntegrity, type EvalCase } from '../src/evolve.ts';
+import { evaluate, evolve, harnessIntegrity, type EvalCase } from '../src/evolve.ts';
 import { holdoutLeaks, splitEvals } from '../src/evalsets.ts';
 import { fakeRunner } from '../src/fake.ts';
 import { currentVersion, readArchive, writeArchive } from '../src/harness.ts';
@@ -101,6 +101,54 @@ test('splits: the holdout is sticky, so earlier holdout cases never move into fe
   // A plain time-window re-split would have moved at least one of them out of the holdout.
   const naive = splitEvals([...cases, ...Array.from({ length: 15 }, (_, i) => ({ ...cases[0], id: `case-${i + 10}`, createdAt: 1010 + i }))]).holdout.map((c) => c.id);
   assert.ok(firstHoldout.some((c) => !naive.includes(c.id)));
+});
+
+const evalRuns = (store: Store) => store.listRuns().map((id) => store.loadRun(id)!).filter((r) => r.kind === 'eval');
+
+test('incumbent replays are cached within a cycle: the minibatch and validation share them, and reused cost is not charged', async () => {
+  const { store } = repoWith(4, { cascade: { enabled: true, minibatch: 2, finalists: 2 } });
+  const out = await evolve(store, fakeRunner(), quiet);
+  assert.equal(out.promoted, true, out.reason);
+  const runs = evalRuns(store);
+  // Four validation cases: the two minibatch cases are served from the cache, so the incumbent is replayed once per case.
+  assert.equal(runs.filter((r) => r.harness === 'v1').length, 4);
+  // The candidate is never cached: smoke case + minibatch (2) + validation (4).
+  assert.equal(runs.filter((r) => r.harness === 'v2').length, 7);
+});
+
+test('evaluate with a cache replays an incumbent case once; the second result reports reused cost', async () => {
+  const { store, cases } = repoWith(2, {});
+  const cache = new Map();
+  const first = await evaluate(store, fakeRunner(), 'v1', [cases[0]], undefined, undefined, { cache });
+  const second = await evaluate(store, fakeRunner(), 'v1', [cases[0]], undefined, undefined, { cache });
+  assert.equal(evalRuns(store).length, 1);
+  assert.equal(first.reused, undefined);
+  assert.equal(second.reused, 1);
+  assert.equal(second.reusedCost, second.cost);
+  assert.equal(second.cost, first.cost, 'the nominal cost is kept so cost gates compare like with like');
+  assert.deepEqual(second.detail, first.detail);
+});
+
+test('regression suite: regression-tagged cases are always replayed when enabled, and only then', async () => {
+  const run = async (regression: boolean) => {
+    const { store, cases } = repoWith(8, { sample: 3, minCases: 2, ...(regression ? { regression: { enabled: true } } : {}) });
+    store.writeJson(`evals/${cases[0].id}.json`, { ...cases[0], tags: ['regression'] });
+    await evolve(store, fakeRunner(), quiet);
+    return evalRuns(store).some((r) => r.goal === cases[0].goal);
+  };
+  assert.equal(await run(false), false, 'the oldest case is outside the newest-3 sample');
+  assert.equal(await run(true), true);
+});
+
+test('regression suite never pulls a locked holdout case into the evolver or the validation sample', async () => {
+  const { store, cases } = repoWith(10, { splits: { enabled: true, feedback: 0.3, validation: 0.5, holdout: 0.2, signoffBelow: 3 }, regression: { enabled: true }, sample: 3, minCases: 2, autoPromote: false });
+  const holdout = splitEvals(cases).holdout;
+  store.writeJson(`evals/${holdout[0].id}.json`, { ...holdout[0], tags: ['regression'] });
+  const s = spy(fakeRunner());
+  await evolve(store, s.runner, quiet);
+  assert.deepEqual(holdoutLeaks(s.evolverPrompts[0], holdout), []);
+  // The holdout case is replayed only for the confirmation step, never as part of the validation rounds.
+  assert.ok(evalRuns(store).filter((r) => r.goal === holdout[0].goal).length <= 2);
 });
 
 test('cascade: nothing clears the minibatch, so the cycle stops with no full validation', async () => {

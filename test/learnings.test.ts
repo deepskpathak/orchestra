@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  DOMAIN_CAP, applyLessonEdits, editsFromResponse, expireDomain, expireStale, lessonAblation, lessonId, recordLessonOutcome, formatLearnings, listDomains, normalizeDomain, readAllLearnings, readLearnings, summarizeLearnings, writeLearnings, type Lesson,
+  DOMAIN_CAP, applyLessonEdits, editsFromResponse, expireDomain, expireStale, lessonAblation, lessonId, formatLearnings, listDomains, normalizeDomain, readAllLearnings, readLearnings, summarizeLearnings, writeLearnings, type Lesson,
 } from '../src/learnings.ts';
 import { tempRepo } from './helpers.ts';
 
@@ -155,14 +155,13 @@ test('counters increment, persist across reads and apply to any domain; legacy f
   const store = tempRepo();
   writeLearnings(store, [lesson('a'), lesson('b')], 'r1', 'cli');
   const [a, b] = readLearnings(store, 'cli');
-  assert.equal(recordLessonOutcome(store, [a!.id!], true), 1);
-  recordLessonOutcome(store, [a!.id!, b!.id!], true);
-  recordLessonOutcome(store, [b!.id!], false);
+  const bump = (edits: Parameters<typeof applyLessonEdits>[2]) => applyLessonEdits(store, 'cli', edits, 'r2');
+  bump([{ op: 'update', id: a!.id!, helped: true }]);
+  bump([{ op: 'update', id: a!.id!, helped: true }, { op: 'update', id: b!.id!, helped: true }]);
+  bump([{ op: 'update', id: b!.id!, helped: false }]);
   const got = readLearnings(store, 'cli');
   assert.deepEqual([got[0]!.helpful, got[0]!.harmful, got[1]!.helpful, got[1]!.harmful], [2, 0, 1, 1]);
-  applyLessonEdits(store, 'cli', [{ op: 'update', id: a!.id!, helped: false }], 'r2');
-  assert.equal(readLearnings(store, 'cli')[0]!.harmful, 1);
-  assert.equal(recordLessonOutcome(store, ['missing'], true), 0);
+  assert.equal(bump([{ op: 'update', id: 'missing', helped: true }]).skipped, 1);
   // Old file shape: no id, helpful, harmful.
   store.writeJson('learnings/old.json', { lessons: [{ role: 'worker', lesson: 'legacy', evidence: [{ run: 'r1' }], hits: 2 }] });
   const [legacy] = readLearnings(store, 'old');

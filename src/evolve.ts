@@ -24,7 +24,8 @@ import {
   writeArchive,
 } from './harness.ts';
 import { archiveHistory, archivePatches, selectParent } from './pareto.ts';
-import { holdoutLeaks, holdoutRunIds, needsHumanSignoff, stickySplit, type EvalSplits, type SplitAssignment, type SplitRatios } from './evalsets.ts';
+import { regressionSuite } from './evalcases.ts';
+import { holdoutLeaks, holdoutRunIds, promptHasNoHoldout, needsHumanSignoff, stickySplit, type EvalSplits, type SplitAssignment, type SplitRatios } from './evalsets.ts';
 import { summarizeLearnings } from './learnings.ts';
 import { BudgetTracker, costGate, roundsOf, sequentialDecision, utility } from './selection.ts';
 import { loadScorer, scoreReplay, type Scorer } from './scorer.ts';
@@ -128,6 +129,8 @@ export interface EvalResult {
   infraFailureRate: number; // infrastructure-failed replays / replays attempted
   inconclusive?: string;
   monitorFireRate?: number; // integrity-monitor flags per replayed run; kept out of every evolver prompt
+  reused?: number; // replays served from the per-cycle incumbent cache or a saved partial result, not paid for again
+  reusedCost?: number; // cost of those reused replays; included in `cost` for comparisons, not charged to the budget
 }
 
 const INFRA_ERROR = /usage limit|session limit|rate limit|overloaded|quota|credit|not logged in|\/login|authentication|ECONN|ETIMEDOUT|ENOTFOUND|network/i;
@@ -143,6 +146,22 @@ interface CaseOutcome {
   cost: number;
   flags?: number; // integrity-monitor flags raised across the replay's tasks
   inconclusive?: string;
+  reused?: boolean; // served from the cache; `cost` is what the original replay cost
+}
+
+// Per-cycle cache of incumbent replays, keyed by version and case id, so the smoke baseline, minibatch, every
+// finalist's validation and the holdout never pay twice for the same incumbent/case pair. Candidates are never
+// cached: re-replaying a candidate is a fresh sample, and reusing one it was selected on would bias the gain.
+export type OutcomeCache = Map<string, CaseOutcome>;
+
+async function replayCase(store: Store, runner: Runner, version: string, c: EvalCase, onRun: ((r: Run) => void) | undefined, scorer: Scorer, withLearnings: boolean, cache?: OutcomeCache): Promise<CaseOutcome> {
+  const key = `${version}\u0000${c.id}`;
+  const hit = cache?.get(key);
+  if (hit) return { ...hit, reused: true };
+  const o = await evalCase(store, runner, version, c, onRun, scorer, withLearnings);
+  // An infrastructure failure says nothing about the harness, so it is replayed next time.
+  if (cache && !o.inconclusive) cache.set(key, o);
+  return o;
 }
 
 // One clean-room replay: runGoal gives every eval run its own fresh worktree cut from the case's
@@ -187,6 +206,8 @@ class EvalTally {
   cost = 0;
   attempts = 0;
   infraFailures = 0;
+  reused = 0;
+  reusedCost = 0;
   monitor: { harnessVersion: string; flags: number }[] = [];
   inconclusive?: string;
   version: string;
@@ -197,6 +218,10 @@ class EvalTally {
   add(c: EvalCase, o: CaseOutcome): void {
     this.attempts++;
     this.cost += o.cost;
+    if (o.reused) {
+      this.reused++;
+      this.reusedCost += o.cost;
+    }
     if (o.inconclusive) {
       this.infraFailures++;
       this.inconclusive = o.inconclusive;
@@ -210,16 +235,16 @@ class EvalTally {
   result(): EvalResult {
     const vals = Object.values(this.detail);
     const rate = fireRateByVersion(this.monitor)[0]?.rate;
-    const base = { detail: this.detail, passed: this.passed, cost: round(this.cost), infraFailureRate: this.attempts ? round(this.infraFailures / this.attempts) : 0, ...(rate === undefined ? {} : { monitorFireRate: round(rate) }) };
+    const base = { detail: this.detail, passed: this.passed, cost: round(this.cost), infraFailureRate: this.attempts ? round(this.infraFailures / this.attempts) : 0, ...(rate === undefined ? {} : { monitorFireRate: round(rate) }), ...(this.reused ? { reused: this.reused, reusedCost: round(this.reusedCost) } : {}) };
     if (this.inconclusive) return { score: 0, ...base, inconclusive: this.inconclusive };
     return { score: vals.length ? round(vals.reduce((a, b) => a + b, 0) / vals.length) : 0, ...base };
   }
 }
 
-export async function evaluate(store: Store, runner: Runner, version: string, cases: EvalCase[], onRun?: (r: Run) => void, scorer: Scorer = loadScorer(), opts: { learnings?: boolean } = {}): Promise<EvalResult> {
+export async function evaluate(store: Store, runner: Runner, version: string, cases: EvalCase[], onRun?: (r: Run) => void, scorer: Scorer = loadScorer(), opts: { learnings?: boolean; cache?: OutcomeCache } = {}): Promise<EvalResult> {
   const tally = new EvalTally(version);
   for (const c of cases) {
-    tally.add(c, await evalCase(store, runner, version, c, onRun, scorer, opts.learnings));
+    tally.add(c, await replayCase(store, runner, version, c, onRun, scorer, !!opts.learnings, opts.cache));
     if (tally.inconclusive) break;
   }
   return tally.result();
@@ -227,15 +252,15 @@ export async function evaluate(store: Store, runner: Runner, version: string, ca
 
 // Replays candidate and incumbent interleaved per case (A,B,A,B...) so drift in the
 // infrastructure (rate limits, model changes) hits both sides alike. The first infrastructure
-// failure ends both sides as inconclusive.
-export async function evaluatePair(store: Store, runner: Runner, incumbent: string, candidate: string, cases: EvalCase[], onRun?: (r: Run) => void, scorer: Scorer = loadScorer()): Promise<{ incumbent: EvalResult; candidate: EvalResult }> {
+// failure ends both sides as inconclusive. `cache` serves repeat incumbent replays (never candidate ones).
+export async function evaluatePair(store: Store, runner: Runner, incumbent: string, candidate: string, cases: EvalCase[], onRun?: (r: Run) => void, scorer: Scorer = loadScorer(), cache?: OutcomeCache): Promise<{ incumbent: EvalResult; candidate: EvalResult }> {
   const inc = new EvalTally(incumbent);
   const cand = new EvalTally(candidate);
   for (const c of cases) {
     // Candidate first within each pair, then incumbent.
     cand.add(c, await evalCase(store, runner, candidate, c, onRun, scorer));
     if (cand.inconclusive) break;
-    inc.add(c, await evalCase(store, runner, incumbent, c, onRun, scorer));
+    inc.add(c, await replayCase(store, runner, incumbent, c, onRun, scorer, false, cache));
     if (inc.inconclusive) break;
   }
   const reason = cand.inconclusive ?? inc.inconclusive;
@@ -461,9 +486,8 @@ async function evolveCycle(store: Store, runner: Runner, log: (msg: string) => v
   // One evolver call, always ledgered.
   const askEvolver = async (p: string) => {
     // Last line of defence for the locked holdout: refuse to send a prompt that names a holdout case id or goal.
-    const leaks = sp ? holdoutLeaks(p, sp.holdout) : [];
-    if (leaks.length) {
-      const error = `evolver prompt would leak locked holdout case(s) ${leaks.join(', ')}; not sent`;
+    if (sp && !promptHasNoHoldout(p, sp.holdout)) {
+      const error = `evolver prompt would leak locked holdout case(s) ${holdoutLeaks(p, sp.holdout).join(', ')}; not sent`;
       log(error);
       return { res: { ok: false, text: '', costUsd: 0, turns: 0, durationMs: 0, error }, variants: [] as ProposedVariant[] };
     }
@@ -504,7 +528,14 @@ async function evolveCycle(store: Store, runner: Runner, log: (msg: string) => v
   let candidate = created[0].version;
 
   // A sample below minCases could never promote (a stale config.json can pin an old, smaller sample).
-  const cases = (sp ? sp.validation : allCases).slice(-Math.max(cfg.evolve.sample, cfg.evolve.minCases));
+  const pool = sp ? sp.validation : allCases;
+  const sampleSize = Math.max(cfg.evolve.sample, cfg.evolve.minCases);
+  // Opt-in regression suite (W3.2): past-bug cases (tag `regression`) are always replayed, ahead of the newest
+  // sample, so a variant that reintroduces an old bug is caught. Drawn from the validation pool only, so the
+  // locked holdout and the evolver's feedback cases are never pulled in; capped at one sample's worth.
+  const regression = cfg.evolve.regression?.enabled ? regressionSuite(pool).slice(-sampleSize) : [];
+  const recent = pool.slice(-sampleSize).filter((c) => !regression.some((r) => r.id === c.id));
+  const cases = [...regression, ...recent];
   if (!cases.length) {
     return { candidate, incumbent, candidateScore: null, incumbentScore: null, promoted: false, reason: 'No Factory Eval cases yet. Successful runs are harvested automatically; candidate kept for later evaluation.' };
   }
@@ -515,15 +546,19 @@ async function evolveCycle(store: Store, runner: Runner, log: (msg: string) => v
     return { candidate, incumbent, candidateScore: null, incumbentScore: null, promoted: false, reason };
   }
 
+  const incCache: OutcomeCache = new Map();
   const cascade = cfg.evolve.cascade?.enabled ? cfg.evolve.cascade : null;
   let finalists = [candidate];
   // Eval spend so far, to estimate the next replay for the budget cap.
   let replays = 0;
   let evalSpend = 0;
+  // Reused replays (incumbent cache) cost nothing now, so they neither count against the cap nor dilute the
+  // per-replay estimate.
   const spent = (r: EvalResult, n: number) => {
-    budget.add(r.cost);
-    evalSpend += r.cost;
-    replays += n;
+    const paid = r.cost - (r.reusedCost ?? 0);
+    budget.add(paid);
+    evalSpend += paid;
+    replays += n - (r.reused ?? 0);
   };
   const wouldCross = (n: number) => budget.wouldExceed(replays ? (evalSpend / replays) * n : 0);
   const budgetStop = (where: string): EvolveOutcome => ({ candidate, incumbent, candidateScore: null, incumbentScore: null, promoted: false, reason: `budget cap $${budget.cap} reached (spent $${round(budget.spent)}) ${where}; candidate kept for later evaluation` });
@@ -557,7 +592,7 @@ async function evolveCycle(store: Store, runner: Runner, log: (msg: string) => v
     // Step 2: minibatch. A candidate must beat its parent on the same cases.
     const mb = cases.slice(-Math.min(Math.max(1, Math.floor(cascade.minibatch)), cases.length));
     if (wouldCross(mb.length)) return budgetStop('before the minibatch');
-    const mInc = await evaluate(store, runner, incumbent, mb, onRun);
+    const mInc = await evaluate(store, runner, incumbent, mb, onRun, undefined, { cache: incCache });
     spent(mInc, mb.length);
     if (mInc.inconclusive) return inconclusive(candidate, incumbent, mInc.inconclusive);
     const cw = cfg.evolve.cost?.enabled ? cfg.evolve.cost : null;
@@ -587,7 +622,7 @@ async function evolveCycle(store: Store, runner: Runner, log: (msg: string) => v
     // Screen cheaply: the newest min(2, sample) cases. Drop any candidate that fails a case the incumbent passes.
     const screen = cases.slice(-Math.max(1, Math.min(2, cfg.evolve.sample)));
     log(`Screening ${created.length} candidate(s) on ${screen.length} case(s)`);
-    const sInc = await evaluate(store, runner, incumbent, screen, onRun);
+    const sInc = await evaluate(store, runner, incumbent, screen, onRun, undefined, { cache: incCache });
     if (sInc.inconclusive) return inconclusive(candidate, incumbent, sInc.inconclusive);
     const survivors: { version: string; rationale: string; files: string[]; screenScore: number; detail: Record<string, number> }[] = [];
     for (const c of created) {
@@ -652,7 +687,7 @@ async function evolveCycle(store: Store, runner: Runner, log: (msg: string) => v
         break;
       }
       log(`Evaluating ${incumbent} vs ${version} on ${rc.length} eval case(s)${rounds.length > 1 ? ` (round ${ri + 1}/${rounds.length})` : ''}`);
-      const pr = await evaluatePair(store, runner, incumbent, version, rc, onRun);
+      const pr = await evaluatePair(store, runner, incumbent, version, rc, onRun, undefined, incCache);
       spent(pr.incumbent, rc.length);
       spent(pr.candidate, rc.length);
       if (pr.incumbent.inconclusive) return { version, error: pr.incumbent.inconclusive, rates: `infra failure rate: incumbent ${pr.incumbent.infraFailureRate}, candidate ${pr.candidate.infraFailureRate}` };
@@ -746,7 +781,7 @@ async function evolveCycle(store: Store, runner: Runner, log: (msg: string) => v
     // The locked holdout is touched only here, to confirm a promotion.
     if (sp.holdout.length) {
       if (wouldCross(2 * sp.holdout.length)) return { ...result(false), reason: `${reason}; budget cap reached before holdout confirmation, candidate kept for later evaluation` };
-      const hp = await evaluatePair(store, runner, incumbent, candidate, sp.holdout, onRun);
+      const hp = await evaluatePair(store, runner, incumbent, candidate, sp.holdout, onRun, undefined, incCache);
       spent(hp.incumbent, sp.holdout.length);
       spent(hp.candidate, sp.holdout.length);
       if (hp.incumbent.inconclusive) return { ...result(false), reason: `${reason}; holdout confirmation inconclusive, infrastructure failure (${hp.incumbent.inconclusive}); candidate kept for later evaluation` };
@@ -802,10 +837,14 @@ function combine(parts: { r: EvalResult; n: number }[]): EvalResult {
   let infra = 0;
   let mon = 0;
   let monN = 0;
+  let reused = 0;
+  let reusedCost = 0;
   for (const { r, n: k } of parts) {
     Object.assign(detail, r.detail);
     Object.assign(passed, r.passed);
     cost += r.cost;
+    reused += r.reused ?? 0;
+    reusedCost += r.reusedCost ?? 0;
     n += k;
     infra += r.infraFailureRate * k;
     if (r.monitorFireRate !== undefined) {
@@ -814,7 +853,7 @@ function combine(parts: { r: EvalResult; n: number }[]): EvalResult {
     }
   }
   const vals = Object.values(detail);
-  return { score: vals.length ? round(vals.reduce((a, b) => a + b, 0) / vals.length) : 0, detail, passed, cost: round(cost), infraFailureRate: n ? round(infra / n) : 0, ...(monN ? { monitorFireRate: round(mon / monN) } : {}) };
+  return { score: vals.length ? round(vals.reduce((a, b) => a + b, 0) / vals.length) : 0, detail, passed, cost: round(cost), infraFailureRate: n ? round(infra / n) : 0, ...(monN ? { monitorFireRate: round(mon / monN) } : {}), ...(reused ? { reused, reusedCost: round(reusedCost) } : {}) };
 }
 
 function pairedCases(evaluated: EvalCase[], parts: { r: EvalResult; n: number }[]): PairedCase[] {

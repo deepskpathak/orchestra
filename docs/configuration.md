@@ -126,6 +126,7 @@ Off by default. Without a test command the judge scores a single attempt with no
 | `evolve.cascade.minibatch` | number | `2` | Newest validation cases a candidate must beat its parent on (without regressing). |
 | `evolve.cascade.finalists` | number | `2` | Candidates that go on to full validation, best minibatch gain first. |
 | `evolve.pareto.enabled` | boolean | `false` | Choose the parent from the Pareto archive (variants best on at least one validation case), show the evolver the scored archive history, and record per-case wins and stepping stones in `archive.json`. |
+| `evolve.regression.enabled` | boolean | `false` | Always replay the cases tagged `regression` (`orchestra evals add --regression`, human-fix harvests) in the validation sample, ahead of the newest cases and capped at one sample's worth. Drawn from the validation pool only, so with splits on the holdout and feedback cases are never pulled in. |
 | `evolve.cost.enabled` | boolean | `false` | Cost-aware objective: a variant whose cost rises more than `maxCostRisePct` without a matching gain is rejected, and candidates are ranked by utility rather than raw score. |
 | `evolve.cost.maxCostRisePct` | number | `25` | Largest allowed cost rise over the incumbent, in percent. |
 | `evolve.cost.minGainForCost` | number | `0.02` | Score gain that excuses a cost rise above the limit. |

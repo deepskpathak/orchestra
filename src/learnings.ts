@@ -233,24 +233,6 @@ export function editsFromResponse(out: { edits?: unknown; lessons?: unknown } | 
   return edits;
 }
 
-/** Credit or blame lessons by id (any domain). Counters persist; unknown ids are ignored. Returns how many changed. */
-export function recordLessonOutcome(store: Store, ids: string[], helped: boolean, runId = 'outcome'): number {
-  const want = new Set(ids);
-  let changed = 0;
-  for (const [key, ls] of Object.entries(readAllLearnings(store))) {
-    let touched = false;
-    for (const l of ls) {
-      if (!want.has(l.id!)) continue;
-      if (helped) l.helpful = (l.helpful ?? 0) + 1;
-      else l.harmful = (l.harmful ?? 0) + 1;
-      touched = true;
-      changed++;
-    }
-    if (touched) writeLearnings(store, ls, runId, key);
-  }
-  return changed;
-}
-
 const RUN_TIME = /^r(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})/;
 
 /** Newest time evidence for this lesson was seen: updatedAt, else the newest parsable run id; undefined when unknown. */
