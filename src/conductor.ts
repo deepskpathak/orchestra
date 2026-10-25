@@ -8,6 +8,8 @@ import { join, resolve } from 'node:path';
 import { extractJson, parseWorkerOutcome, type AgentRequest, type AgentResult, type Runner } from './agent.ts';
 import * as g from './git.ts';
 import { alternateWorkerSection, comparePrompt, COMPARE_SCHEMA, contrastApplies, resolveContrast } from './contrast.ts';
+import { isExcludedPath, loadOrBuildAtlas, type Atlas } from './atlas.ts';
+import { buildTaskPack, renderMap } from './atlas-context.ts';
 import { plannedFiles } from './exploration.ts';
 import { analyzeDiff, MONITOR_MARK, type IntegrityFlag } from './integrity.ts';
 import { loadHarness, type Harness } from './harness.ts';
@@ -70,12 +72,12 @@ export function fastPathDecision(goal: string, cfg: { enabled: boolean; maxGoalC
 const PLAN_BODY =
   'Produce the task graph and hidden scenarios.\nAlso set "domain": pick one existing domain slug from EXISTING DOMAINS, or propose at most one new kebab-case slug (e.g. cli, web-ui, docs, config) when none fits.';
 
-export function plannerPrompt(i: { goal: string; files: string[]; testCommand?: string; learnings: string; domains: string[]; fastPath?: boolean }): BuiltPrompt {
+export function plannerPrompt(i: { goal: string; files: string[]; testCommand?: string; learnings: string; domains: string[]; fastPath?: boolean; map?: string }): BuiltPrompt {
   return {
     prefix: [
       `LEARNINGS:\n${i.learnings}`,
       `EXISTING DOMAINS:\n${i.domains.length ? i.domains.join('\n') : '(none yet)'}`,
-      `REPOSITORY FILES (first ${i.files.length}):\n${i.files.join('\n')}`,
+      i.map ? `REPOSITORY MAP:\n${i.map}` : `REPOSITORY FILES (first ${i.files.length}):\n${i.files.join('\n')}`,
       `TEST COMMAND: ${i.testCommand ?? '(none configured)'}`,
       `GOAL:\n${i.goal}`,
     ].join('\n\n'),
@@ -121,6 +123,8 @@ export function workerPrompt(i: {
   progressFile?: string;
   tools?: string;
   style?: string;
+  map?: string; // L0 repo map, shared prefix
+  pack?: string; // L1 task pack, body only
 }): BuiltPrompt {
   const { task } = i;
   return {
@@ -130,12 +134,14 @@ export function workerPrompt(i: {
       `OVERALL GOAL (context only):\n${i.goal}`,
       guidanceSection('TOOL GUIDANCE', i.tools),
       guidanceSection('STYLE', i.style),
+      i.map ? `REPOSITORY MAP:\n${i.map}` : '',
     ]
       .filter(Boolean)
       .join('\n\n'),
     body: [
       `YOUR TASK ${task.id}: ${task.title}\n${task.description}`,
       `ACCEPTANCE CRITERIA:\n${bullets(task.acceptance)}`,
+      i.pack ?? '',
       `OTHER TASKS (owned by other workers, do not do them):\n${i.others.join('\n') || '(none)'}`,
       task.notes.length ? repairSection(task.notes, i.progressFile) : '',
     ]
@@ -212,6 +218,11 @@ const PLAN_SCHEMA = {
           description: { type: 'string' },
           acceptance: { type: 'array', items: { type: 'string' } },
           deps: { type: 'array', items: { type: 'string' } },
+          footprint: {
+            type: 'object',
+            properties: { files: { type: 'array', items: { type: 'string' } }, symbols: { type: 'array', items: { type: 'string' } } },
+            required: ['files'],
+          },
         },
         required: ['id', 'title', 'description', 'acceptance', 'deps'],
       },
@@ -320,6 +331,8 @@ export class Conductor {
   private readonly harness: Harness;
   private readonly onUpdate?: (run: Run) => void;
   private scenarios: Scenario[] = [];
+  private atlas?: Atlas;
+  private map = '';
   private ablate: Ablation;
   private integration!: { path: string; branch: string; base: string };
   private mergeChain: Promise<unknown> = Promise.resolve();
@@ -412,6 +425,7 @@ export class Conductor {
     const learnings = isEval || this.ablate.learnings ? {} : readAllLearnings(store);
     const cfg = store.config();
     const files = g.trackedFiles(this.integration.path);
+    this.loadAtlas();
     const fp = fastPathDecision(run.goal, cfg.fastPath);
     const built = plannerPrompt({
       goal: run.goal,
@@ -420,6 +434,7 @@ export class Conductor {
       learnings: formatLearnings(learnings, 'planner'),
       domains: isEval ? [] : listDomains(store),
       fastPath: fp.fast,
+      map: this.map || undefined,
     });
     const prompt = joinPrompt(built);
 
@@ -446,6 +461,36 @@ export class Conductor {
       ...(fp.fast ? { fastPath: true } : {}),
     });
     this.save();
+  }
+
+  // Opt-in Repo Atlas: built or loaded once per run at the integration base. Any failure is logged
+  // and the run proceeds with the old prompts.
+  private loadAtlas(): void {
+    const cfg = this.store.config().context.atlas;
+    if (!cfg.enabled) return;
+    try {
+      this.atlas = loadOrBuildAtlas(this.store.root, this.integration.base);
+      this.run.atlasSha = this.atlas.sha;
+      this.map = renderMap(this.atlas, this.run.goal, cfg.mapTokens);
+      this.emit('log', `Atlas ready at ${this.atlas.sha.slice(0, 8)} (${Object.keys(this.atlas.files).length} files)`);
+    } catch (e) {
+      this.atlas = undefined;
+      this.map = '';
+      this.emit('log', `Atlas unavailable, continuing without it: ${(e as Error).message.split('\n')[0]}`);
+    }
+  }
+
+  // L1 pack for one task: footprint skeletons plus files changed on integration since run start.
+  private taskPack(task: Task): string | undefined {
+    const cfg = this.store.config().context.atlas;
+    if (!this.atlas || !cfg.packs) return undefined;
+    try {
+      const changed = g.changedFiles(this.integration.path, this.integration.base);
+      return buildTaskPack(this.atlas, task.footprint ?? { files: [] }, changed, cfg.packTokens) || undefined;
+    } catch (e) {
+      this.emit('log', `${task.id} task pack unavailable: ${(e as Error).message.split('\n')[0]}`, undefined, task.id);
+      return undefined;
+    }
   }
 
   private async schedule(): Promise<void> {
@@ -506,6 +551,8 @@ export class Conductor {
         progressFile: task.notes.length ? store.path(progressRel(this.run.id, task.id)) : undefined,
         tools: harness.guidance.tools,
         style: harness.guidance.style,
+        map: this.map || undefined,
+        pack: this.taskPack(task),
       }),
     );
 
@@ -836,12 +883,17 @@ export class Conductor {
     this.save();
   }
 
-  // Passive: planned files are repo paths named in the task text; changed files come from the task branch diff.
-  private footprint(task: Task): { planned: string[]; changed: string[] } | undefined {
+  // Passive: planned files are repo paths named in the task text, so the metric means the same with
+  // the atlas on or off. Planner-declared footprint files go in `declared`, intersected with tracked
+  // files because the planner may name paths that do not exist. Changed files come from the task branch diff.
+  private footprint(task: Task): { planned: string[]; changed: string[]; declared?: string[] } | undefined {
     try {
-      const planned = plannedFiles([task.title, task.description, ...task.acceptance].join('\n'), g.trackedFiles(this.integration.path, 100_000));
+      const tracked = g.trackedFiles(this.integration.path, 100_000);
+      const planned = plannedFiles([task.title, task.description, ...task.acceptance].join('\n'), tracked);
+      const known = new Set(tracked);
+      const declared = task.footprint?.files.length ? task.footprint.files.filter((f) => known.has(f)) : undefined;
       const changed = g.changedFiles(task.worktree!, g.mergeBase(task.worktree!, 'HEAD', this.integration.branch));
-      return { planned, changed };
+      return declared ? { planned, changed, declared } : { planned, changed };
     } catch (e) {
       this.emit('log', `${task.id} footprint unavailable: ${(e as Error).message.split('\n')[0]}`, undefined, task.id);
       return undefined;
@@ -1058,7 +1110,7 @@ export class Conductor {
     return res;
   }
 
-  private ledgerOutcome(task: Task, outcome: string, footprint?: { planned: string[]; changed: string[] }): void {
+  private ledgerOutcome(task: Task, outcome: string, footprint?: { planned: string[]; changed: string[]; declared?: string[] }): void {
     this.store.ledger({
       t: Date.now(),
       run: this.run.id,
@@ -1098,6 +1150,24 @@ export class Conductor {
 }
 
 // Validate planner output: unique ids, known deps, no cycles.
+// Planner-declared footprint: strings only, repo-relative normalised paths, never the state dir,
+// .env* or guard-secret paths. Returns undefined when nothing usable remains.
+export function sanitizeFootprint(raw: unknown): { files: string[]; symbols?: string[] } | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const r = raw as { files?: unknown; symbols?: unknown };
+  const files = new Set<string>();
+  for (const f of Array.isArray(r.files) ? r.files : []) {
+    if (typeof f !== 'string') continue;
+    const segs = f.trim().replace(/\\/g, '/').split('/').filter((x) => x && x !== '.');
+    if (!segs.length || segs.includes('..')) continue;
+    const p = segs.join('/');
+    if (!isExcludedPath(p)) files.add(p);
+  }
+  const symbols = [...new Set((Array.isArray(r.symbols) ? r.symbols : []).filter((x): x is string => typeof x === 'string' && x.trim() !== '').map((x) => x.trim()))];
+  if (!files.size && !symbols.length) return undefined;
+  return { files: [...files], ...(symbols.length ? { symbols } : {}) };
+}
+
 export function normalizeTasks(raw: any[]): Task[] {
   const seen = new Set<string>();
   const tasks: Task[] = [];
@@ -1105,12 +1175,14 @@ export function normalizeTasks(raw: any[]): Task[] {
     let id = String(r.id ?? `T${i + 1}`).trim() || `T${i + 1}`;
     if (seen.has(id)) id = `${id}-${i + 1}`;
     seen.add(id);
+    const footprint = sanitizeFootprint(r.footprint);
     tasks.push({
       id,
       title: String(r.title ?? id),
       description: String(r.description ?? ''),
       acceptance: Array.isArray(r.acceptance) ? r.acceptance.map(String) : [],
       deps: Array.isArray(r.deps) ? r.deps.map(String) : [],
+      ...(footprint ? { footprint } : {}),
       status: 'pending',
       attempts: 0,
       notes: [],

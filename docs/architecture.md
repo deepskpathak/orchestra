@@ -108,6 +108,12 @@ Run satisfaction is the mean judge score of merged tasks, scaled by the fraction
 | `learnings.json` | Librarian lessons |
 | `worktrees/` | Git worktrees for the run in flight |
 
+## Repo Atlas
+
+An optional, deterministic code graph of the repo at one commit (`src/atlas.ts`). Nodes are directories, files and symbols; edges are `contains`, `imports`, `references` and `tests`. Extraction is regex based for TS/JS, Python, Go, Java and Rust, with a file-level fallback for other languages. The graph is read from git objects at the commit, cached as `.orchestra/atlas/<sha>.json`, and rebuilt incrementally from the nearest cached commit using `git diff --name-only`. Enable it with `context.atlas` (see [configuration](configuration.md)); inspect it with `orchestra atlas build` and `orchestra atlas stats`.
+
+**Exclusions.** The atlas never indexes `.orchestra/` (holdout, scenarios, evals, archive), `.env*` files or paths matching the guard's secret patterns, so none of it can reach a prompt. The atlas code is not in `EVOLVABLE_FILES` and the frozen scorer never consumes atlas output.
+
 Harness versions, evals and an archive also live here, covered in [self-improvement](self-improvement.md).
 
 Event kinds are `run.start`, `run.end`, `plan`, `task.start`, `task.verdict`, `task.repair`, `task.merged`, `task.failed`, `task.needs_human`, `agent.start`, `agent.action`, `agent.end`, `learn`, `evolve` and `log`. The terminal and web dashboards are views over `run.json` and `events.jsonl`.

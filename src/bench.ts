@@ -26,10 +26,11 @@ export interface BenchGoal {
 
 export interface BenchArm {
   name: string;
-  config?: Partial<ProjectConfig>; // shallow overrides of the project config (nested objects are merged one level)
+  config?: Partial<ProjectConfig>; // shallow overrides of the project config (nested plain objects are merged recursively)
   harness?: string; // harness version to run; copied from the source store when not v1. "incumbent" means the source store's current version
   ablate?: Ablation; // turn one conductor component off
   singleSession?: boolean; // baseline: one worker call with the whole goal, no planner or judge
+  optional?: boolean; // skipped by a plain `orchestra bench` (no --arms); runs only when named, e.g. the atlas ablation arms
   compareTo?: string; // single-session only: the arm whose mean cost per goal sets the budget (default "full", else the first other arm)
 }
 
@@ -92,7 +93,10 @@ export function loadGoals(suite = DEFAULT_SUITE, only?: string[]): BenchGoal[] {
 export function loadArms(suite = DEFAULT_SUITE, names?: string[]): BenchArm[] {
   const file = join(suite, 'arms.json');
   const defined: BenchArm[] = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : [];
-  if (!names?.length) return defined.length ? defined : [{ name: 'default' }];
+  if (!names?.length) {
+    const standard = defined.filter((a) => !a.optional);
+    return standard.length ? standard : [{ name: 'default' }];
+  }
   // An unnamed arm is the unmodified default config, so `--arms a,b` always works.
   return names.map((n) => defined.find((a) => a.name === n) ?? { name: n });
 }
@@ -157,12 +161,28 @@ export function verifyOracles(suite = DEFAULT_SUITE, only?: string[]): OracleRes
   });
 }
 
-function armConfig(arm: BenchArm): ProjectConfig {
-  const cfg: Record<string, any> = { ...DEFAULT_PROJECT_CONFIG, testCommand: null };
-  for (const [k, v] of Object.entries(arm.config ?? {})) {
-    cfg[k] = v && typeof v === 'object' && !Array.isArray(v) && cfg[k] && typeof cfg[k] === 'object' ? { ...cfg[k], ...v } : v;
-  }
-  return cfg as ProjectConfig;
+const isPlain = (v: unknown): v is Record<string, any> => !!v && typeof v === 'object' && !Array.isArray(v);
+
+// Recursive merge of plain objects, so an arm that sets one nested key keeps the sibling defaults.
+function mergeConfig(base: Record<string, any>, over: Record<string, any>): Record<string, any> {
+  const out: Record<string, any> = { ...base };
+  for (const [k, v] of Object.entries(over)) out[k] = isPlain(v) && isPlain(out[k]) ? mergeConfig(out[k], v) : v;
+  return out;
+}
+
+export function armConfig(arm: BenchArm): ProjectConfig {
+  return mergeConfig({ ...DEFAULT_PROJECT_CONFIG, testCommand: null }, arm.config ?? {}) as ProjectConfig;
+}
+
+// Reference arm for the paired table: "full" when the bench ran it, else the first arm in row order.
+export function defaultReference(rows: BenchRow[]): string | undefined {
+  return rows.some((r) => r.arm === 'full') ? 'full' : rows[0]?.arm;
+}
+
+// Error message when a requested `--reference` is not one of the arms in the run, else undefined.
+export function referenceError(ref: string | undefined, arms: BenchArm[]): string | undefined {
+  if (ref === undefined || arms.some((a) => a.name === ref)) return undefined;
+  return `--reference "${ref}" is not among the arms in this run (${arms.map((a) => a.name).join(', ')})`;
 }
 
 // Mean cost per goal of the compared arm (cost per row, so repeats average out). Falls back to the worker budget

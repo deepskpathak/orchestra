@@ -8,7 +8,7 @@ import type { AgentRequest, AgentResult, Runner } from './agent.ts';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-export function fakeRunner(opts: { stepMs?: number; failFirstAttemptOf?: string[]; failAlways?: string[]; flagForHuman?: string[]; flagOnRepair?: string[]; tamper?: (req: AgentRequest) => boolean; judgeFailTimes?: number; contrastPick?: 'A' | 'B'; contrastScores?: { a: number; b: number } } = {}): Runner {
+export function fakeRunner(opts: { stepMs?: number; failFirstAttemptOf?: string[]; failAlways?: string[]; flagForHuman?: string[]; flagOnRepair?: string[]; tamper?: (req: AgentRequest) => boolean; judgeFailTimes?: number; contrastPick?: 'A' | 'B'; contrastScores?: { a: number; b: number }; footprints?: boolean } = {}): Runner {
   const step = opts.stepMs ?? 0;
   const failFirst = new Set(opts.failFirstAttemptOf ?? ['T2']);
   const flagHuman = new Set(opts.flagForHuman ?? []);
@@ -49,7 +49,7 @@ export function fakeRunner(opts: { stepMs?: number; failFirstAttemptOf?: string[
               { id: 'T2', title: 'Config loader', description: 'Load config', acceptance: ['config.txt exists'], deps: [] },
               { id: 'T3', title: 'CLI wiring', description: 'Wire CLI to core', acceptance: ['cli.txt exists'], deps: ['T1'] },
               { id: 'T4', title: 'Docs', description: 'Document usage', acceptance: ['docs.txt exists'], deps: ['T2', 'T3'] },
-            ],
+            ].map((t) => (opts.footprints ? { ...t, footprint: { files: [`fake/${t.id}.txt`, 'README.md'] } } : t)),
             domain: 'cli',
             scenarios: [{ id: 'S1', given: 'a fresh repo', when: 'user runs the CLI', then: 'it prints help' }],
           },

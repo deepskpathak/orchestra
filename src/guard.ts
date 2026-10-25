@@ -14,7 +14,11 @@ export interface GuardDecision {
 
 const NETWORK = /\b(curl|wget|ssh|scp|rsync|nc|telnet|ftp)\b|\bgit\s+push\b|\bnpm\s+publish\b|\bgh\s+(pr|release|repo)\s+create\b/;
 const READ_ONLY = new Set(['Read', 'Grep', 'Glob']);
-const SECRET_PATH = /(^|\/)(\.env(\..*)?|id_rsa|id_ed25519|\.npmrc|\.netrc|credentials(\.json)?|.*\.pem|.*\.key)$/;
+export const SECRET_PATH = /(^|\/)(\.env(\..*)?|id_rsa|id_ed25519|\.npmrc|\.netrc|credentials(\.json)?|.*\.pem|.*\.key)$/;
+
+export function isSecretPath(path: string): boolean {
+  return SECRET_PATH.test(path.replace(/\\/g, '/'));
+}
 
 // The frozen scorer is the installed one (PACKAGE_ROOT/scorer). A scorer/ directory inside the repo
 // being worked on is ordinary project code and stays editable (the integrity monitor still flags a

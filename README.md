@@ -91,6 +91,7 @@ Set `ORCHESTRA_RUNNER=fake` to use the simulator instead of real Claude sessions
 | `orchestra stats` | Factory health per harness version, plus outcome metrics (merge acceptance, edits before landing, revert rate, cost per accepted merge, success by task length) |
 | `orchestra evolve` | Propose, evaluate, and maybe promote a better harness |
 | `orchestra learnings [--domain <slug>]` | Show what the factory has learned in this repo (`--domain` filters to one domain, `global` for cross-domain lessons) |
+| `orchestra atlas build` / `orchestra atlas stats` | Build or refresh the Repo Atlas code graph for HEAD (`.orchestra/atlas/<sha>.json`), or show its file, symbol and edge counts. Work even when `context.atlas.enabled` is false; `.orchestra/`, `.env*` and secret files are never indexed |
 | `orchestra evals` | List Factory Eval cases |
 | `orchestra promote <vN>` | Promote a harness version (also used for rollback) |
 | `orchestra doctor` | Check Claude CLI and headless auth |

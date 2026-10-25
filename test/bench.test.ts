@@ -5,11 +5,12 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { test } from 'node:test';
 import type { AgentRequest, Runner } from '../src/agent.ts';
-import { DEFAULT_SUITE, applyOracle, loadArms, loadGoals, materialiseFixture, runBench, runCheck, summarize, verifyOracles, type BenchRow } from '../src/bench.ts';
+import { DEFAULT_SUITE, applyOracle, armConfig, defaultReference, loadArms, loadGoals, materialiseFixture, runBench, runCheck, summarize, verifyOracles, type BenchRow } from '../src/bench.ts';
 import { fakeRunner } from '../src/fake.ts';
 import { git } from '../src/git.ts';
 import { PACKAGE_ROOT } from '../src/harness.ts';
 import { goalRuns } from '../src/evolve.ts';
+import { DEFAULT_PROJECT_CONFIG } from '../src/store.ts';
 import { tempRepo } from './helpers.ts';
 
 test('starter suite: every goal has fixture, check and oracle, and every oracle passes its own check', () => {
@@ -48,6 +49,17 @@ test('a check that passes on the unmodified base is rejected', () => {
 test('arms: named arms fall back to the default config; arms.json is read', () => {
   assert.deepEqual(loadArms(DEFAULT_SUITE, ['a', 'b']).map((a) => a.name), ['a', 'b']);
   assert.ok(loadArms(DEFAULT_SUITE).length >= 1);
+});
+
+test('atlas ablation arms ship in arms.json and set context.atlas per arm, keeping other defaults', () => {
+  const arms = loadArms(DEFAULT_SUITE, ['default', 'atlas-off', 'atlas-l0', 'atlas-l0-l1']);
+  assert.deepEqual(loadArms(DEFAULT_SUITE).map((a) => a.name), ['default'], 'optional arms stay out of a plain bench');
+  const by = (n: string) => armConfig(arms.find((a) => a.name === n)!).context.atlas;
+  assert.ok(['default', 'atlas-off', 'atlas-l0', 'atlas-l0-l1'].every((n) => arms.some((a) => a.name === n)));
+  assert.deepEqual(by('atlas-off'), { enabled: false, mapTokens: 1024, packs: false, packTokens: 1500 });
+  assert.deepEqual(by('atlas-l0'), { enabled: true, mapTokens: 1024, packs: false, packTokens: 1500 });
+  assert.deepEqual(by('atlas-l0-l1'), { enabled: true, mapTokens: 1024, packs: true, packTokens: 1500 });
+  assert.equal(armConfig(arms.find((a) => a.name === 'default')!).context.atlas.enabled, false);
 });
 
 test('bench runs arms x goals x repeats with the fake runner, hides checks and oracles, and stays eval-only', async () => {
@@ -118,7 +130,7 @@ test('summarize: pass@1 and pass^3 per arm', () => {
 
 // ---------- ablation arms and the matched-cost baseline (W2.3, W2.4) ----------
 
-import { ABLATION_ARMS, SINGLE_SESSION_ARM, ablationTable, matchedBudget, renderAblationTable } from '../src/bench.ts';
+import { ABLATION_ARMS, SINGLE_SESSION_ARM, ablationTable, matchedBudget, referenceError, renderAblationTable } from '../src/bench.ts';
 
 test('built-in arms: full plus five ablations and the evolver pinned to v1', () => {
   assert.deepEqual(ABLATION_ARMS.map((a) => a.name), ['full', '-scenarios', '-repair', '-learnings', '-contrastive', '-evolver']);
@@ -298,4 +310,28 @@ test('materialiseFixture removes its temp dir when git setup fails', () => {
   }
   assert.deepEqual(readdirSync(priv), []);
   rmSync(priv, { recursive: true, force: true });
+});
+
+test('armConfig: nested plain objects merge recursively; arms without config or context are unchanged', () => {
+  const plain = armConfig({ name: 'x' });
+  assert.deepEqual(plain.context, DEFAULT_PROJECT_CONFIG.context);
+  assert.equal(plain.testCommand, null);
+  const merged = armConfig({ name: 'y', config: { context: { atlas: { enabled: true } } } as any });
+  assert.equal(merged.context.atlas.enabled, true);
+  assert.equal(merged.context.atlas.mapTokens, DEFAULT_PROJECT_CONFIG.context.atlas.mapTokens);
+  assert.deepEqual(Object.keys(merged.context), Object.keys(DEFAULT_PROJECT_CONFIG.context));
+});
+
+test('defaultReference: full when present, else the first arm', () => {
+  const row = (arm: string): BenchRow => ({ arm, goal: 'g', taskType: 't', humanMinutes: 1, repeat: 1, runId: 'r', harness: 'v1', checkPass: true, judgeSatisfaction: null, taskVerdicts: {}, costUsd: 1, wallMs: 1 });
+  assert.equal(defaultReference([row('atlas-off'), row('atlas-l0')]), 'atlas-off');
+  assert.equal(defaultReference([row('a'), row('full')]), 'full');
+  assert.equal(defaultReference([]), undefined);
+});
+
+test('referenceError rejects a reference that is not among the arms in the run', () => {
+  const arms = [{ name: 'full' }, { name: 'atlas-l0' }];
+  assert.equal(referenceError(undefined, arms), undefined);
+  assert.equal(referenceError('atlas-l0', arms), undefined);
+  assert.match(referenceError('nope', arms) ?? '', /"nope" is not among the arms in this run \(full, atlas-l0\)/);
 });

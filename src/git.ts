@@ -10,7 +10,7 @@ export function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 }
 
-function tryGit(cwd: string, ...args: string[]): { ok: boolean; out: string } {
+export function tryGit(cwd: string, ...args: string[]): { ok: boolean; out: string } {
   const r = spawnSync('git', args, { cwd, encoding: 'utf8' });
   return { ok: r.status === 0, out: `${r.stdout ?? ''}${r.stderr ?? ''}`.trim() };
 }
@@ -137,4 +137,77 @@ export function runTests(cwd: string, command: string, timeoutMs = 10 * 60_000):
 export function trackedFiles(root: string, limit = 300): string[] {
   const all = git(root, 'ls-files').split('\n').filter(Boolean);
   return all.slice(0, limit);
+}
+
+// Blob paths at `ref` (the committed tree, not the working copy), unlimited. Submodules and
+// symlinks are skipped.
+export function filesAtRef(root: string, ref: string): string[] {
+  const out = execFileSync('git', ['ls-tree', '-r', '-z', ref], { cwd: root, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
+  const files: string[] = [];
+  for (const rec of out.split('\0')) {
+    const tab = rec.indexOf('\t');
+    if (tab < 0) continue;
+    const [mode, type] = rec.slice(0, tab).split(' ');
+    if (type === 'blob' && mode !== '120000') files.push(rec.slice(tab + 1));
+  }
+  return files;
+}
+
+// Paths that differ between two commits (added, modified and deleted; renames reported as both sides).
+export function diffNamesBetween(root: string, a: string, b: string): string[] {
+  const out = execFileSync('git', ['diff', '--name-only', '--no-renames', '-z', a, b], { cwd: root, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
+  return out.split('\0').filter(Boolean);
+}
+
+export function commitExists(root: string, ref: string): boolean {
+  return tryGit(root, 'cat-file', '-e', `${ref}^{commit}`).ok;
+}
+
+// Reads many blobs at `ref`. Sizes come first from `git cat-file --batch-check` (headers only), so
+// only blobs within `maxBytes` are ever loaded. Missing, non-blob and oversized paths map to null. A
+// failure reading a chunk (for example ENOBUFS) degrades to per-blob reads, and a blob that still
+// fails maps to null, so one bad blob never aborts the caller.
+export function readBlobsAtRef(root: string, ref: string, paths: string[], maxBytes = Infinity): Map<string, Buffer | null> {
+  const res = new Map<string, Buffer | null>();
+  if (!paths.length) return res;
+  const specs = paths.map((p) => `${ref}:${p}`);
+  let sizes: Array<number | null>;
+  try {
+    const out = execFileSync('git', ['cat-file', '--batch-check'], { cwd: root, encoding: 'utf8', input: specs.join('\n') + '\n', maxBuffer: 64 * 1024 * 1024 });
+    sizes = out.split('\n').slice(0, paths.length).map((l) => {
+      const m = /^\S+ blob (\d+)$/.exec(l);
+      return m ? Number(m[1]) : null;
+    });
+  } catch {
+    sizes = paths.map(() => null);
+  }
+  const eligible: number[] = [];
+  paths.forEach((p, i) => {
+    res.set(p, null);
+    const size = sizes[i];
+    if (size !== null && size !== undefined && size <= maxBytes) eligible.push(i);
+  });
+  if (!eligible.length) return res;
+  try {
+    const buf = execFileSync('git', ['cat-file', '--batch'], { cwd: root, input: eligible.map((i) => `${specs[i]}\n`).join(''), maxBuffer: 1024 * 1024 * 1024 });
+    let pos = 0;
+    for (const i of eligible) {
+      const nl = buf.indexOf(10, pos);
+      const m = /^\S+ blob (\d+)$/.exec(buf.subarray(pos, nl).toString('utf8'));
+      pos = nl + 1;
+      if (!m) continue;
+      const size = Number(m[1]);
+      res.set(paths[i], buf.subarray(pos, pos + size));
+      pos += size + 1;
+    }
+  } catch {
+    for (const i of eligible) {
+      try {
+        res.set(paths[i], execFileSync('git', ['cat-file', 'blob', specs[i]], { cwd: root, maxBuffer: Math.max(maxBytes, 1024) + 1024 }));
+      } catch {
+        res.set(paths[i], null);
+      }
+    }
+  }
+  return res;
 }

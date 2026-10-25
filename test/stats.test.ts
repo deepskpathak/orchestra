@@ -125,7 +125,11 @@ test('explorationMetrics aggregates per version and role, legacy rows do not cra
   assert.deepEqual([m.roles[0].calls, m.roles[0].turns, m.roles[0].read, m.roles[0].grep, m.roles[0].glob], [2, 6, 3, 1, 0]);
   assert.equal(m.footprint[0].precision, 1);
   assert.equal(m.footprint[0].recall, 0.25);
+  assert.equal(m.footprint[0].declaredTasks, 0);
   const text = renderExploration(m);
+  const withDeclared = explorationMetrics([{ ...base, harness: 'v1', role: 'worker', costUsd: 0, turns: 0, outcome: 'merged', footprint: { planned: [], changed: ['a', 'b'], declared: ['a'] } }]);
+  assert.deepEqual([withDeclared.footprint[0].declaredTasks, withDeclared.footprint[0].declaredPrecision, withDeclared.footprint[0].declaredRecall], [1, 1, 0.5]);
+  assert.match(renderExploration(withDeclared), /declared\s+1\s+precision 100%\s+recall 50%/);
   assert.ok(!text.includes('NaN'));
   assert.ok(renderExploration(explorationMetrics([])).includes('no agent calls'));
 });

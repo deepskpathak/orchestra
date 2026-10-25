@@ -49,6 +49,7 @@ export interface Task {
   description: string;
   acceptance: string[];
   deps: string[];
+  footprint?: { files: string[]; symbols?: string[] }; // planner-declared files and symbols (sanitised)
   status: TaskStatus;
   attempts: number;
   branch?: string;
@@ -83,6 +84,7 @@ export interface Run {
   endedAt?: number;
   integrationBranch?: string;
   baseRef?: string;
+  atlasSha?: string; // commit the Repo Atlas was built at, when context.atlas is enabled
   tasks: Task[];
   costUsd: number;
   satisfaction?: number;
@@ -149,7 +151,7 @@ export interface LedgerRow {
   cacheReadTokens?: number;
   cacheWriteTokens?: number;
   toolCounts?: Record<string, number>; // tool_use blocks by tool name; absent on legacy rows
-  footprint?: { planned: string[]; changed: string[] }; // on merged outcome rows: planned vs changed files
+  footprint?: { planned: string[]; changed: string[]; declared?: string[] }; // on merged outcome rows: planned (named in the task text) vs changed files; declared = planner footprint files that exist
   outcome?: string; // e.g. "pass", "fail", "merged", "conflict"
   score?: number;
 }
@@ -190,6 +192,14 @@ export interface ProjectConfig {
   fastPath: {
     enabled: boolean; // small single-concern goals get one task and no hidden-scenario requirement
     maxGoalChars: number;
+  };
+  context: {
+    atlas: {
+      enabled: boolean; // Repo Atlas: commit-keyed code graph (W9)
+      mapTokens: number; // budget for the L0 ranked map
+      packs: boolean; // L1 task packs in worker prompts
+      packTokens: number; // budget for one L1 pack
+    };
   };
   evolve: {
     every: number; // auto-evolve after every N completed runs, 0 disables

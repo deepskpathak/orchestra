@@ -583,3 +583,104 @@ test('ablate contrastive: repair stays single-worker even with contrastive enabl
   assert.ok(!seenOff.some((r) => r.meta?.variant));
   assert.equal(run.tasks.find((t) => t.id === 'T2')!.attempts, 2);
 });
+
+// ---- W9 Repo Atlas wiring ----
+
+function atlasRepo(atlas: Record<string, unknown> = {}) {
+  const store = tempRepo({ context: { atlas: { ...DEFAULT_PROJECT_CONFIG.context.atlas, ...atlas } } } as never);
+  mkdirSync(join(store.root, 'src'), { recursive: true });
+  writeFileSync(join(store.root, 'src', 'core.ts'), 'export function coreThing(x: number): number { return x; }\n');
+  writeFileSync(join(store.root, 'src', 'cli.ts'), "import { coreThing } from './core.ts';\nexport function runCli(): number { return coreThing(1); }\n");
+  execFileSync('git', ['add', '-A'], { cwd: store.root });
+  execFileSync('git', ['commit', '-qm', 'src'], { cwd: store.root });
+  return store;
+}
+
+function spy(opts: Parameters<typeof fakeRunner>[0] = {}) {
+  const inner = fakeRunner(opts);
+  const seen: { role: string; task?: string; prompt: string }[] = [];
+  const runner: Runner = (req: AgentRequest) => {
+    seen.push({ role: req.role, task: req.meta?.task, prompt: req.prompt });
+    return inner(req);
+  };
+  return { runner, seen };
+}
+
+test('atlas off: no map or pack, first-300 list stays', async () => {
+  const store = atlasRepo();
+  const { runner, seen } = spy({ footprints: true });
+  const run = await runGoal({ store, runner, goal: 'core thing' });
+  assert.equal(run.atlasSha, undefined);
+  assert.match(seen.find((s) => s.role === 'planner')!.prompt, /REPOSITORY FILES \(first/);
+  for (const s of seen) assert.doesNotMatch(s.prompt, /REPOSITORY MAP|## Task pack/);
+});
+
+test('atlas enabled: planner gets the map, worker prefixes are byte-identical, judge has no pack', async () => {
+  const store = atlasRepo({ enabled: true, packs: true });
+  const { runner, seen } = spy({ footprints: true });
+  const run = await runGoal({ store, runner, goal: 'core thing' });
+  assert.equal(run.status, 'done');
+  assert.match(run.atlasSha ?? '', /^[0-9a-f]{40}$/);
+  const planner = seen.find((s) => s.role === 'planner')!.prompt;
+  assert.match(planner, /REPOSITORY MAP:\n# Repo map/);
+  assert.doesNotMatch(planner, /REPOSITORY FILES \(first/);
+
+  const workers = seen.filter((s) => s.role === 'worker');
+  assert.ok(workers.length >= 4);
+  const prefixOf = (p: string) => p.slice(0, p.indexOf('YOUR TASK '));
+  const prefixes = new Set(workers.map((w) => prefixOf(w.prompt)));
+  assert.equal(prefixes.size, 1, 'prefix is byte-identical across workers');
+  const [prefix] = [...prefixes];
+  assert.match(prefix, /REPOSITORY MAP:\n# Repo map/);
+  assert.doesNotMatch(prefix, /## Task pack/);
+  for (const w of workers) {
+    const body = w.prompt.slice(prefix.length);
+    assert.match(body, /## Task pack/);
+    assert.doesNotMatch(body, /REPOSITORY MAP/);
+  }
+  // later tasks see earlier merges as changed since start
+  assert.match(workers.find((w) => w.task === 'T4')!.prompt, /fake\/T1\.txt/);
+  for (const j of seen.filter((s) => s.role === 'judge')) assert.doesNotMatch(j.prompt, /## Task pack|REPOSITORY MAP/);
+});
+
+test('atlas enabled without packs: map only', async () => {
+  const store = atlasRepo({ enabled: true });
+  const { runner, seen } = spy();
+  await runGoal({ store, runner, goal: 'core thing' });
+  for (const w of seen.filter((s) => s.role === 'worker')) {
+    assert.match(w.prompt, /REPOSITORY MAP/);
+    assert.doesNotMatch(w.prompt, /## Task pack/);
+  }
+});
+
+test('an atlas build error is logged and the run completes with the old prompts', async () => {
+  const store = atlasRepo({ enabled: true, packs: true });
+  writeFileSync(store.path('atlas'), 'not a directory'); // makes the cache write fail
+  const { runner, seen } = spy();
+  const run = await runGoal({ store, runner, goal: 'core thing' });
+  assert.equal(run.status, 'done');
+  assert.equal(run.atlasSha, undefined);
+  assert.ok(store.events(run.id).some((e) => e.kind === 'log' && /Atlas unavailable/.test(e.msg)));
+  assert.match(seen.find((s) => s.role === 'planner')!.prompt, /REPOSITORY FILES \(first/);
+  for (const s of seen) assert.doesNotMatch(s.prompt, /REPOSITORY MAP|## Task pack/);
+});
+
+test('ledger footprint.planned stays title-derived; planner footprint goes in declared, limited to tracked files', async () => {
+  const store = atlasRepo();
+  await runGoal({ store, runner: fakeRunner({ footprints: true }), goal: 'g' });
+  const row = store.ledgerRows().find((r) => r.outcome === 'merged' && r.task === 'T1')!;
+  assert.ok(!row.footprint!.planned.includes('fake/T1.txt'), 'declared-only path must not enter planned');
+  assert.deepEqual(row.footprint!.declared, ['README.md'], 'nonexistent fake/T1.txt dropped');
+});
+
+test('normalizeTasks sanitises footprints; schema allows them optionally', () => {
+  const [a, b] = normalizeTasks([
+    { id: 'T1', title: 'a', footprint: { files: ['./src//a.ts', 'src\\b.ts', '.orchestra/state/x.json', 'sub/.env.local', '.env', 'id_rsa', '../x', 7, 'k.pem'], symbols: ['f', 3, ''] } },
+    { id: 'T2', title: 'b' },
+  ]);
+  assert.deepEqual(a.footprint, { files: ['src/a.ts', 'src/b.ts'], symbols: ['f'] });
+  assert.equal(b.footprint, undefined);
+  const props = FAST_PLAN_SCHEMA.properties.tasks.items as { properties: Record<string, unknown>; required: string[] };
+  assert.ok('footprint' in props.properties);
+  assert.ok(!props.required.includes('footprint'));
+});

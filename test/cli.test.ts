@@ -91,3 +91,36 @@ test('bench flags reject a missing value or a flag-like value, and non-numeric -
     assert.match(r.stderr, msg, args.join(' '));
   }
 });
+
+test('atlas build and stats work on a real repo, hide .env, and reject unknown subcommands', async () => {
+  const { spawnSync, execFileSync } = await import('node:child_process');
+  const { existsSync, mkdtempSync, writeFileSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const dir = mkdtempSync(join(tmpdir(), 'orch-atlas-'));
+  const g = (...a: string[]) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@localhost', ...a], { cwd: dir, encoding: 'utf8' });
+  g('init', '-q');
+  writeFileSync(join(dir, 'a.ts'), 'export function alphaFn() { return 1; }\n');
+  writeFileSync(join(dir, '.env'), 'SECRET_TOKEN=abc123\n');
+  g('add', '-f', '-A');
+  g('commit', '-qm', 'init');
+  const sha = g('rev-parse', 'HEAD').trim();
+  const cli = join(PACKAGE_ROOT, 'bin', 'orchestra.ts');
+  const run = (...args: string[]) => spawnSync(process.execPath, [cli, 'atlas', ...args], { cwd: dir, encoding: 'utf8', timeout: 15000 });
+
+  const b = run('build');
+  assert.equal(b.status, 0, b.stderr);
+  assert.ok(existsSync(join(dir, '.orchestra', 'atlas', `${sha}.json`)));
+  assert.match(b.stdout, /1 files, [1-9]\d* symbols/);
+
+  const s = run('stats');
+  assert.equal(s.status, 0, s.stderr);
+  assert.match(s.stdout, /files\s+1\b/);
+  assert.match(s.stdout, /symbols\s+[1-9]/);
+  assert.doesNotMatch(s.stdout + b.stdout, /\.env|SECRET_TOKEN/);
+
+  for (const args of [['bogus'], []]) {
+    const r = run(...args);
+    assert.notEqual(r.status, 0);
+    assert.match(r.stderr, /Usage: orchestra atlas build/);
+  }
+});
