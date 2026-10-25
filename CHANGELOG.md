@@ -19,6 +19,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Evals audit: the solution-leakage check now compares goals and lessons with the added (`+`) lines of a reference diff only, whitespace-normalised. Quoting existing code (context or removed lines) in a goal is no longer flagged as a leak. Plain-text references still use every line.
 - Atlas: the atlas schema is now version 2 and persists `skipped` (oversized, binary or unreadable paths). Older caches are ignored and rebuilt, and incremental builds re-extract only changed and genuinely new paths instead of re-reading skipped files every time.
 - Atlas TS/JS extractor: class methods are only the lines at the class body's own indent (learned from the first member line, as the Python extractor does), so calls such as `emit({` or `describe('x', function () {` inside a method are no longer recorded as methods.
 - Atlas tests edges: the test subject is derived only from real test naming patterns (`.test`/`.spec`, `_test`, `test_` prefix, Java `Test`/`Tests`/`IT` after a lowercase letter or digit), so names like `EDIT.java` are no longer mangled, and a name-based edge is limited to the test's own directory or the subtree above its `tests/` directory instead of any directory in the repo.

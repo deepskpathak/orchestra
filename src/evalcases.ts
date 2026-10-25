@@ -104,12 +104,17 @@ export function regressionSuite(cases: EvalCase[]): EvalCase[] {
   return filterByTags(cases, [REGRESSION_TAG]);
 }
 
-/** Added lines of a unified diff, or every non-empty line for plain text, trimmed and long enough to be telling. */
+/**
+ * Added lines of a unified diff (context and removed lines are existing code a goal may legitimately quote), or every
+ * non-empty line for plain text. Lines are whitespace-normalised and must be long enough to be telling.
+ */
 export function significantLines(reference: string): string[] {
+  const lines = reference.split('\n');
+  const isDiff = lines.some((l) => /^(\+|diff --git |@@ )/.test(l));
   const out = new Set<string>();
-  for (const raw of reference.split('\n')) {
-    if (/^(\+\+\+|---|diff |index |@@)/.test(raw)) continue;
-    const line = raw.replace(/^\+/, '').trim();
+  for (const raw of lines) {
+    if (isDiff && (!raw.startsWith('+') || raw.startsWith('+++'))) continue;
+    const line = (isDiff ? raw.slice(1) : raw).replace(/\s+/g, ' ').trim();
     if (line.length >= MIN_SIGNIFICANT) out.add(line);
   }
   return [...out];

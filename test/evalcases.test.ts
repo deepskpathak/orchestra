@@ -61,6 +61,21 @@ test('significantLines keeps long added lines and skips diff headers', () => {
   assert.deepEqual(significantLines('diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n+short\n+const answer = computeTheAnswer(42);'), ['const answer = computeTheAnswer(42);']);
 });
 
+test('significantLines uses only added lines of a diff and normalises whitespace', () => {
+  const diff = ['diff --git a/x b/x', '--- a/x', '+++ b/x', '@@ -1,3 +1,3 @@', ' const existing = loadTheConfigFile();', '-const removed = oldImplementation();', '+const   added  =   newImplementation();'].join('\n');
+  assert.deepEqual(significantLines(diff), ['const added = newImplementation();']);
+  assert.deepEqual(significantLines('  plain   reference text that is long enough  '), ['plain reference text that is long enough']);
+});
+
+test('audit does not flag a goal quoting existing code from a context line, but flags a quoted added line', () => {
+  const reference = ['diff --git a/x b/x', '--- a/x', '+++ b/x', '@@ -1,2 +1,2 @@', ' const existing = loadTheConfigFile();', '-const removed = oldImplementation();', '+const added = newImplementation();'].join('\n');
+  const ok = { id: 'ctx', goal: 'The function const existing = loadTheConfigFile(); crashes on empty input', base: 'b', reference };
+  const bad = { id: 'added', goal: 'Please write const added = newImplementation(); in x', base: 'b', reference };
+  const removed = { id: 'removed', goal: 'Delete const removed = oldImplementation(); from x', base: 'b', reference };
+  assert.deepEqual(auditCases([ok, removed]), []);
+  assert.deepEqual(auditCases([bad]).map((f) => f.kind), ['goal-reference']);
+});
+
 test('audit flags diffs and quoted reference lines in goals, and quoted solutions in lessons', () => {
   const ref = '+const answer = computeTheAnswer(42);';
   const cases = [
