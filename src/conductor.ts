@@ -12,6 +12,7 @@ import { aggregatePanel, lineageFraming, pairwiseBothOrders, type PanelJudgeVote
 import { isExcludedPath, loadOrBuildAtlas, type Atlas } from './atlas.ts';
 import { buildTaskPack, renderMap } from './atlas-context.ts';
 import { plannedFiles } from './exploration.ts';
+import { buildContract, contractSha, unresolvedAmbiguities } from './contracts.ts';
 import { analyzeDiff, MONITOR_MARK, type IntegrityFlag } from './integrity.ts';
 import { loadHarness, type Harness } from './harness.ts';
 import { applyLessonEdits, editsFromResponse, expireDomain, formatLearnings, listDomains, normalizeDomain, readAllLearnings, readLearnings, GLOBAL } from './learnings.ts';
@@ -248,6 +249,7 @@ const PLAN_SCHEMA = {
           description: { type: 'string' },
           acceptance: { type: 'array', items: { type: 'string' } },
           deps: { type: 'array', items: { type: 'string' } },
+          invariants: { type: 'array', items: { type: 'string' } },
           footprint: {
             type: 'object',
             properties: { files: { type: 'array', items: { type: 'string' } }, symbols: { type: 'array', items: { type: 'string' } } },
@@ -256,6 +258,10 @@ const PLAN_SCHEMA = {
         },
         required: ['id', 'title', 'description', 'acceptance', 'deps'],
       },
+    },
+    ambiguities: {
+      type: 'array',
+      items: { type: 'object', properties: { question: { type: 'string' }, resolution: { type: 'string' } }, required: ['question'] },
     },
     scenarios: {
       type: 'array',
@@ -481,10 +487,21 @@ export class Conductor {
       schema: fp.fast ? FAST_PLAN_SCHEMA : PLAN_SCHEMA,
       tools: ['Read', 'Grep', 'Glob'],
     });
-    const out = extractJson(res) as { tasks?: any[]; scenarios?: Scenario[]; domain?: unknown } | undefined;
+    const out = extractJson(res) as { tasks?: any[]; scenarios?: Scenario[]; domain?: unknown; ambiguities?: unknown } | undefined;
     if (!res.ok || !out?.tasks?.length) throw new Error(`Planner failed: ${res.error ?? 'no tasks returned'}`);
 
+    // W4.3: an unresolved ambiguity blocks the plan before any task exists, so no worker starts.
+    if (cfg.verification.contracts.enabled) {
+      const open = unresolvedAmbiguities(out.ambiguities);
+      if (open.length) throw new Error(`Plan blocked by ${open.length} unresolved ambiguit${open.length === 1 ? 'y' : 'ies'}:\n${open.map((q) => `- ${q}`).join('\n')}`);
+    }
     run.tasks = normalizeTasks(out.tasks);
+    if (cfg.verification.contracts.enabled) {
+      const contract = buildContract(run.tasks);
+      const rel = `runs/${run.id}/contract.json`;
+      store.writeJson(rel, contract);
+      run.contract = { path: rel, sha256: contractSha(contract) };
+    }
     // One domain per run, so at most one new domain can appear per run.
     const domain = normalizeDomain(out.domain);
     if (domain && domain !== GLOBAL) run.domain = domain;
@@ -1273,6 +1290,7 @@ export function normalizeTasks(raw: any[]): Task[] {
       title: String(r.title ?? id),
       description: String(r.description ?? ''),
       acceptance: Array.isArray(r.acceptance) ? r.acceptance.map(String) : [],
+      ...(Array.isArray(r.invariants) && r.invariants.length ? { invariants: r.invariants.map(String) } : {}),
       deps: Array.isArray(r.deps) ? r.deps.map(String) : [],
       ...(footprint ? { footprint } : {}),
       status: 'pending',

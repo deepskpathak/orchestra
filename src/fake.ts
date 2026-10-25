@@ -8,7 +8,7 @@ import type { AgentRequest, AgentResult, Runner } from './agent.ts';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-export function fakeRunner(opts: { stepMs?: number; failFirstAttemptOf?: string[]; failAlways?: string[]; flagForHuman?: string[]; flagOnRepair?: string[]; tamper?: (req: AgentRequest) => boolean; judgeFailTimes?: number; contrastPick?: 'A' | 'B'; contrastScores?: { a: number; b: number }; footprints?: boolean } = {}): Runner {
+export function fakeRunner(opts: { stepMs?: number; failFirstAttemptOf?: string[]; failAlways?: string[]; flagForHuman?: string[]; flagOnRepair?: string[]; tamper?: (req: AgentRequest) => boolean; judgeFailTimes?: number; contrastPick?: 'A' | 'B'; contrastScores?: { a: number; b: number }; footprints?: boolean; ambiguities?: { question: string; resolution?: string }[] } = {}): Runner {
   const step = opts.stepMs ?? 0;
   const failFirst = new Set(opts.failFirstAttemptOf ?? ['T2']);
   const flagHuman = new Set(opts.flagForHuman ?? []);
@@ -51,6 +51,7 @@ export function fakeRunner(opts: { stepMs?: number; failFirstAttemptOf?: string[
               { id: 'T4', title: 'Docs', description: 'Document usage', acceptance: ['docs.txt exists'], deps: ['T2', 'T3'] },
             ].map((t) => (opts.footprints ? { ...t, footprint: { files: [`fake/${t.id}.txt`, 'README.md'] } } : t)),
             domain: 'cli',
+            ...(opts.ambiguities ? { ambiguities: opts.ambiguities } : {}),
             scenarios: [{ id: 'S1', given: 'a fresh repo', when: 'user runs the CLI', then: 'it prints help' }],
           },
           'planned',

@@ -70,7 +70,7 @@ M4 Verification. Every part is off by default; later releases fill in the behavi
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
-| `verification.contracts.enabled` | boolean | `false` | The planner writes acceptance criteria as a machine-readable contract that workers can only mark passing, never edit. Unresolved ambiguities block the plan. |
+| `verification.contracts.enabled` | boolean | `false` | The planner writes acceptance criteria as a machine-readable contract that workers can only mark passing, never edit. Unresolved ambiguities (a planner `ambiguities` entry with an empty `resolution`) fail the run during planning, before any worker starts. The frozen feature list is written to `.orchestra/runs/<runId>/contract.json` and its sha256 is recorded on `Run.contract`; the guard denies agent writes to it. |
 | `verification.panel.enabled` | boolean | `false` | Score with a panel of judges and record per-judge votes and disagreement. |
 | `verification.panel.judges` | `{model, lineage?}[]` | `[]` | Panel members. `lineage` names the prompt variant used for that judge. |
 | `verification.panel.escalateModel` | string or null | `null` | Model that breaks split votes. `null` uses the harness judge model. |
