@@ -489,14 +489,31 @@ const TEST_PATH = /(^|\/)(tests?|__tests__|spec)\//;
 
 export function isTestPath(path: string): boolean {
   const b = baseName(path);
-  return TEST_PATH.test(path) || /\.(test|spec)\.\w+$/.test(b) || /_test\.\w+$/.test(b) || /^test_.*\.py$/.test(b) || /(Test|Tests|IT)\.java$/.test(b);
+  return TEST_PATH.test(path) || /\.(test|spec)\.\w+$/.test(b) || /_test\.\w+$/.test(b) || /^test_.*\.py$/.test(b) || /[a-z0-9](Test|Tests|IT)\.java$/.test(b);
 }
 
-// "foo.test.ts" / "test_foo.py" / "foo_test.go" / "FooTest.java" -> "foo" / "Foo"
+// "foo.test.ts" / "foo.spec.js" / "test_foo.py" / "foo_test.go" / "FooTest.java" -> "foo" / "Foo".
+// A suffix is stripped only when the name matches a real test naming pattern, so "Edit.java" or
+// "Credit.ts" keep their names. Null when the file is not named like a test of a single subject.
 function testSubject(path: string): string | null {
-  const b = baseName(path).replace(/\.[^.]+$/, '');
-  const s = b.replace(/\.(test|spec)$/, '').replace(/_test$/, '').replace(/^test_/, '').replace(/(Tests?|IT)$/, '');
-  return s && s !== b ? s : s || null;
+  const b = baseName(path);
+  let m: RegExpExecArray | null;
+  if ((m = /^(.+)\.(?:test|spec)\.\w+$/.exec(b))) return m[1];
+  if ((m = /^(.+)_test\.\w+$/.exec(b))) return m[1];
+  if ((m = /^test_(.+)\.py$/.exec(b))) return m[1];
+  if ((m = /^(.+?[a-z0-9])(?:Tests?|IT)\.java$/.exec(b))) return m[1];
+  return null;
+}
+
+// Where a test's subject may live: the test's own dir, or, when the test sits in a tests/ dir, the
+// subtree of that dir's parent. So test/foo.test.ts finds src/foo.ts, pkg/tests/foo.test.ts only
+// finds foo under pkg/, and src/a/foo.test.ts only finds src/a/foo.ts.
+function testScope(path: string): { dir: string; subtree: boolean } {
+  const segs = posixDir(path).split('/').filter(Boolean);
+  for (let i = segs.length - 1; i >= 0; i--) {
+    if (/^(tests?|__tests__|spec)$/.test(segs[i])) return { dir: segs.slice(0, i).join('/'), subtree: true };
+  }
+  return { dir: segs.join('/'), subtree: false };
 }
 
 const GENERIC_STEMS = new Set(['index', 'main', 'mod', 'lib', 'init', '__init__', 'utils', 'helpers']);
@@ -564,7 +581,14 @@ export function buildGraph(files: Record<string, FileEntry>): { nodes: AtlasNode
     }
     if (test) {
       const subject = testSubject(p);
-      if (subject && !GENERIC_STEMS.has(subject)) for (const t of bySubject.get(subject) ?? []) addEdge(p, t, 'tests');
+      if (subject && !GENERIC_STEMS.has(subject)) {
+        const scope = testScope(p);
+        for (const t of bySubject.get(subject) ?? []) {
+          const td = posixDir(t);
+          const inScope = scope.subtree ? scope.dir === '' || td === scope.dir || td.startsWith(scope.dir + '/') : td === scope.dir;
+          if (inScope) addEdge(p, t, 'tests');
+        }
+      }
     }
   }
   return { nodes, edges };
