@@ -88,8 +88,8 @@ export function runOracles(i: {
   let diff: DifferentialResult | undefined;
   if (i.differential && probes.length) {
     const base = join(tmpdir(), `orchestra-oracle-base-${process.pid}-${Date.now()}`);
-    g.git(i.repoRoot, 'worktree', 'add', '-q', '--detach', base, i.baseRef);
     try {
+      g.git(i.repoRoot, 'worktree', 'add', '-q', '--detach', base, i.baseRef);
       const byName = new Map(probes.map((p) => [rel(p), p]));
       diff = differential((n) => runProbe(base, byName.get(n)!, i.env), (n) => runProbe(i.tree, byName.get(n)!, i.env), [...byName.keys()]);
     } finally {

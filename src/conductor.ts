@@ -1040,9 +1040,20 @@ export class Conductor {
 
   // W4.4 (opt-in): oracle tests written by a separate session into a run-owned directory outside the
   // worker worktree, then executed against the worker's tree. Returns null when oracles do not apply.
+  // Any failure here (git worktree add, mkdir, a missing base ref) is logged and degrades to no oracle
+  // evidence, the same way a failed mutation pass does, so it can never abort judging.
   private async oraclePass(task: Task, cwd: string, base: string): Promise<OracleOutcome | null> {
+    if (!this.store.config().verification.oracles.enabled) return null;
+    try {
+      return await this.runOraclePass(task, cwd, base);
+    } catch (e) {
+      this.emit('log', `${task.id} oracles failed, grading with no oracle evidence: ${(e as Error).message.split('\n')[0]}`, undefined, task.id);
+      return null;
+    }
+  }
+
+  private async runOraclePass(task: Task, cwd: string, base: string): Promise<OracleOutcome | null> {
     const cfg = this.store.config().verification.oracles;
-    if (!cfg.enabled) return null;
     const invariants = task.invariants ?? [];
     if (!invariants.length) {
       this.emit('log', `${task.id} oracles skipped: the contract has no invariants for this task`, undefined, task.id);

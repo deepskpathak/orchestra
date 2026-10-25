@@ -9,6 +9,7 @@ import * as g from '../src/git.ts';
 import { runGoal, normalizeTasks, shouldEscalate, missingTestIssues, preJudgeIssues, fastPathDecision, FAST_PLAN_SCHEMA, panelMajorityVerdict, buildVerdict } from '../src/conductor.ts';
 import { DEFAULT_PROJECT_CONFIG } from '../src/store.ts';
 import { fakeRunner } from '../src/fake.ts';
+import { runOracles } from '../src/oracle-run.ts';
 import { readLearnings, writeLearnings } from '../src/learnings.ts';
 import { tempRepo } from './helpers.ts';
 
@@ -888,6 +889,33 @@ test('oracles: a failed or empty oracle session degrades to the normal judge ins
     assert.ok(!t1.verdict!.issues.some((i) => /oracle/.test(i)), `${name}: ${t1.verdict!.issues.join('\n')}`);
     assert.ok(store.events(run.id).some((e) => log.test(e.msg) && /no oracle evidence/.test(e.msg)), name);
   }
+});
+
+test('oracles: an exception in the oracle pass is logged and judging continues', async () => {
+  const store = noTestRepo({});
+  const base = fakeRunner({ failFirstAttemptOf: [], invariants: ['double(x) equals 2x'], oracleFiles: { 'invariants.test.mjs': ORACLE_TEST } });
+  // Planner runs in the integration worktree: <root>/.orchestra/worktrees/<runId>/_integration. Squat the oracles dir with a file so mkdir throws.
+  const runner: Runner = async (req) => {
+    if (req.role === 'planner') {
+      const runId = req.cwd.split('/').slice(-2)[0];
+      mkdirSync(store.path('runs', runId), { recursive: true });
+      writeFileSync(store.path('runs', runId, 'oracles'), 'not a directory');
+    }
+    return base(req);
+  };
+  const run = await runGoal({ store, runner, goal: 'g' });
+  assert.equal(run.status, 'done');
+  assert.ok(run.tasks.every((t) => t.status === 'merged'));
+  assert.ok(store.events(run.id).some((e) => /oracles failed, grading with no oracle evidence/.test(e.msg)));
+});
+
+test('runOracles: a bad base ref throws but leaves no base worktree behind', () => {
+  const store = tempRepo();
+  const dir = mkdtempSync(join(tmpdir(), 'orchestra-oracle-dir-'));
+  writeFileSync(join(dir, 'probe-a.mjs'), 'console.log(1);\n');
+  const before = execFileSync('git', ['worktree', 'list'], { cwd: store.root, encoding: 'utf8' });
+  assert.throws(() => runOracles({ repoRoot: store.root, baseRef: 'no-such-ref', tree: store.root, taskBase: g.head(store.root), oracleDir: dir, env: { seed: 1, propertyRuns: 1 }, differential: true, excludeWorkerTests: true }));
+  assert.equal(execFileSync('git', ['worktree', 'list'], { cwd: store.root, encoding: 'utf8' }), before);
 });
 
 test('oracles disabled: no oracle session and unchanged call counts', async () => {

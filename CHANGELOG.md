@@ -26,6 +26,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Oracles: an exception in the oracle pass (git worktree add, creating the oracle directory, a missing base ref) is now caught, logged and treated as no oracle evidence, like a failed mutation pass, instead of aborting judging. The throwaway base worktree is created inside the `try`, so it is always cleaned up.
 - Oracles: when the oracle author session fails or writes no files, the task is graded without oracle evidence (the log message already said so). Previously the empty result was recorded as a failed independent run and failed a healthy task.
 - Budget cap: a validation cut short by `evolve.budgetUsd` (or an infrastructure failure) now saves its finished per-case results on the candidate (`partialEval` in `archive.json`). The next cycle resumes that candidate while the incumbent is unchanged, skipping the evolver call and replaying only the unfinished cases, instead of discarding the work and repaying for it.
 - Cascade smoke test: a candidate is rejected for failing the smoke case only when the incumbent passes it (one baseline replay, cached for the cycle). Smoke rejections carry `rejectKind: "smoke"` in `archive.json` and are no longer fed back to the evolver as "previously rejected, do not repeat".
