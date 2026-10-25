@@ -402,7 +402,7 @@ async function evolveCycle(store: Store, runner: Runner, log: (msg: string) => v
   const cfg = store.config();
   const usePareto = !!cfg.evolve.pareto?.enabled;
   // Variants derive from a Pareto-selected parent; evaluation and promotion still compare against the incumbent.
-  const parent = (usePareto ? selectParent(readArchive(store))?.version : null) ?? incumbent;
+  const parent = (usePareto ? selectParent(readArchive(store), undefined, (v) => existsSync(store.path('harness', v)))?.version : null) ?? incumbent;
   const h = loadHarness(store, incumbent);
   const m = metrics(store);
   const blocked = agreementBlock(storeCalibration(store), incumbent, cfg.evolve.minJudgeAgreement);

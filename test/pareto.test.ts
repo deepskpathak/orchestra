@@ -79,3 +79,19 @@ test('archive persists across two simulated cycles with per-case detail; old ent
   const front = paretoFront(readArchive(store)).map((e) => e.version);
   assert.deepEqual(front, ['v3']);
 });
+
+test('selectParent skips rejected and retired entries even when they win a case', () => {
+  const rejected = entry('v2', 'v1', 0.9, { c1: 1, c2: 1 }, { status: 'rejected' });
+  const retired = entry('v3', 'v1', 0.8, { c1: 1, c2: 1 }, { status: 'retired' });
+  const ok = entry('v1', null, 0.5, { c1: 0.5, c2: 0.5 }, { status: 'promoted' });
+  assert.equal(selectParent([rejected, retired, ok])!.version, 'v1');
+  assert.equal(selectParent([rejected, retired]), null);
+});
+
+test('selectParent skips entries whose harness directory is gone', () => {
+  const gone = entry('v2', 'v1', 0.9, { c1: 1, c2: 1 });
+  const ok = entry('v1', null, 0.5, { c1: 0.5, c2: 0.5 }, { status: 'promoted' });
+  assert.equal(selectParent([gone, ok])!.version, 'v2');
+  assert.equal(selectParent([gone, ok], undefined, (v) => v !== 'v2')!.version, 'v1');
+  assert.equal(selectParent([gone], undefined, () => false), null);
+});

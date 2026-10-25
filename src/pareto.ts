@@ -49,12 +49,17 @@ export function descendantSuccess(entries: ArchiveEntry[], version: string): num
   return entries.filter((e) => e.parent === version && e.evalScore !== null && e.evalScore > parent.evalScore! + EPS).length;
 }
 
-// Pick a parent from the front: most Pareto wins plus successful descendants, then higher score,
+// Statuses a variant may be bred from. Rejected and retired variants are kept for history only.
+export const PARENT_STATUSES: ArchiveEntry['status'][] = ['promoted', 'candidate'];
+
+// Pick a parent from the front of the eligible entries (status promoted or candidate, and `exists` when given, for
+// example a harness directory still on disk): most Pareto wins plus successful descendants, then higher score,
 // then version name. rng only breaks exact ties; without it the first tied entry wins.
-export function selectParent(entries: ArchiveEntry[], rng?: () => number): ArchiveEntry | null {
-  const front = paretoFront(entries);
+export function selectParent(entries: ArchiveEntry[], rng?: () => number, exists?: (version: string) => boolean): ArchiveEntry | null {
+  const eligible = entries.filter((e) => PARENT_STATUSES.includes(e.status) && (!exists || exists(e.version)));
+  const front = paretoFront(eligible);
   if (!front.length) return null;
-  const wins = paretoWins(entries);
+  const wins = paretoWins(eligible);
   const rank = (e: ArchiveEntry) => [(wins.get(e.version) ?? 0) + descendantSuccess(entries, e.version), e.evalScore ?? -Infinity];
   const sorted = [...front].sort((a, b) => {
     const [ra, sa] = rank(a);
