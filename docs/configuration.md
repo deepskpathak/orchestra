@@ -7,7 +7,7 @@ Orchestra has two config layers, both plain JSON:
 
 ## Project config (`.orchestra/config.json`)
 
-Defaults come from `DEFAULT_PROJECT_CONFIG` in `src/store.ts`. Missing keys fall back to the defaults, and the `judgeTiers`, `preJudge`, `contrastive`, `fastPath` and `evolve` objects are merged key by key, so older configs get the defaults for newer keys automatically. On `orchestra init`, `testCommand` is filled in by auto-detection (it stays `null` if nothing is detected).
+Defaults come from `DEFAULT_PROJECT_CONFIG` in `src/store.ts`. Missing keys fall back to the defaults, and the `judgeTiers`, `preJudge`, `contrastive`, `fastPath`, `verification` and `evolve` objects are merged key by key, so older configs get the defaults for newer keys automatically. On `orchestra init`, `testCommand` is filled in by auto-detection (it stays `null` if nothing is detected).
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
@@ -21,6 +21,7 @@ Defaults come from `DEFAULT_PROJECT_CONFIG` in `src/store.ts`. Missing keys fall
 | `preJudge` | object | see below | Deterministic checks before any judge call. |
 | `fastPath` | object | see below | Single-task planning for small goals. |
 | `contrastive` | object | see below | Two-worker contrastive repair. |
+| `verification` | object | see below | M4 Verification checks, all off by default. |
 | `context` | object | see below | Repo context settings (`context.atlas`). |
 | `evolve` | object | see below | Self-improvement settings. |
 
@@ -62,6 +63,29 @@ Off by default. When enabled and the goal is short and has no list structure (nu
 |---|---|---|---|
 | `fastPath.enabled` | boolean | `false` | Turn the fast path on. |
 | `fastPath.maxGoalChars` | number | `400` | Goals longer than this never take the fast path. |
+
+### `verification`
+
+M4 Verification. Every part is off by default; later releases fill in the behaviour behind each switch. Nested objects are merged key by key, so a partial block such as `{"mutation": {"floor": 0.8}}` keeps all other defaults. Panel and oracle calls reuse the judge role with a different model, there is no new role.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `verification.contracts.enabled` | boolean | `false` | The planner writes acceptance criteria as a machine-readable contract that workers can only mark passing, never edit. Unresolved ambiguities block the plan. |
+| `verification.panel.enabled` | boolean | `false` | Score with a panel of judges and record per-judge votes and disagreement. |
+| `verification.panel.judges` | `{model, lineage?}[]` | `[]` | Panel members. `lineage` names the prompt variant used for that judge. |
+| `verification.panel.escalateModel` | string or null | `null` | Model that breaks split votes. `null` uses the harness judge model. |
+| `verification.agenticJudge.enabled` | boolean | `false` | The judge runs builds, tests and scenario checks per requirement instead of only reading the diff. |
+| `verification.agenticJudge.checkTimeoutMs` | number | `120000` | Timeout for one check command. |
+| `verification.oracles.enabled` | boolean | `false` | Grade repos without tests with oracles the worker did not write. |
+| `verification.oracles.model` | string or null | `null` | Model that writes oracle tests. `null` uses the judge model, never the worker's. |
+| `verification.oracles.propertyRuns` | number | `50` | Cases per property-based check. |
+| `verification.oracles.seed` | number | `1` | Property test seed, fixed so runs reproduce. |
+| `verification.oracles.differential` | boolean | `true` | Compare unchanged behaviour against the base commit. |
+| `verification.oracles.excludeWorkerTests` | boolean | `true` | A worker's own tests never count towards its grade. |
+| `verification.mutation.enabled` | boolean | `false` | Report a mutation score per run. |
+| `verification.mutation.floor` | number | `0.6` | Minimum share of mutants that tests and scenarios must kill (0 to 1). |
+| `verification.mutation.maxMutants` | number | `20` | Cap on mutants generated per run. |
+| `verification.mutation.failBelowFloor` | boolean | `false` | Fail the run when the score is under the floor. `false` reports only. |
 
 ### `context.atlas`
 
