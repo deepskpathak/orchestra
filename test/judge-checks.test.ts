@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { runScenarioChecks, executedChecksSection } from '../src/judge-checks.ts';
 import { aggregateCriteria, buildVerdict, judgePrompt } from '../src/conductor.ts';
+import * as g from '../src/git.ts';
 import type { Task } from '../src/types.ts';
 
 const sc = [
@@ -32,7 +33,14 @@ const base = { task, scenarios: sc, workerText: 'w', tests: null, diff: 'D' };
 
 test('judgePrompt agentic adds EXECUTED CHECKS and evidence instruction; off equals previous output', () => {
   const off = judgePrompt(base);
-  assert.doesNotMatch(off.prefix + off.body, /EXECUTED CHECKS|evidence/);
+  assert.deepEqual(off, judgePrompt({ ...base, agentic: undefined }));
+  // Literal copy of the pre-W4.2 output.
+  assert.deepEqual(off, {
+    prefix: 'HIDDEN SCENARIOS for the whole goal (judge only the parts this task is responsible for):\n' +
+      '- S1: GIVEN g WHEN w THEN t\n- S2: GIVEN g WHEN w THEN t\n- S3: GIVEN g WHEN w THEN t\n\n' +
+      'Also return criteria: one entry per acceptance criterion, in order, each with pass, score and a short note.',
+    body: 'TASK T1: t\nd\n\nACCEPTANCE CRITERIA:\n- a\n\nWORKER SUMMARY (unverified):\nw\n\nTEST RESULT: no test command configured\n\nDIFF vs base:\nD',
+  });
   const on = judgePrompt({ ...base, agentic: [{ id: 'S1', command: 'echo one', ok: true, exit: 0, tail: 'one' }] });
   assert.match(on.body, /EXECUTED CHECKS[\s\S]*S1[\s\S]*PASSED/);
   assert.match(on.prefix, /evidence/);
@@ -50,4 +58,19 @@ test('aggregateCriteria keeps evidence; no-evidence note only in agentic mode', 
   const on = buildVerdict({ pass: true, score: 1, summary: '', issues: [], criteria: crit }, null, 0.5, undefined, true);
   assert.equal(on.pass, true);
   assert.deepEqual(on.issues, ['Criterion passed without executed evidence: b']);
+});
+
+test('runScenarioChecks reuses the supplied tests result instead of re-running the test command', () => {
+  const ran: string[] = [];
+  const res = runScenarioChecks({
+    cwd: '/x', scenarios: sc, testCommand: 'npm test', testsResult: { ok: false, exit: 3, tail: 'red' }, timeoutMs: 1,
+    exec: (_c, cmd) => { ran.push(cmd); return { ok: true, tail: '' }; },
+  });
+  assert.deepEqual(ran, ['echo one', 'boom']);
+  assert.deepEqual(res.at(-1), { id: 'tests', command: 'npm test', ok: false, exit: 3, tail: 'red' });
+});
+
+test('git.runTests reports the real exit code', () => {
+  assert.equal(g.runTests(process.cwd(), 'exit 7').exit, 7);
+  assert.equal(g.runTests(process.cwd(), 'true').exit, 0);
 });

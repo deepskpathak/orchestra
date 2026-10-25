@@ -16,18 +16,24 @@ export type CheckExec = (cwd: string, command: string, timeoutMs: number) => { o
 const TAIL_CHARS = 1200;
 
 // Runs every scenario that has a check command, then the test command (when given). Scenarios without a check are skipped.
-export function runScenarioChecks(i: { cwd: string; scenarios: Scenario[]; testCommand?: string; timeoutMs: number; exec: CheckExec }): CheckResult[] {
+export function runScenarioChecks(i: { cwd: string; scenarios: Scenario[]; testCommand?: string; testsResult?: { ok: boolean; exit?: number | null; tail: string } | null; timeoutMs: number; exec: CheckExec }): CheckResult[] {
   const jobs: { id: string; command: string }[] = [];
   for (const s of i.scenarios) if (s.check && s.check.trim()) jobs.push({ id: s.id, command: s.check });
-  if (i.testCommand) jobs.push({ id: 'tests', command: i.testCommand });
-  return jobs.map((j) => {
+  const run = (j: { id: string; command: string }): CheckResult => {
     try {
       const r = i.exec(i.cwd, j.command, i.timeoutMs);
       return { id: j.id, command: j.command, ok: r.ok, exit: r.exit ?? (r.ok ? 0 : null), tail: r.tail.slice(-TAIL_CHARS) };
     } catch (err) {
       return { id: j.id, command: j.command, ok: false, exit: null, tail: `check could not run: ${(err as Error).message}` };
     }
-  });
+  };
+  const results = jobs.map(run);
+  // The conductor already ran the test command for the TEST RESULT section, so reuse it instead of running it twice.
+  if (i.testCommand) {
+    const r = i.testsResult;
+    results.push(r ? { id: 'tests', command: i.testCommand, ok: r.ok, exit: r.exit ?? (r.ok ? 0 : null), tail: r.tail.slice(-TAIL_CHARS) } : run({ id: 'tests', command: i.testCommand }));
+  }
+  return results;
 }
 
 export function executedChecksSection(results: CheckResult[]): string {

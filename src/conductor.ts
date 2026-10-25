@@ -948,7 +948,7 @@ export class Conductor {
         diff: g.diffSince(cwd, base),
         tools: this.harness.guidance.tools,
         checklist: this.harness.guidance.checklist,
-        agentic: agentic ? runScenarioChecks({ cwd, scenarios: this.scenarios, testCommand: cfg.testCommand, timeoutMs: agentic.checkTimeoutMs, exec: (d, c, t) => g.runTests(d, c, t) }) : undefined,
+        agentic: agentic ? runScenarioChecks({ cwd, scenarios: this.scenarios, testCommand: cfg.testCommand, testsResult: tests, timeoutMs: agentic.checkTimeoutMs, exec: (d, c, t) => g.runTests(d, c, t) }) : undefined,
       });
     const prompt = joinPrompt(built);
     const oracle = await this.oraclePass(task, cwd, base);

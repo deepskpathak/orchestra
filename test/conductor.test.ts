@@ -886,3 +886,23 @@ test('oracles disabled: no oracle session and unchanged call counts', async () =
   assert.equal(off, 5, 'four tasks plus one repair judge, no oracle sessions');
   assert.ok(on > off);
 });
+
+// ---------- agentic judge (W4.2) ----------
+
+test('agentic judge: failing scenario check and its exit code reach the judge prompt', async () => {
+  const seen: AgentRequest[] = [];
+  const base = fakeRunner({ failFirstAttemptOf: [] });
+  const runner: Runner = async (req) => {
+    seen.push(req);
+    if (req.role === 'planner') {
+      return { ok: true, text: '', costUsd: 0, turns: 1, durationMs: 1, structured: { tasks: [{ id: 'T1', title: 'a', description: 'a', acceptance: ['c1'], deps: [] }], scenarios: [{ id: 'S1', given: 'g', when: 'w', then: 't', check: 'echo bad >&2; exit 4' }] } };
+    }
+    return base(req);
+  };
+  const store = tempRepo({ concurrency: 1, testCommand: 'true', verification: { ...DEFAULT_PROJECT_CONFIG.verification, agenticJudge: { enabled: true, checkTimeoutMs: 20000 } } });
+  await runGoal({ store, runner, goal: 'g' });
+  const judge = seen.find((r) => r.role === 'judge')!;
+  assert.match(judge.prompt, /EXECUTED CHECKS/);
+  assert.match(judge.prompt, /S1: `echo bad >&2; exit 4` FAILED \(exit 4\)/);
+  assert.match(judge.prompt, /tests: `true` PASSED \(exit 0\)/);
+});
