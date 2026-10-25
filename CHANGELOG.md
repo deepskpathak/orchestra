@@ -19,6 +19,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Evals harvest: the human-fix diff is read from git's stdout only (stderr no longer leaks into the stored reference) and `evals add --from-run ... --fix` now fails with a clear message when git fails or the fix commit does not descend from the run's base, instead of storing git's error text or an unrelated diff as the reference.
 - Evals audit: the solution-leakage check now compares goals and lessons with the added (`+`) lines of a reference diff only, whitespace-normalised. Quoting existing code (context or removed lines) in a goal is no longer flagged as a leak. Plain-text references still use every line.
 - Atlas: the atlas schema is now version 2 and persists `skipped` (oversized, binary or unreadable paths). Older caches are ignored and rebuilt, and incremental builds re-extract only changed and genuinely new paths instead of re-reading skipped files every time.
 - Atlas TS/JS extractor: class methods are only the lines at the class body's own indent (learned from the first member line, as the Python extractor does), so calls such as `emit({` or `describe('x', function () {` inside a method are no longer recorded as methods.

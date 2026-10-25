@@ -15,7 +15,7 @@ import { evaluate, evolutionDue, evolve, harvest, listEvals, metrics } from './e
 import { DEFAULT_RATIOS, splitEvals } from './evalsets.ts';
 import { REGRESSION_TAG, auditCases, buildAddedCase, buildHarvestedCase, filterByTags, formatFindings } from './evalcases.ts';
 import { fakeRunner } from './fake.ts';
-import { commitExists, excludeOrchestra, tryGit } from './git.ts';
+import { commitExists, excludeOrchestra, fixDiff, tryGit } from './git.ts';
 import { guardMain } from './guard.ts';
 import { GLOBAL, lessonAblation, listDomains, readAllLearnings, readLearnings } from './learnings.ts';
 import { validNetwork } from './container.ts';
@@ -526,7 +526,7 @@ function cmdEvalsAdd(args: string[], harvestAlias: boolean): void {
       const run = store.loadRun(fromRun);
       if (!run) die(`No run ${fromRun} in this repo`);
       if (!commitExists(root, fix)) die(`Fix commit "${fix}" does not exist in this repo`);
-      c = buildHarvestedCase(run, fix, (b, f) => tryGit(root, 'diff', b, f).out, store.config().testCommand, existing, Date.now());
+      c = buildHarvestedCase(run, fix, (b, f) => fixDiff(root, b, f), store.config().testCommand, existing, Date.now());
     } else {
       const goal = positional.join(' ');
       const baseRef = one('base') ?? 'HEAD';

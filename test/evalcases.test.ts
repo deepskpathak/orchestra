@@ -170,6 +170,28 @@ test('evals add --from-run harvests a failed run with the human fix as reference
   assert.match(cli(dir, 'add', '--fix', fix).stderr, /needs both/);
 });
 
+test('evals add --from-run errors clearly when the fix does not descend from the run base, and uses stdout only', () => {
+  const { dir, head, store } = repo();
+  execFileSync('git', ['checkout', '-q', '-b', 'side'], { cwd: dir });
+  writeFileSync(join(dir, 'a.txt'), 'one\nside branch change here\n');
+  execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qam', 'side'], { cwd: dir });
+  const side = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf8' }).trim();
+  // The run started from a commit the fix does not descend from.
+  execFileSync('git', ['checkout', '-q', head], { cwd: dir });
+  writeFileSync(join(dir, 'b.txt'), 'diverged base\n');
+  execFileSync('git', ['add', '-A'], { cwd: dir });
+  execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'other'], { cwd: dir });
+  const other = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf8' }).trim();
+  store.saveRun(run({ id: 'rdiv', baseRef: other }));
+  const r = cli(dir, 'add', '--from-run', 'rdiv', '--fix', side);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /does not descend from base/);
+  assert.equal(existsSync(join(dir, '.orchestra', 'evals', 'h-rdiv.json')), false);
+  // A tree object is a valid object but not a commit that exists as a fix.
+  const tree = execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { cwd: dir, encoding: 'utf8' }).trim();
+  assert.equal(cli(dir, 'add', '--from-run', 'rdiv', '--fix', tree).status, 1);
+});
+
 test('evals audit: exit 0 on empty set, on clean set and on an uninitialised repo; exit 1 with findings', () => {
   const { dir } = repo();
   const empty = cli(dir, 'audit');
