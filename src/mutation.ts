@@ -126,6 +126,7 @@ export interface MutationDeps {
 export interface MutationRun {
   results: MutantResult[];
   skipped?: string;
+  unreadable?: string[]; // files that could not be read (for example deleted); only they are left out
 }
 
 const failsAny = (deps: MutationDeps): boolean => {
@@ -143,10 +144,17 @@ export function runMutation(deps: MutationDeps): MutationRun {
   if (deps.commands.length === 0) return { results: [], skipped: 'no test command or scenario checks to kill mutants with' };
   if (failsAny(deps)) return { results: [], skipped: 'checks already fail without mutation' };
   const results: MutantResult[] = [];
+  const unreadable: string[] = [];
   let budget = deps.max;
   for (const file of deps.files) {
     if (budget <= 0) break;
-    const original = deps.read(file);
+    let original: string;
+    try {
+      original = deps.read(file);
+    } catch {
+      unreadable.push(file); // one bad file must not disable the whole gate
+      continue;
+    }
     for (const m of generateMutants(original, file, budget)) {
       let killed: boolean;
       try {
@@ -159,5 +167,5 @@ export function runMutation(deps: MutationDeps): MutationRun {
     }
     budget = deps.max - results.length;
   }
-  return { results };
+  return unreadable.length ? { results, unreadable } : { results };
 }

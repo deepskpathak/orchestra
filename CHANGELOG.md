@@ -26,6 +26,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Mutation: the changed-file list now excludes files deleted on the integration branch (`git diff --diff-filter=d`), and a file that cannot be read is logged and skipped on its own instead of aborting the whole pass (previously one deleted file threw ENOENT and the mutation gate was silently disabled).
 - Verification isolation: oracle tests and probes, agentic scenario `check` commands and mutation runs execute worker-written code, but ran with the full orchestrator env. They now get `scrubVerifierEnv` (`scrubWorkerEnv` plus no `ANTHROPIC_*` or `CLAUDE_*` credentials; PATH, HOME and the rest are kept). `git.runTests` takes an optional env. These commands are still not routed through the worker sandbox (see `docs/isolation.md`); the main test command keeps its existing env.
 - Oracles: an exception in the oracle pass (git worktree add, creating the oracle directory, a missing base ref) is now caught, logged and treated as no oracle evidence, like a failed mutation pass, instead of aborting judging. The throwaway base worktree is created inside the `try`, so it is always cleaned up.
 - Oracles: when the oracle author session fails or writes no files, the task is graded without oracle evidence (the log message already said so). Previously the empty result was recorded as a failed independent run and failed a healthy task.

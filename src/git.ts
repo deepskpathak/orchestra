@@ -84,8 +84,11 @@ export function diffStat(cwd: string, base: string, maxChars = 4000): string {
   return d.length > maxChars ? d.slice(0, maxChars) + '\n... [stat truncated]' : d;
 }
 
-export function changedFiles(cwd: string, base: string): string[] {
-  return git(cwd, 'diff', '--name-only', base).split('\n').filter(Boolean);
+// Files that differ from base. Deleted files are included unless `includeDeleted` is false (callers that
+// read the files afterwards, such as the mutation pass, cannot use a path that no longer exists).
+export function changedFiles(cwd: string, base: string, includeDeleted = true): string[] {
+  const args = includeDeleted ? ['diff', '--name-only', base] : ['diff', '--name-only', '--diff-filter=d', base];
+  return git(cwd, ...args).split('\n').filter(Boolean);
 }
 
 export function hasChangesSince(cwd: string, base: string): boolean {

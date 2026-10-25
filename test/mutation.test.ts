@@ -89,3 +89,15 @@ test('runner skips with no commands or a failing baseline, and honours max acros
   assert.equal(r.results.length, 2);
   assert.ok(r.results.every((x) => x.file === 'a.ts'));
 });
+
+test('a file that cannot be read is left out and the rest are still mutated', () => {
+  const io = fs({ 'a.ts': 'x === y;' });
+  const run = runMutation({
+    files: ['gone.ts', 'a.ts'], max: 10, commands: ['t'], write: io.write,
+    read: (f) => { if (f === 'gone.ts') throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }); return io.read(f); },
+    exec: () => ({ ok: true }),
+  });
+  assert.deepEqual(run.unreadable, ['gone.ts']);
+  assert.equal(run.results.length, 1);
+  assert.equal(run.results[0].file, 'a.ts');
+});

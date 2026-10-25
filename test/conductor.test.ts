@@ -788,6 +788,24 @@ test('mutation enabled sets run.mutation and emits an event; scratch worktree is
   assert.ok(!existsSync(seen[0]));
 });
 
+test('mutation: a deleted or missing changed file skips only that file, not the whole gate', async () => {
+  const store = mutationRepo({ floor: 0.5 });
+  const run = await runGoal({ store, runner: fakeRunner(), goal: 'g', mutation: { changedFiles: ['removed.js', 'calc.js'], exec: () => ({ ok: true }) } });
+  assert.equal(run.mutation!.total, 3);
+  assert.ok(store.events(run.id).some((e) => /left out 1 unreadable file\(s\): removed\.js/.test(e.msg)));
+});
+
+test('changedFiles can leave out deleted files', () => {
+  const store = mutationRepo({});
+  const base = g.head(store.root);
+  execFileSync('git', ['rm', '-q', 'calc.js'], { cwd: store.root });
+  writeFileSync(join(store.root, 'new.js'), 'export const n = 1;\n');
+  execFileSync('git', ['add', '-A'], { cwd: store.root });
+  execFileSync('git', ['commit', '-qm', 'rm calc, add new'], { cwd: store.root });
+  assert.deepEqual(g.changedFiles(store.root, base).sort(), ['calc.js', 'new.js']);
+  assert.deepEqual(g.changedFiles(store.root, base, false), ['new.js']);
+});
+
 test('mutation failBelowFloor fails the run with a clear error; report-only does not', async () => {
   const low = mutationRepo({ floor: 0.9, failBelowFloor: true });
   let n = 0;

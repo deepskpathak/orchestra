@@ -507,7 +507,7 @@ export class Conductor {
     const testCommand = store.config().testCommand;
     let wt: { path: string; branch: string } | undefined;
     try {
-      const changed = this.mutationOpts?.changedFiles ?? g.changedFiles(this.integration.path, this.integration.base);
+      const changed = this.mutationOpts?.changedFiles ?? g.changedFiles(this.integration.path, this.integration.base, false);
       const files = changed.filter((f) => /\.(?:[cm]?[jt]s|[jt]sx)$/.test(f) && !/(?:^|\/)(?:tests?|__tests__)\/|\.(?:test|spec)\./.test(f));
       wt = g.createTaskWorktree(store.root, this.wtRoot, run.id, 'mutation', g.head(this.integration.path));
       const cwd = wt.path;
@@ -521,6 +521,7 @@ export class Conductor {
         exec: (c) => exec(cwd, c),
       });
       if (out.skipped) this.emit('log', `Mutation skipped: ${out.skipped}`);
+      if (out.unreadable) this.emit('log', `Mutation left out ${out.unreadable.length} unreadable file(s): ${out.unreadable.join(', ')}`);
       const m = mutationScore(out.results, cfg.floor);
       run.mutation = { total: m.total, killed: m.killed, score: m.score, floor: m.floor, pass: m.pass };
       this.emit('log', `Mutation score ${m.score.toFixed(2)} (${m.killed}/${m.total} killed, floor ${m.floor}) ${m.pass ? 'pass' : 'below floor'}`, { mutation: run.mutation });
