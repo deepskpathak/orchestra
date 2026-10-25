@@ -1,0 +1,435 @@
+import { execFileSync } from 'node:child_process';
+import { writeFileSync } from 'node:fs';
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import type { Runner } from '../src/agent.ts';
+import { evaluate, evolve, harnessIntegrity, type EvalCase } from '../src/evolve.ts';
+import { holdoutLeaks, splitEvals } from '../src/evalsets.ts';
+import { fakeRunner } from '../src/fake.ts';
+import { currentVersion, readArchive, writeArchive } from '../src/harness.ts';
+import { selectParent } from '../src/pareto.ts';
+import type { Store } from '../src/store.ts';
+import type { ProjectConfig } from '../src/types.ts';
+import { writeLearnings as writeLessons } from '../src/learnings.ts';
+import { tempRepo } from './helpers.ts';
+import { DEFAULT_PROJECT_CONFIG } from '../src/store.ts';
+
+const quiet = () => {};
+
+function repoWith(n: number, evolveCfg: Partial<ProjectConfig['evolve']>): { store: Store; cases: EvalCase[] } {
+  const store = tempRepo({ evolve: { ...DEFAULT_PROJECT_CONFIG.evolve, every: 1, autoPromote: true, minGain: 0.02, sample: 10, minCases: 3, candidates: 1, ...evolveCfg } });
+  const base = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: store.root, encoding: 'utf8' }).trim();
+  const cases = Array.from({ length: n }, (_, i) => ({ id: `case-${String(i).padStart(2, '0')}`, goal: `unique goal text zq${i}x`, base, source: `src-${i}`, taskType: 'cli', createdAt: 1000 + i }));
+  for (const c of cases) store.writeJson(`evals/${c.id}.json`, c);
+  return { store, cases };
+}
+
+function spy(inner: Runner, tweak?: (req: Parameters<Runner>[0], res: Awaited<ReturnType<Runner>>) => Awaited<ReturnType<Runner>>) {
+  const evolverPrompts: string[] = [];
+  let planners = 0;
+  const runner: Runner = async (req) => {
+    if (req.role === 'evolver') evolverPrompts.push(req.prompt);
+    if (req.role === 'planner') planners++;
+    const res = await inner(req);
+    return tweak ? tweak(req, res) : res;
+  };
+  return { runner, evolverPrompts, planners: () => planners };
+}
+
+const cosmetic = (inner: Runner): Runner => async (req) =>
+  req.role === 'evolver'
+    ? { ok: true, text: '', costUsd: 0, turns: 1, durationMs: 1, structured: { rationale: 'cosmetic', files: [{ name: 'planner.md', content: 'You are the PLANNER. Be brief.' }] } }
+    : inner(req);
+
+test('splits: evolver prompt has no holdout case id or goal text', async () => {
+  // minCases above the validation size, so the cycle ends right after the evolver call.
+  const { store, cases } = repoWith(10, { splits: { enabled: true, feedback: 0.3, validation: 0.5, holdout: 0.2, signoffBelow: 12 }, minCases: 9 });
+  const s = spy(fakeRunner());
+  await evolve(store, s.runner, quiet);
+  const { holdout, feedback } = splitEvals(cases);
+  assert.ok(holdout.length > 0 && s.evolverPrompts.length === 1);
+  assert.deepEqual(holdoutLeaks(s.evolverPrompts[0], holdout), []);
+  assert.ok(s.evolverPrompts[0].includes(feedback[0].goal), 'feedback cases are shown');
+});
+
+const task = (id: string, notes: string[], status: 'merged' | 'failed' = 'merged') => ({ id, title: id, description: '', acceptance: [], deps: [], status, attempts: 1, notes, costUsd: 0 });
+const goalRun = (id: string, goal: string, notes: string[], status: 'merged' | 'failed' = 'merged') => ({ id, goal, harness: 'v1', kind: 'goal' as const, status: 'done' as const, startedAt: 1, endedAt: 2, baseRef: 'abc', tasks: [task('T1', notes, status)], costUsd: 0, active: [] }) as never;
+
+test('splits: runs, notes, metrics and lessons derived from holdout cases stay out of the evolver prompt', async () => {
+  const { store, cases } = repoWith(10, { splits: { enabled: true, feedback: 0.3, validation: 0.5, holdout: 0.2, signoffBelow: 12 }, minCases: 9 });
+  const holdout = splitEvals(cases).holdout;
+  assert.ok(holdout.length > 0);
+  // A harvested holdout case id is the run id that produced it.
+  store.saveRun(goalRun(holdout[0].id, 'some other wording', ['SECRET-HOLDOUT-NOTE retry the flaky parser'], 'failed'));
+  store.saveRun(goalRun('r-ordinary', 'ordinary goal', ['ORDINARY-NOTE keep prompts short']));
+  writeLessons(store, [{ role: 'worker', lesson: 'SECRET-HOLDOUT-LESSON', evidence: [{ run: holdout[0].id }], hits: 0 }, { role: 'worker', lesson: 'ORDINARY-LESSON', evidence: [{ run: 'r-ordinary' }], hits: 0 }]);
+  const s = spy(fakeRunner());
+  await evolve(store, s.runner, quiet);
+  const p = s.evolverPrompts[0];
+  assert.ok(p.includes('ORDINARY-NOTE') && p.includes('ORDINARY-LESSON'), 'ordinary evidence still reaches the evolver');
+  assert.ok(!p.includes('SECRET-HOLDOUT-NOTE') && !p.includes('SECRET-HOLDOUT-LESSON'));
+  assert.ok(!p.includes(holdout[0].id));
+  assert.deepEqual(holdoutLeaks(p, holdout), []);
+});
+
+test('splits: a prompt that still names a holdout goal is not sent to the evolver', async () => {
+  const { store, cases } = repoWith(10, { splits: { enabled: true, feedback: 0.3, validation: 0.5, holdout: 0.2, signoffBelow: 12 }, minCases: 9 });
+  const holdout = splitEvals(cases).holdout;
+  // An unrelated run's repair note quotes a holdout goal verbatim, which no run-level filter can see.
+  store.saveRun(goalRun('r-quote', 'unrelated', [`worker said: ${holdout[0].goal}`]));
+  const s = spy(fakeRunner());
+  const out = await evolve(store, s.runner, quiet);
+  assert.equal(s.evolverPrompts.length, 0, 'the evolver was never called');
+  assert.equal(out.promoted, false);
+  assert.match(out.reason, /would leak locked holdout case/);
+  assert.equal(store.ledgerRows().filter((r) => r.role === 'evolver').length, 0);
+});
+
+test('splits: the holdout is sticky, so earlier holdout cases never move into feedback as new cases arrive', async () => {
+  const { store, cases } = repoWith(10, { splits: { enabled: true, feedback: 0.3, validation: 0.5, holdout: 0.2, signoffBelow: 12 }, minCases: 99 });
+  const s = spy(fakeRunner());
+  await evolve(store, s.runner, quiet);
+  const firstHoldout = splitEvals(cases).holdout;
+  assert.deepEqual(Object.entries(store.readJson<Record<string, string>>('splits.json', {})).filter(([, v]) => v === 'holdout').map(([k]) => k).sort(), firstHoldout.map((c) => c.id).sort());
+  const base = cases[0].base;
+  for (let i = 10; i < 25; i++) store.writeJson(`evals/case-${i}.json`, { id: `case-${i}`, goal: `unique goal text zq${i}x`, base, source: `src-${i}`, taskType: 'cli', createdAt: 1000 + i });
+  await evolve(store, s.runner, quiet);
+  const saved = store.readJson<Record<string, string>>('splits.json', {});
+  for (const c of firstHoldout) assert.equal(saved[c.id], 'holdout', `${c.id} stays holdout`);
+  const second = s.evolverPrompts[1];
+  for (const c of firstHoldout) assert.ok(!second.includes(c.goal), `${c.id} goal is not shown to the evolver`);
+  // A plain time-window re-split would have moved at least one of them out of the holdout.
+  const naive = splitEvals([...cases, ...Array.from({ length: 15 }, (_, i) => ({ ...cases[0], id: `case-${i + 10}`, createdAt: 1010 + i }))]).holdout.map((c) => c.id);
+  assert.ok(firstHoldout.some((c) => !naive.includes(c.id)));
+});
+
+const evalRuns = (store: Store) => store.listRuns().map((id) => store.loadRun(id)!).filter((r) => r.kind === 'eval');
+
+test('incumbent replays are cached within a cycle: the minibatch and validation share them, and reused cost is not charged', async () => {
+  const { store } = repoWith(4, { cascade: { enabled: true, minibatch: 2, finalists: 2 } });
+  const out = await evolve(store, fakeRunner(), quiet);
+  assert.equal(out.promoted, true, out.reason);
+  const runs = evalRuns(store);
+  // Four validation cases: the two minibatch cases are served from the cache, so the incumbent is replayed once per case.
+  assert.equal(runs.filter((r) => r.harness === 'v1').length, 4);
+  // The candidate is never cached: smoke case + minibatch (2) + validation (4).
+  assert.equal(runs.filter((r) => r.harness === 'v2').length, 7);
+});
+
+test('evaluate with a cache replays an incumbent case once; the second result reports reused cost', async () => {
+  const { store, cases } = repoWith(2, {});
+  const cache = new Map();
+  const first = await evaluate(store, fakeRunner(), 'v1', [cases[0]], undefined, undefined, { cache });
+  const second = await evaluate(store, fakeRunner(), 'v1', [cases[0]], undefined, undefined, { cache });
+  assert.equal(evalRuns(store).length, 1);
+  assert.equal(first.reused, undefined);
+  assert.equal(second.reused, 1);
+  assert.equal(second.reusedCost, second.cost);
+  assert.equal(second.cost, first.cost, 'the nominal cost is kept so cost gates compare like with like');
+  assert.deepEqual(second.detail, first.detail);
+});
+
+test('regression suite: regression-tagged cases are always replayed when enabled, and only then', async () => {
+  const run = async (regression: boolean) => {
+    const { store, cases } = repoWith(8, { sample: 3, minCases: 2, ...(regression ? { regression: { enabled: true } } : {}) });
+    store.writeJson(`evals/${cases[0].id}.json`, { ...cases[0], tags: ['regression'] });
+    await evolve(store, fakeRunner(), quiet);
+    return evalRuns(store).some((r) => r.goal === cases[0].goal);
+  };
+  assert.equal(await run(false), false, 'the oldest case is outside the newest-3 sample');
+  assert.equal(await run(true), true);
+});
+
+test('regression suite never pulls a locked holdout case into the evolver or the validation sample', async () => {
+  const { store, cases } = repoWith(10, { splits: { enabled: true, feedback: 0.3, validation: 0.5, holdout: 0.2, signoffBelow: 3 }, regression: { enabled: true }, sample: 3, minCases: 2, autoPromote: false });
+  const holdout = splitEvals(cases).holdout;
+  store.writeJson(`evals/${holdout[0].id}.json`, { ...holdout[0], tags: ['regression'] });
+  const s = spy(fakeRunner());
+  await evolve(store, s.runner, quiet);
+  assert.deepEqual(holdoutLeaks(s.evolverPrompts[0], holdout), []);
+  // The holdout case is replayed only for the confirmation step, never as part of the validation rounds.
+  assert.ok(evalRuns(store).filter((r) => r.goal === holdout[0].goal).length <= 2);
+});
+
+test('cascade: nothing clears the minibatch, so the cycle stops with no full validation', async () => {
+  const { store } = repoWith(6, { cascade: { enabled: true, minibatch: 2, finalists: 2 } });
+  const s = spy(cosmetic(fakeRunner()));
+  const out = await evolve(store, s.runner, quiet);
+  assert.equal(out.promoted, false);
+  assert.match(out.reason, /no candidate cleared the minibatch/);
+  // One smoke replay + incumbent minibatch (2) + candidate minibatch (2); full validation would add 12 more.
+  assert.equal(s.planners(), 5);
+  assert.equal(readArchive(store).find((a) => a.version === 'v2')!.status, 'rejected');
+});
+
+test('cascade: a candidate that fails the smoke test never reaches the minibatch', async () => {
+  const { store } = repoWith(6, { cascade: { enabled: true, minibatch: 2, finalists: 2 } });
+  writeFileSync(store.path('harness', 'v1', 'checklist.md'), '- keep tests green\n');
+  const s = spy(fakeRunner());
+  // Corrupt the candidate on disk right after it is created: its checklist loses a parent line.
+  const log = (m: string) => {
+    if (m.startsWith('Candidate v2')) writeFileSync(store.path('harness', 'v2', 'checklist.md'), '');
+  };
+  const out = await evolve(store, s.runner, log);
+  assert.match(out.reason, /smoke test/);
+  assert.match(out.reason, /checklist line removed/);
+  assert.equal(s.planners(), 0, 'no replay of any kind was spent');
+});
+
+const CASCADE = { enabled: true, minibatch: 2, finalists: 2 };
+
+test('smoke: a case the incumbent also fails does not reject the candidate', async () => {
+  const { store, cases } = repoWith(5, { cascade: CASCADE });
+  // The first case can never pass (its check always fails), for the incumbent and the candidate alike.
+  store.writeJson(`evals/${cases[0].id}.json`, { ...cases[0], check: 'false' });
+  const logs: string[] = [];
+  const out = await evolve(store, fakeRunner(), (m) => logs.push(m));
+  assert.ok(logs.some((m) => /fails for v1 too; not counted against v2/.test(m)), logs.join('\n'));
+  const v2 = readArchive(store).find((a) => a.version === 'v2')!;
+  assert.notEqual(v2.rejectKind, 'smoke');
+  assert.doesNotMatch(out.reason, /smoke/);
+  assert.ok(out.candidateScore !== null, 'the candidate went on to full validation');
+});
+
+test('smoke: a case only the candidate fails rejects it, recorded as a smoke rejection and not fed back to the evolver', async () => {
+  const { store, cases } = repoWith(5, { cascade: CASCADE });
+  const failsCandidate = (req: Parameters<Runner>[0], res: Awaited<ReturnType<Runner>>) =>
+    req.role === 'judge' && req.prompt.startsWith('FROZEN SCORER REPLAY') && req.prompt.includes(cases[0].goal) && /edge-cases-covered/.test(req.prompt)
+      ? { ...res, structured: { pass: false, score: 0.1, summary: 'Regressed' } }
+      : res;
+  const s = spy(fakeRunner(), failsCandidate);
+  const out = await evolve(store, s.runner, quiet);
+  assert.match(out.reason, /no candidate passed the smoke test \(v2: failed smoke case case-00 that v1 passes\)/);
+  const v2 = readArchive(store).find((a) => a.version === 'v2')!;
+  assert.equal(v2.status, 'rejected');
+  assert.equal(v2.rejectKind, 'smoke');
+  await evolve(store, s.runner, quiet);
+  assert.match(s.evolverPrompts[1], /PREVIOUSLY REJECTED VARIANTS \(do not repeat\):\n\(none\)/);
+});
+
+test('harnessIntegrity flags a removed checklist line and passes an intact variant', () => {
+  const { store } = repoWith(0, {});
+  writeFileSync(store.path('harness', 'v1', 'checklist.md'), '- a\n- b\n');
+  execFileSync('cp', ['-R', store.path('harness', 'v1'), store.path('harness', 'v2')]);
+  assert.equal(harnessIntegrity(store, 'v1', 'v2'), null);
+  writeFileSync(store.path('harness', 'v2', 'checklist.md'), '- a\n');
+  assert.match(harnessIntegrity(store, 'v1', 'v2')!, /checklist line removed: - b/);
+});
+
+test('cascade: a winning candidate goes through to promotion', async () => {
+  const { store } = repoWith(4, { cascade: { enabled: true, minibatch: 2, finalists: 2 } });
+  const out = await evolve(store, fakeRunner(), quiet);
+  assert.equal(out.promoted, true, out.reason);
+  assert.equal(currentVersion(store), 'v2');
+});
+
+test('budgetUsd halts the cycle with a budget reason and stays within one replay of the cap', async () => {
+  const cap = 4;
+  const { store } = repoWith(6, { budgetUsd: cap });
+  const s = spy(fakeRunner());
+  const out = await evolve(store, s.runner, quiet);
+  assert.equal(out.promoted, false);
+  assert.match(out.reason, /budget/);
+  const spent = store.ledgerRows().reduce((n, r) => n + r.costUsd, 0);
+  assert.ok(spent <= cap + 1.6, `spent ${spent} against cap ${cap}`);
+  assert.ok(s.planners() < 12, 'not all validation replays ran');
+});
+
+test('budget stop saves the finished validation results and the next cycle resumes the same candidate without repaying', async () => {
+  const { store, cases } = repoWith(6, { budgetUsd: 4 });
+  const s = spy(fakeRunner());
+  const first = await evolve(store, s.runner, quiet);
+  assert.equal(first.promoted, false);
+  assert.match(first.reason, /budget cap.*next cycle resumes v2/);
+  const partial = readArchive(store).find((a) => a.version === 'v2')!.partialEval!;
+  const done = Object.keys(partial.cand.detail);
+  assert.ok(done.length >= 1 && done.length < cases.length, `${done.length} of ${cases.length} cases finished`);
+  assert.equal(partial.incumbent, 'v1');
+  assert.deepEqual(Object.keys(partial.inc.detail).sort(), done.sort());
+  assert.equal(readArchive(store).find((a) => a.version === 'v2')!.status, 'candidate');
+  const paid = evalRuns(store).length;
+  assert.equal(paid, 2 * done.length);
+
+  // Lift the cap: the next cycle resumes v2, asks no evolver and replays only the remaining cases.
+  store.writeJson('config.json', { ...store.config(), evolve: { ...store.config().evolve, budgetUsd: 0 } });
+  const second = await evolve(store, s.runner, quiet);
+  assert.equal(s.evolverPrompts.length, 1, 'no new variant was proposed');
+  assert.equal(readArchive(store).some((a) => a.version === 'v3'), false);
+  assert.equal(second.candidate, 'v2');
+  assert.equal(evalRuns(store).length, 2 * cases.length, 'every case replayed exactly once per side across both cycles');
+  const v2 = readArchive(store).find((a) => a.version === 'v2')!;
+  assert.equal(v2.partialEval, undefined);
+  assert.equal(Object.keys(v2.evalDetail!).length, cases.length);
+  assert.equal(second.promoted, true, second.reason);
+});
+
+test('a partial result for a different incumbent is not resumed', async () => {
+  const { store } = repoWith(4, {});
+  writeArchive(store, [
+    { version: 'v1', parent: null, createdAt: 0, rationale: 'seed', evalScore: null, status: 'promoted' },
+    { version: 'v2', parent: 'v1', createdAt: 1, rationale: 'old', evalScore: null, status: 'candidate', partialEval: { incumbent: 'v0', inc: { detail: { 'case-00': 1 }, passed: { 'case-00': true }, cost: 1, infraFailureRate: 0 }, cand: { detail: { 'case-00': 1 }, passed: { 'case-00': true }, cost: 1, infraFailureRate: 0 } } },
+  ]);
+  execFileSync('cp', ['-R', store.path('harness', 'v1'), store.path('harness', 'v2')]);
+  const s = spy(fakeRunner());
+  await evolve(store, s.runner, quiet);
+  assert.equal(s.evolverPrompts.length, 1, 'a fresh variant was proposed');
+});
+
+test('sequential: stops before all validation cases once the CI settles', async () => {
+  const { store } = repoWith(6, { sequential: { enabled: true, roundSize: 2 }, minCases: 2 });
+  const s = spy(fakeRunner());
+  const out = await evolve(store, s.runner, quiet);
+  assert.match(out.reason, /sequential stop after 2 of 6 cases/);
+  assert.equal(s.planners(), 4, 'one round of two pairs, not six');
+  assert.equal(out.promoted, true, out.reason);
+});
+
+test('sequential: never stops (or promotes) on fewer cases than minCases', async () => {
+  const { store } = repoWith(6, { sequential: { enabled: true, roundSize: 2 }, minCases: 4 });
+  const s = spy(fakeRunner());
+  const out = await evolve(store, s.runner, quiet);
+  // The CI would settle after round one (2 cases), but the floor is 4, so the first allowed stop is after round two.
+  assert.match(out.reason, /sequential stop after 4 of 6 cases/);
+  assert.equal(s.planners(), 8, 'four pairs, not two and not six');
+  assert.equal(out.promoted, true, out.reason);
+});
+
+test('cost: a cost-inflating variant with equal quality is rejected when cost is enabled', async () => {
+  const costly: Runner = async (req) => req.role === 'evolver'
+    ? { ok: true, text: '', costUsd: 0, turns: 1, durationMs: 1, structured: { rationale: 'verbose', files: [{ name: 'worker.md', content: 'You are a WORKER. Be verbose and thorough.' }] } }
+    : fakeRunner()(req);
+  const inflate = (req: Parameters<Runner>[0], res: Awaited<ReturnType<Runner>>) => (req.role === 'worker' && /Be verbose/.test(req.system ?? '') ? { ...res, costUsd: res.costUsd * 6 } : res);
+  const { store } = repoWith(3, { cost: { enabled: true, maxCostRisePct: 25, minGainForCost: 0.02, costWeight: 0.1, timeWeight: 0 } });
+  const out = await evolve(store, spy(costly, inflate).runner, quiet);
+  assert.equal(out.promoted, false);
+  assert.match(out.reason, /cost gate/);
+});
+
+test('splits: below the sign-off threshold a winning candidate is kept, not promoted', async () => {
+  const { store } = repoWith(8, { splits: { enabled: true, feedback: 0.3, validation: 0.5, holdout: 0.2, signoffBelow: 12 } });
+  const out = await evolve(store, fakeRunner(), quiet);
+  assert.equal(out.promoted, false);
+  assert.match(out.reason, /human sign-off/);
+  assert.equal(currentVersion(store), 'v1');
+  assert.equal(readArchive(store).find((a) => a.version === 'v2')!.status, 'candidate');
+});
+
+test('splits: above the threshold a win is confirmed on the locked holdout before promotion', async () => {
+  const { store } = repoWith(8, { splits: { enabled: true, feedback: 0.3, validation: 0.5, holdout: 0.2, signoffBelow: 3 } });
+  const out = await evolve(store, fakeRunner(), quiet);
+  assert.equal(out.promoted, true, out.reason);
+  assert.match(out.reason, /confirmed on the locked holdout/);
+  assert.ok(readArchive(store).find((a) => a.version === 'v2')!.holdoutScore! > 0);
+});
+
+const SPLITS = { enabled: true, feedback: 0.3, validation: 0.5, holdout: 0.2, signoffBelow: 3 };
+
+test('pareto: archive persists across cycles and the second parent comes from selectParent', async () => {
+  const { store } = repoWith(8, { pareto: { enabled: true }, autoPromote: false });
+  const s = spy(fakeRunner());
+  await evolve(store, s.runner, quiet);
+  const after1 = readArchive(store);
+  const v2 = after1.find((a) => a.version === 'v2')!;
+  assert.deepEqual(after1.map((a) => a.version).slice(0, 2), ['v1', 'v2']);
+  assert.ok(v2.validationDetail && Object.keys(v2.validationDetail).length > 0);
+  assert.ok((v2.paretoWins ?? 0) > 0 && v2.stepping === true, 'winner kept as a stepping stone');
+  const expected = selectParent(after1)!.version;
+  await evolve(store, s.runner, quiet);
+  const v3 = readArchive(store).find((a) => a.version === 'v3')!;
+  assert.equal(v3.parent, expected);
+  assert.ok(readArchive(store).find((a) => a.version === 'v2'), 'earlier variants survive');
+});
+
+test('pareto: evolver prompt carries the scored history and no holdout numbers', async () => {
+  const { store, cases } = repoWith(8, { pareto: { enabled: true }, splits: SPLITS, autoPromote: false });
+  const s = spy(fakeRunner());
+  await evolve(store, s.runner, quiet);
+  await evolve(store, s.runner, quiet);
+  assert.equal(s.evolverPrompts.length, 2);
+  assert.ok(!s.evolverPrompts[0].includes('v2 parent='));
+  const second = s.evolverPrompts[1];
+  assert.match(second, /SCORED ARCHIVE HISTORY/);
+  assert.match(second, /v2 parent=v1 status=candidate/);
+  const hold = readArchive(store).find((a) => a.version === 'v2')!.holdoutScore;
+  assert.equal(typeof hold, 'number');
+  assert.ok(!/holdoutScore|holdout=/i.test(second));
+  assert.deepEqual(holdoutLeaks(second, splitEvals(cases).holdout), []);
+});
+
+test('pareto: a candidate that wins validation and holdout is promoted and reported confirmed', async () => {
+  const { store } = repoWith(8, { pareto: { enabled: true }, splits: SPLITS });
+  const out = await evolve(store, fakeRunner(), quiet);
+  assert.equal(out.promoted, true, out.reason);
+  assert.equal(out.holdout!.confirmed, true);
+  assert.ok(out.holdout!.candidate > out.holdout!.parent);
+  assert.equal(currentVersion(store), 'v2');
+});
+
+test('pareto: a candidate that wins validation but loses the holdout stays a stepping stone', async () => {
+  const { store, cases } = repoWith(8, { pareto: { enabled: true }, splits: SPLITS });
+  const holdIds = new Set(splitEvals(cases).holdout.map((c) => c.id));
+  // The frozen scorer fails the careful (candidate) diff, but only on holdout goals.
+  const tweak = (req: Parameters<Runner>[0], res: Awaited<ReturnType<Runner>>) => {
+    const onHoldout = [...holdIds].some((id) => req.prompt.includes(cases.find((c) => c.id === id)!.goal));
+    return req.role === 'judge' && req.prompt.startsWith('FROZEN SCORER REPLAY') && onHoldout && /edge-cases-covered/.test(req.prompt)
+      ? { ...res, structured: { pass: false, score: 0.1, summary: 'Regressed' } }
+      : res;
+  };
+  const out = await evolve(store, spy(fakeRunner(), tweak).runner, quiet);
+  assert.equal(out.promoted, false);
+  assert.equal(out.holdout?.confirmed, false, out.reason);
+  assert.match(out.reason, /not confirmed on the locked holdout/);
+  assert.equal(currentVersion(store), 'v1');
+  const v2 = readArchive(store).find((a) => a.version === 'v2')!;
+  assert.equal(v2.status, 'candidate');
+  assert.equal(v2.stepping, true);
+});
+
+// A stepping stone v2 (parent v1) that lacks one of v1's checklist lines and wins a validation case, so selectParent picks it.
+function steppingStoneMissingLine(store: Store): void {
+  writeFileSync(store.path('harness', 'v1', 'checklist.md'), '- keep tests green\n- never lower the bar\n');
+  execFileSync('cp', ['-R', store.path('harness', 'v1'), store.path('harness', 'v2')]);
+  writeFileSync(store.path('harness', 'v2', 'checklist.md'), '- keep tests green\n');
+  writeArchive(store, [
+    { version: 'v1', parent: null, createdAt: 0, rationale: 'seed harness', evalScore: 0.5, status: 'promoted' },
+    { version: 'v2', parent: 'v1', createdAt: 1, rationale: 'old stepping stone', evalScore: 0.9, validationDetail: { 'case-00': 1 }, status: 'candidate' },
+  ]);
+}
+
+test('pareto: a candidate bred from a stepping stone is checked against the live incumbent, not only its parent', async () => {
+  const { store } = repoWith(4, { pareto: { enabled: true } });
+  steppingStoneMissingLine(store);
+  const s = spy(fakeRunner());
+  const out = await evolve(store, s.runner, quiet);
+  const v3 = readArchive(store).find((a) => a.version === 'v3')!;
+  assert.equal(v3.parent, 'v2');
+  // Without the incumbent check the candidate beats v1 on the fake scorer and is promoted with the checklist line dropped.
+  assert.equal(out.promoted, false);
+  assert.match(out.reason, /live incumbent v1.*checklist line removed: - never lower the bar/);
+  assert.equal(currentVersion(store), 'v1');
+  assert.equal(v3.status, 'rejected');
+});
+
+test('pareto: the evolver prompt labels the parent as a stepping stone and states the incumbent constraints', async () => {
+  const { store } = repoWith(4, { pareto: { enabled: true } });
+  steppingStoneMissingLine(store);
+  const s = spy(fakeRunner());
+  await evolve(store, s.runner, quiet);
+  const p = s.evolverPrompts[0];
+  assert.match(p, /PARENT HARNESS v2 \(a Pareto stepping stone, NOT the live harness/);
+  assert.ok(!p.includes('CURRENT HARNESS v2'));
+  assert.match(p, /LIVE INCUMBENT v1[\s\S]*- never lower the bar/);
+  const plain = repoWith(4, {});
+  const s2 = spy(fakeRunner());
+  await evolve(plain.store, s2.runner, quiet);
+  assert.match(s2.evolverPrompts[0], /CURRENT HARNESS v1:/);
+  assert.ok(!/LIVE INCUMBENT/.test(s2.evolverPrompts[0]));
+});
+
+test('pareto off: no archive seeding, no history in the prompt, no extra fields', async () => {
+  const { store } = repoWith(4, {});
+  const s = spy(fakeRunner());
+  await evolve(store, s.runner, quiet);
+  assert.ok(!/SCORED ARCHIVE HISTORY/.test(s.evolverPrompts[0]));
+  assert.ok(readArchive(store).every((a) => a.paretoWins === undefined && a.stepping === undefined));
+});

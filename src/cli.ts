@@ -11,11 +11,13 @@ import { atlasStats, loadOrBuildAtlas } from './atlas.ts';
 import { runGoal } from './conductor.ts';
 import { explorationMetrics, renderExploration } from './exploration.ts';
 import { collectOutcomes, renderOutcomes } from './outcomes.ts';
-import { evolutionDue, evolve, harvest, listEvals, metrics } from './evolve.ts';
+import { evaluate, evolutionDue, evolve, harvest, listEvals, metrics, resolveSplits } from './evolve.ts';
+import { DEFAULT_RATIOS } from './evalsets.ts';
+import { REGRESSION_TAG, auditCases, buildAddedCase, buildHarvestedCase, filterByTags, formatFindings } from './evalcases.ts';
 import { fakeRunner } from './fake.ts';
-import { excludeOrchestra } from './git.ts';
+import { commitExists, excludeOrchestra, fixDiff, tryGit } from './git.ts';
 import { guardMain } from './guard.ts';
-import { GLOBAL, listDomains, readLearnings } from './learnings.ts';
+import { GLOBAL, lessonAblation, listDomains, readAllLearnings, readLearnings } from './learnings.ts';
 import { validNetwork } from './container.ts';
 import { detectSandbox, type SandboxBackend } from './sandbox.ts';
 import { PACKAGE_ROOT, currentVersion, packageVersion, listVersions, promote, readArchive, seedHarness } from './harness.ts';
@@ -67,7 +69,12 @@ Usage:
                                  .orchestra/bench/calibration/sample.jsonl for human grading
   orchestra bench calibrate --import <file>
                                  Import human grades (id + humanPass) and report human-judge kappa
-  orchestra evals                List Factory Eval cases
+  orchestra evals [list]         List Factory Eval cases (--regression or --tag <t> to filter)
+  orchestra evals add "<goal>"   Add a case: --base <ref> (default HEAD) --check <cmd> --id <id> --tag <t> --regression --reference <ref>
+  orchestra evals add --from-run <runId> --fix <commit>
+                                 Harvest a failed or low-satisfaction goal; the human fix (diff base..commit) becomes the reference
+  orchestra evals audit          Scan cases and lessons for solution leakage (exit 1 with findings; 0 when clean, empty or uninitialised)
+  orchestra evals ablation       Replay the locked holdout with and without learnings and report the paired delta and CI
   orchestra --version            Print the installed Orchestra version
   orchestra promote <vN>         Promote a harness version (also used for rollback)
   orchestra doctor               Check Claude CLI and headless auth
@@ -455,11 +462,132 @@ function cmdAtlas(args: string[]): void {
   console.log(`  languages ${langs || '(none)'}`);
 }
 
-function cmdEvals(): void {
+const EVALS_SUBCOMMANDS = ['list', 'add', 'harvest', 'audit', 'ablation'];
+
+// `--flag value` and bare `--flag` parsing for the evals subcommands; positionals are returned in order.
+function parseEvalsArgs(args: string[], valued: string[]): { flags: Map<string, string[]>; positional: string[] } {
+  const flags = new Map<string, string[]>();
+  const positional: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (!a.startsWith('--')) { positional.push(a); continue; }
+    const name = a.slice(2);
+    if (valued.includes(name)) {
+      const v = args[++i];
+      if (v === undefined || v.startsWith('--')) die(`--${name} needs a value`);
+      flags.set(name, [...(flags.get(name) ?? []), v]);
+    } else flags.set(name, [...(flags.get(name) ?? []), '']);
+  }
+  return { flags, positional };
+}
+
+async function cmdEvalsRouter(args: string[]): Promise<void> {
+  const sub = args[0];
+  if (sub === undefined || sub.startsWith('--')) return cmdEvals(args);
+  switch (sub) {
+    case 'list': return cmdEvals(args.slice(1));
+    case 'add':
+    case 'harvest': return cmdEvalsAdd(args.slice(1), sub === 'harvest');
+    case 'audit': return cmdEvalsAudit();
+    case 'ablation': return cmdEvalsAblation();
+    default: die(`unknown evals subcommand "${sub}". Known: ${EVALS_SUBCOMMANDS.join(', ')}`);
+  }
+}
+
+function cmdEvals(args: string[]): void {
   const store = storeOrDie();
+  const { flags } = parseEvalsArgs(args, ['tag']);
+  for (const f of flags.keys()) if (f !== 'tag' && f !== 'regression') die(`unknown option --${f} for evals list. Known: --tag <t>, --regression`);
+  const tags = [...(flags.get('tag') ?? []), ...(flags.has('regression') ? [REGRESSION_TAG] : [])];
+  const all = listEvals(store);
+  const cases = filterByTags(all, tags);
+  if (!all.length) console.log('No Factory Eval cases yet. Runs with satisfaction >= 0.8 are harvested automatically; add your own with `orchestra evals add "<goal>"`.');
+  else if (!cases.length) console.log(`No Factory Eval cases tagged ${tags.join(', ')}.`);
+  for (const c of cases) console.log(`${c.id}  base ${c.base.slice(0, 8)}  check ${c.check ?? '-'}${c.tags?.length ? `  tags ${c.tags.join(',')}` : ''}\n  ${c.goal}`);
+}
+
+// add "<goal>" [--base ref] [--check cmd] [--id id] [--tag t] [--regression] [--reference ref]
+// add --from-run <runId> --fix <commit>   (human-fix harvest; `harvest` is an alias)
+function cmdEvalsAdd(args: string[], harvestAlias: boolean): void {
+  const store = storeOrDie();
+  const { flags, positional } = parseEvalsArgs(args, ['base', 'check', 'id', 'tag', 'reference', 'from-run', 'fix']);
+  const known = ['base', 'check', 'id', 'tag', 'reference', 'from-run', 'fix', 'regression'];
+  for (const f of flags.keys()) if (!known.includes(f)) die(`unknown option --${f} for evals add`);
+  const one = (n: string) => flags.get(n)?.[flags.get(n)!.length - 1];
+  const root = store.root;
+  const existing = listEvals(store).map((c) => c.id);
+  const fromRun = one('from-run');
+  const fix = one('fix');
+  let c;
+  try {
+    if (fromRun || fix || harvestAlias) {
+      if (!fromRun || !fix) die('Harvest needs both --from-run <runId> and --fix <commit>');
+      if (positional.length) die('Harvest takes no goal; the goal comes from the run');
+      const run = store.loadRun(fromRun);
+      if (!run) die(`No run ${fromRun} in this repo`);
+      if (!commitExists(root, fix)) die(`Fix commit "${fix}" does not exist in this repo`);
+      c = buildHarvestedCase(run, fix, (b, f) => fixDiff(root, b, f), store.config().testCommand, existing, Date.now());
+    } else {
+      const goal = positional.join(' ');
+      const baseRef = one('base') ?? 'HEAD';
+      const resolved = tryGit(root, 'rev-parse', '--verify', `${baseRef}^{commit}`);
+      if (!resolved.ok) die(`Base "${baseRef}" is not a commit in this repo`);
+      c = buildAddedCase({ goal, base: resolved.out, check: one('check') ?? store.config().testCommand ?? null, id: one('id'), tags: flags.get('tag'), regression: flags.has('regression'), reference: one('reference') }, existing, Date.now());
+    }
+  } catch (err) {
+    die((err as Error).message);
+  }
+  const leaks = auditCases([c]);
+  if (leaks.length) die(`Refusing to add ${c.id}: it leaks its own solution.\n${formatFindings(leaks)}`);
+  store.writeJson(`evals/${c.id}.json`, c);
+  console.log(`♫ added eval case ${c.id}  base ${c.base.slice(0, 8)}${c.tags?.length ? `  tags ${c.tags.join(',')}` : ''}`);
+}
+
+// Solution-leakage audit over the case set and the learnings. Exit 0 when clean, empty or not initialised
+// (CI runs this in a fresh checkout where .orchestra does not exist); exit 1 with the findings listed.
+function cmdEvalsAudit(): void {
+  const root = findRepoRoot(process.cwd());
+  const store = root ? new Store(root) : null;
+  if (!store?.exists()) {
+    console.log('Orchestra is not initialised here, so there are no eval cases to audit. Nothing to do (exit 0).');
+    return;
+  }
   const cases = listEvals(store);
-  if (!cases.length) console.log('No Factory Eval cases yet. Runs with satisfaction >= 0.8 are harvested automatically.');
-  for (const c of cases) console.log(`${c.id}  base ${c.base.slice(0, 8)}  check ${c.check ?? '-'}\n  ${c.goal}`);
+  if (!cases.length) {
+    console.log('No eval cases to audit.');
+    return;
+  }
+  const lessons = Object.values(readAllLearnings(store)).flat();
+  const findings = auditCases(cases, lessons);
+  if (!findings.length) {
+    console.log(`Audited ${cases.length} eval case${cases.length === 1 ? '' : 's'} and ${lessons.length} lesson${lessons.length === 1 ? '' : 's'}: no solution leakage found.`);
+    return;
+  }
+  console.log(`Solution leakage found in ${new Set(findings.map((f) => f.caseId)).size} of ${cases.length} eval cases:\n${formatFindings(findings)}`);
+  process.exitCode = 1;
+}
+
+// With-lessons versus without-lessons on the locked holdout. Costs two replays per holdout case.
+async function cmdEvalsAblation(): Promise<void> {
+  const store = storeOrDie();
+  const cfg = store.config().evolve.splits;
+  const { holdout } = resolveSplits(store, listEvals(store), cfg ? { feedback: cfg.feedback, validation: cfg.validation, holdout: cfg.holdout } : DEFAULT_RATIOS);
+  if (!holdout.length) {
+    console.log('No holdout cases yet, so there is nothing to ablate. Harvested evals fill the holdout over time (orchestra evals).');
+    return;
+  }
+  const version = currentVersion(store);
+  const run = runner();
+  const score = async (c: (typeof holdout)[number], learnings: boolean): Promise<number> => {
+    const r = await evaluate(store, run, version, [c], undefined, undefined, { learnings });
+    if (r.inconclusive) die(`Ablation stopped on ${c.id}: ${r.inconclusive}`);
+    return r.detail[c.id] ?? 0;
+  };
+  const res = await lessonAblation((c) => score(holdout.find((h) => h.id === c.id)!, true), (c) => score(holdout.find((h) => h.id === c.id)!, false), holdout);
+  const f = (x: number) => (Number.isFinite(x) ? x.toFixed(3) : String(x));
+  console.log(`Lesson ablation on ${res.n} holdout case${res.n === 1 ? '' : 's'} (harness ${version})`);
+  for (const c of res.cases) console.log(`  ${c.id}  with ${f(c.withLessons)}  without ${f(c.withoutLessons)}  delta ${f(c.delta)}`);
+  console.log(`mean delta ${f(res.meanDelta)}  95% CI [${f(res.ci[0])}, ${f(res.ci[1])}]  => lessons ${res.verdict === 'helps' ? 'help' : res.verdict === 'hurts' ? 'hurt' : 'show no clear effect'}`);
 }
 
 function cmdPromote(args: string[]): void {
@@ -637,7 +765,7 @@ export async function main(argv: string[]): Promise<void> {
       await cmdBench(args);
       break;
     case 'evals':
-      cmdEvals();
+      await cmdEvalsRouter(args);
       break;
     case 'promote':
       cmdPromote(args);

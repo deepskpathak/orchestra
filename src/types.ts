@@ -201,6 +201,7 @@ export interface ProjectConfig {
       packTokens: number; // budget for one L1 pack
     };
   };
+  learnings?: { expiryDays: number }; // drop lessons with evidence older than this many days; 0 = off
   evolve: {
     every: number; // auto-evolve after every N completed runs, 0 disables
     autoPromote: boolean;
@@ -211,5 +212,12 @@ export interface ProjectConfig {
     promotionRule: 'gain' | 'paired'; // 'gain' = gain above max(minGain, spread); 'paired' = 95% CI lower bound above zero
     niMargin: number; // paired rule: a task type whose mean delta is below -niMargin vetoes promotion
     minJudgeAgreement?: number | null; // refuse to evolve when the incumbent's judge/hidden-check agreement is below this; null = off
+    budgetUsd?: number; // hard cap on spend per evolve cycle; 0 or unset = no cap
+    sequential?: { enabled: boolean; roundSize: number }; // evaluate in rounds, stop once the CI settles the comparison
+    splits?: { enabled: boolean; feedback: number; validation: number; holdout: number; signoffBelow: number }; // time-split eval sets
+    cascade?: { enabled: boolean; minibatch: number; finalists: number }; // smoke test, minibatch vs parent, full validation for the top finalists only
+    regression?: { enabled: boolean }; // always replay the regression-tagged cases of the validation pool (W3.2)
+    pareto?: { enabled: boolean }; // choose parents from the Pareto archive, show scored history, record per-case wins
+    cost?: { enabled: boolean; maxCostRisePct: number; minGainForCost: number; costWeight: number; timeWeight: number }; // cost-aware objective
   };
 }

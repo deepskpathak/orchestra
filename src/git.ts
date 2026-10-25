@@ -68,6 +68,16 @@ export function diffSince(cwd: string, base: string, maxChars = 60_000): string 
   return d.length > maxChars ? d.slice(0, maxChars) + `\n... [diff truncated, ${d.length} chars total]` : d;
 }
 
+// The change a fix commit makes on top of base (stdout only, so git warnings never leak into the text). Throws a
+// plain message when git fails or fix does not descend from base: a diff across diverged history would mix in
+// unrelated changes from base's own side.
+export function fixDiff(cwd: string, base: string, fix: string): string {
+  if (!tryGit(cwd, 'merge-base', '--is-ancestor', base, fix).ok) throw new Error(`Fix ${fix} does not descend from base ${base.slice(0, 8)}; harvest needs a fix committed on top of the run's base commit`);
+  const r = spawnSync('git', ['diff', base, fix], { cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+  if (r.status !== 0) throw new Error(`git diff ${base.slice(0, 8)} ${fix} failed: ${(r.stderr || 'unknown error').trim()}`);
+  return r.stdout ?? '';
+}
+
 // Throws on a bad base; callers that must not fail wrap it.
 export function diffStat(cwd: string, base: string, maxChars = 4000): string {
   const d = git(cwd, 'diff', '--stat', base);

@@ -24,3 +24,6 @@ jobs:
           git config --global user.name ci
           git config --global user.email ci@localhost
       - run: npm test
+      - name: Eval case leakage audit
+        # Exits 0 on an empty or uninitialised checkout, 1 when a case or lesson leaks its solution.
+        run: node bin/orchestra.ts evals audit

@@ -72,6 +72,12 @@ orchestra learnings --domain global  # only the global lessons
 
 An unknown domain exits non-zero and lists the known domains.
 
+**Lesson hygiene.** The librarian returns item edits, never the whole set. Each lesson has a stable `id`, and an edit is `add`, `update` (new text, extra evidence, optional `helped` true or false) or `remove`, addressed by id. Lessons the librarian does not mention are kept, and a response shaped like a full rewrite is converted into edits (matching lessons are updated, new ones added, nothing is removed). `applyLessonEdits` in `src/learnings.ts` is the only path from model output to the store.
+
+- **Counters.** Each lesson carries `helpful` and `harmful` counts. Older files without them load as zero.
+- **Expiry (opt-in).** Set `learnings.expiryDays` above 0 in `.orchestra/config.json` to drop, after each run, lessons whose newest evidence is older than that many days, or whose harmful count is well above helpful. `0` (the default) never expires anything.
+- **Ablation.** `orchestra evals ablation` replays the locked holdout cases twice, with and without the learnings store, and prints per-case scores, the mean delta and its 95% CI. A positive delta means lessons help. It costs two replays per holdout case. Normal eval replays stay clean-room; only the with-lessons arm of this command reads learnings.
+
 **Contrast evidence.** When [contrastive repair](configuration.md#contrastive) ran, the comparison judge's reasons for why one attempt beat the other are passed to the librarian as lesson evidence, so lessons can cite a concrete winning approach.
 
 ## Factory Eval: `orchestra evals`
@@ -88,7 +94,25 @@ The Factory Eval is a set of regression cases stored as JSON files in the `evals
 - Eval runs delete their `orchestra/<run>/*` branches afterwards.
 - **Clean-room trials.** Every replay gets its own fresh worktree cut from the case's `base` commit (unique run id, nothing reused), reads no learnings (the planner and worker prompts show `(none yet)` for eval runs, so lessons accumulated on past goals cannot leak into the comparison) and carries no cache between trials. Branches sit in the same repository, so history beyond the base commit is not hidden.
 - **Interleaved.** The candidate and incumbent replay the same case back to back (candidate, incumbent, candidate, incumbent...) instead of as two batches, so drift in the infrastructure hits both sides alike.
+- **Your own cases.** `orchestra evals add "<goal>"` adds a case you choose (see [Harder and imported cases](#harder-and-imported-cases)).
 - **Infra failure rate.** Replays that die of infrastructure (usage limit, auth, network) are inconclusive. `EvalResult.infraFailureRate` is infra-failed replays divided by replays attempted, per side. The first infra failure ends the pair, so a non-zero rate means the comparison was inconclusive.
+
+### Harder and imported cases
+
+Automatic harvesting only keeps successes, so the set under-represents hard goals. These commands add the rest. All of them write only to the repo's own `.orchestra/evals`, and none runs a model.
+
+```
+orchestra evals add "<goal>" [--base <ref>] [--check <cmd>] [--id <id>] [--tag <t>] [--regression] [--reference <ref>]
+orchestra evals add --from-run <runId> --fix <commit>
+orchestra evals list [--regression | --tag <t>]
+orchestra evals audit
+```
+
+- **Add.** `--base` defaults to `HEAD` and is stored as the full commit sha. `--check` defaults to the project `testCommand`. The case id defaults to `m-<goal slug>`. `--regression` adds the `regression` tag, which is how you keep a regression suite of past bugs; `list --regression` shows it.
+- **Human-fix harvest.** `--from-run <runId> --fix <commit>` turns a goal run that failed, or finished `done` with satisfaction below 0.8, into a case `h-<runId>`. The goal and base commit come from the run, and the diff from that base to your fix commit is stored as `reference` (the human fix), never shown to workers. It is tagged `human-fix` and `regression`. Successful runs are refused because they are harvested automatically. `evals harvest` is an alias for the same flags.
+- **Leakage audit.** `orchestra evals audit` scans every case and every lesson in the learnings store for solution leakage: a goal that embeds a unified diff, a goal that quotes a telling line (24 characters or more) of its own reference fix, or a lesson that quotes a case's reference or full goal text. `add` runs the same check on the new case and refuses a leaky one.
+- **Exit codes.** `audit` exits `0` when the set is clean, when it is empty, and when Orchestra is not initialised in the repo (or there is no git repo): there is nothing to audit, and CI runs the audit in a fresh checkout where `.orchestra/` does not exist, so a failure there would only be noise. It prints a clear message in each case. It exits `1` and lists each finding when it finds leakage. The CI workflow runs it after `npm test`.
+- **Unknown subcommands** exit 1 and list the known ones (`list`, `add`, `harvest`, `audit`, `ablation`).
 
 ## Frozen scorer
 
@@ -147,6 +171,21 @@ Opt-in. `evolve.candidates` defaults to `1`, which keeps the single-variant cycl
 **Cost model.** A dud single candidate wastes roughly `2 x sample` eval runs. Multi-candidate evolution spends about `k x screen + 2 x sample` (plus two evolver calls), where `screen = min(2, sample)`. Duds are caught at the screening price, so the full evaluation is spent on a variant that already passed a cheap check. Because `k x screen` is paid every cycle, keep `k` small (2 to 4).
 
 New archive fields: `parents` (version names a composed variant was built from, absent otherwise) and `screenScore` (the screening score, present on candidates that were screened).
+
+## Cycle controls (M3)
+
+Every option here is opt-in and off by default; with none set, `orchestra evolve` behaves as described above. Keys are listed in [configuration.md](configuration.md#evolve).
+
+- **Time-split eval sets (`evolve.splits`).** Cases are ordered by `createdAt` (then id) and split deterministically, oldest to newest, into feedback (about 30%), validation (50%) and a locked holdout (20%). Assignments are sticky: the first time a case is seen its split is saved in `.orchestra/splits.json` and never changes, so yesterday's holdout cannot slide into feedback as new cases arrive (new cases fill whatever quota is short: newest to holdout, oldest to feedback). The evolver prompt lists feedback cases only and never contains holdout or validation cases; runs that produced a holdout case are also left out of the metrics, repair notes and learnings summary, and a prompt that still names a holdout case id or goal is not sent. Selection uses validation cases. The holdout is evaluated only after a candidate would otherwise be promoted, to confirm it beats its parent there, and it is never used for selection. If it does not, the candidate is kept, not promoted, and its `holdoutScore` is stored in the archive. With fewer than `signoffBelow` (12) cases in total, a winning candidate is kept for a human to promote.
+- **Cascade screening (`evolve.cascade`).** (1) Smoke test per candidate: the checklist lines, pass threshold and models of the parent must be intact, and one case must pass. (2) Minibatch: each survivor must beat its parent on the same newest `minibatch` cases without regressing. (3) Full validation only for the top `finalists` by minibatch gain. A cycle where nothing clears the minibatch stops there and spends nothing on full validation. This replaces the older screening used with `evolve.candidates` above.
+- **Sequential testing and budget (`evolve.sequential`, `evolve.budgetUsd`).** Validation runs in rounds of `roundSize` cases. After each round the paired CI (clustered by source goal) is checked and the cycle stops early on a settled comparison: promote-side when the lower bound is above zero, reject-side when the upper bound is below `-niMargin` (zero when the margin is 0). Because every round is a look at the data, the interval is widened by a Bonferroni-style alpha split across the planned rounds (alpha 0.05 divided by the round count), so the early-stop false positive rate stays near 5%. `budgetUsd` is a hard cap per cycle for evolver calls plus replays; the cycle halts before a batch that would cross it and keeps the candidate for later evaluation. The per-case results already finished are saved on the candidate's archive entry (`partialEval`, status stays `candidate`); while the incumbent is unchanged, the next cycle resumes that candidate (no evolver call) and replays only the cases not yet done, then clears `partialEval`. An infrastructure failure part-way through validation saves the finished rounds the same way. `0` means no cap.
+- **Cost in the objective (`evolve.cost`).** Utility is `score - costWeight x USD - timeWeight x minutes`. A candidate whose cost rises more than `maxCostRisePct` over the incumbent is rejected unless its score gain is at least `minGainForCost`, so a cost-inflating variant with equal quality does not win.
+- **Smoke test baseline.** The smoke replay of the first case rejects a candidate only when the live incumbent passes that case and the candidate fails it (the case may be hard or flaky). The baseline replay is cached for the cycle. Smoke rejections are stored with `rejectKind: "smoke"` in `archive.json` and are not listed under "previously rejected variants" in the evolver prompt, because one unreplicated replay says nothing about the idea.
+- **Incumbent replay cache.** Within one cycle each incumbent replay is paid for once per case (smoke baseline, minibatch, screening, every finalist's validation, holdout confirmation). Candidate replays are never cached. Reused replays keep their nominal cost for the cost gate but are not charged to `budgetUsd`.
+- **Pareto archive (`evolve.pareto`).** The archive keeps the per-case validation scores of each variant. Every variant best on at least one validation case stays on the front. The parent of the next variant is the front member with the most Pareto wins plus descendants that beat it (ties broken by score, then version). The evolver prompt gets a compact scored history of recent versions (parent, status, score, wins; never holdout scores). Front members that are not promoted are marked `stepping` in `archive.json`; the best overall is still the only one promoted. Parents are limited to `promoted` and `candidate` entries whose harness directory exists. A variant bred from a stepping stone is still scored and promoted against the live incumbent, so it must also keep every incumbent checklist line, the incumbent's `passThreshold` and a model for every role (checked in the smoke test and again before promotion); the evolver prompt labels the stepping stone as the parent and lists those incumbent constraints.
+- **Holdout confirmation (H3).** A promotion with splits on means the candidate beat its parent on the validation cases and on the locked, newest-cases holdout. The outcome prints both holdout scores.
+
+Lesson hygiene (item-level edits, counters, expiry and the `orchestra evals ablation` with-lessons versus without-lessons report on the holdout) is covered under [Learnings](#learnings-orchestra-learnings).
 
 ## Automatic evolution after a run
 

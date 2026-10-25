@@ -124,3 +124,23 @@ test('atlas build and stats work on a real repo, hide .env, and reject unknown s
     assert.match(r.stderr, /Usage: orchestra atlas build/);
   }
 });
+
+test('evals ablation prints the with vs without lessons delta on the holdout, and says so when there is none', async () => {
+  const { spawnSync, execFileSync } = await import('node:child_process');
+  const { tempRepo } = await import('./helpers.ts');
+  const store = tempRepo();
+  const cli = join(PACKAGE_ROOT, 'bin', 'orchestra.ts');
+  const env = { ...process.env, ORCHESTRA_RUNNER: 'fake', ORCHESTRA_FAKE_STEP_MS: '0' };
+  const run = () => spawnSync(process.execPath, [cli, 'evals', 'ablation'], { cwd: store.root, encoding: 'utf8', timeout: 120000, env });
+  const none = run();
+  assert.equal(none.status, 0, none.stderr);
+  assert.match(none.stdout, /No holdout cases/);
+
+  const base = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: store.root, encoding: 'utf8' }).trim();
+  for (let i = 0; i < 4; i++) store.writeJson(`evals/e${i}.json`, { id: `e${i}`, goal: `add feature number ${i}`, base, check: null, createdAt: 1000 + i });
+  const r = run();
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /Lesson ablation on 1 holdout case/);
+  assert.match(r.stdout, /e3  with [\d.]+  without [\d.]+  delta/);
+  assert.match(r.stdout, /mean delta .* 95% CI \[/);
+});
