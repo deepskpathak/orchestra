@@ -1367,10 +1367,11 @@ export class Conductor {
   }
 
   // Session caps for the next worker call: what is left of the task budget. Undefined when the feature is off.
-  private workerCap(task: Task): { turns: number; usd: number } | undefined {
+  // `shares` splits what is left between workers that run at the same time (best-of-n), so together they stay inside the cap.
+  private workerCap(task: Task, shares = 1): { turns: number; usd: number } | undefined {
     if (!this.store.config().budgets?.workerPrompt.enabled) return undefined;
     const b = this.budgetState(task);
-    return { turns: Math.max(1, b.maxTurns - b.turnsUsed), usd: Math.max(0.01, round(b.usdCap - b.usdSpent, 4)) };
+    return { turns: Math.max(1, Math.floor((b.maxTurns - b.turnsUsed) / shares)), usd: Math.max(0.01, round((b.usdCap - b.usdSpent) / shares, 4)) };
   }
 
   private warmed(): void {
@@ -1384,34 +1385,45 @@ export class Conductor {
     const { store } = this;
     const cfg = store.config();
     const trees: g.Worktree[] = [wt];
-    for (let i = 2; i <= n; i++) {
-      const id = `${task.id}-s${i}`;
-      g.removeWorktree(store.root, join(this.wtRoot, this.run.id, id));
-      g.deleteBranch(store.root, `orchestra/${this.run.id}/${id}`);
-      trees.push(g.createTaskWorktree(store.root, this.wtRoot, this.run.id, id, this.knownGood));
+    try {
+      for (let i = 2; i <= n; i++) {
+        const id = `${task.id}-s${i}`;
+        g.removeWorktree(store.root, join(this.wtRoot, this.run.id, id));
+        g.deleteBranch(store.root, `orchestra/${this.run.id}/${id}`);
+        trees.push(g.createTaskWorktree(store.root, this.wtRoot, this.run.id, id, this.knownGood));
+      }
+      this.emit('log', `${task.id} best-of-${n}: running ${n} worker samples in parallel`, undefined, task.id);
+      this.save();
+      // The samples run together and each spends from the same task budget, so each gets 1/n of what is left.
+      // allSettled: one sample that throws must not discard the others or skip the cleanup below.
+      const settled = await Promise.allSettled(trees.map((w, i) => this.call('worker', task, task.attempts, { prompt, cwd: w.path, ...common }, undefined, i === 0 ? undefined : (`s${i + 1}` as AgentVariant), trees.length)));
+      const works: AgentResult[] = settled.map((r, i) => {
+        if (r.status === 'fulfilled') return r.value;
+        const error = `sample ${i + 1} crashed: ${(r.reason as Error)?.message ?? r.reason}`;
+        this.emit('log', `${task.id} best-of-${n}: ${error}`, undefined, task.id);
+        return { ok: false, text: '', costUsd: 0, turns: 0, durationMs: 0, error };
+      });
+      const checks = this.scenarios.filter((s) => s.check?.trim()).map((s) => s.check!);
+      const cands: (TestCandidate & { index: number })[] = [];
+      for (let i = 0; i < trees.length; i++) {
+        g.commitAll(trees[i].path, `${task.id}: ${task.title} (orchestra attempt ${task.attempts}, sample ${i + 1})`);
+        if (!works[i].ok || !g.hasChangesSince(trees[i].path, base)) continue;
+        const tests = cfg.testCommand ? await g.runTestsAsync(trees[i].path, cfg.testCommand, undefined, scrubVerifierEnv(process.env)) : undefined;
+        let passed = 0;
+        for (const c of checks) if ((await g.runTestsAsync(trees[i].path, c, undefined, scrubVerifierEnv(process.env))).ok) passed++;
+        cands.push({ index: i, id: String(i), testsPassed: tests ? (tests.ok ? 1 : 0) : 0, testsTotal: tests ? 1 : 0, distinguishingPasses: passed });
+      }
+      const winner = (cands.length ? (selectBestByTests(cands) ?? cands[0]) : undefined)?.index ?? 0;
+      this.emit('log', `${task.id} best-of-${n}: sample ${winner + 1} selected${cands.length ? ` (${cands.map((c) => `#${c.index + 1} tests ${c.testsPassed}/${c.testsTotal}, checks ${c.distinguishingPasses}`).join('; ')})` : ' (no sample produced a change)'}`, { bestOfN: { n, winner: winner + 1, candidates: cands } }, task.id);
+      this.ledgerOutcome(task, 'best_of_n');
+      if (winner !== 0) g.resetTo(wt.path, g.head(trees[winner].path));
+      return works[winner];
+    } finally {
+      for (const t of trees.slice(1)) {
+        g.removeWorktree(store.root, t.path);
+        g.deleteBranch(store.root, t.branch);
+      }
     }
-    this.emit('log', `${task.id} best-of-${n}: running ${n} worker samples in parallel`, undefined, task.id);
-    this.save();
-    const works = await Promise.all(trees.map((w, i) => this.call('worker', task, task.attempts, { prompt, cwd: w.path, ...common }, undefined, i === 0 ? undefined : (`s${i + 1}` as AgentVariant))));
-    const checks = this.scenarios.filter((s) => s.check?.trim()).map((s) => s.check!);
-    const cands: (TestCandidate & { index: number })[] = [];
-    for (let i = 0; i < trees.length; i++) {
-      g.commitAll(trees[i].path, `${task.id}: ${task.title} (orchestra attempt ${task.attempts}, sample ${i + 1})`);
-      if (!works[i].ok || !g.hasChangesSince(trees[i].path, base)) continue;
-      const tests = cfg.testCommand ? await g.runTestsAsync(trees[i].path, cfg.testCommand, undefined, scrubVerifierEnv(process.env)) : undefined;
-      let passed = 0;
-      for (const c of checks) if ((await g.runTestsAsync(trees[i].path, c, undefined, scrubVerifierEnv(process.env))).ok) passed++;
-      cands.push({ index: i, id: String(i), testsPassed: tests ? (tests.ok ? 1 : 0) : 0, testsTotal: tests ? 1 : 0, distinguishingPasses: passed });
-    }
-    const winner = (cands.length ? (selectBestByTests(cands) ?? cands[0]) : undefined)?.index ?? 0;
-    this.emit('log', `${task.id} best-of-${n}: sample ${winner + 1} selected${cands.length ? ` (${cands.map((c) => `#${c.index + 1} tests ${c.testsPassed}/${c.testsTotal}, checks ${c.distinguishingPasses}`).join('; ')})` : ' (no sample produced a change)'}`, { bestOfN: { n, winner: winner + 1, candidates: cands } }, task.id);
-    this.ledgerOutcome(task, 'best_of_n');
-    if (winner !== 0) g.resetTo(wt.path, g.head(trees[winner].path));
-    for (const t of trees.slice(1)) {
-      g.removeWorktree(store.root, t.path);
-      g.deleteBranch(store.root, t.branch);
-    }
-    return works[winner];
   }
 
   // Judged-pass task: risk-tier gate (W7.1), then the merge queue (per task, or batched W6.2).
@@ -1734,9 +1746,9 @@ export class Conductor {
     return out;
   }
 
-  private async call(role: Role, task: Task | undefined, attempt: number, req: Omit<AgentRequest, 'role' | 'system' | 'model' | 'budgetUsd'>, modelOverride?: string, variant?: AgentVariant): Promise<AgentResult> {
+  private async call(role: Role, task: Task | undefined, attempt: number, req: Omit<AgentRequest, 'role' | 'system' | 'model' | 'budgetUsd'>, modelOverride?: string, variant?: AgentVariant, capShares = 1): Promise<AgentResult> {
     const { run, harness } = this;
-    const cap = role === 'worker' && task ? this.workerCap(task) : undefined;
+    const cap = role === 'worker' && task ? this.workerCap(task, capShares) : undefined;
     const sfx = variant ? `-${variant}` : '';
     const model = modelOverride ?? harness.config.models[role];
     const agent: ActiveAgent = {
@@ -1753,28 +1765,35 @@ export class Conductor {
     this.emit('agent.start', `${role} started${task ? ` on ${task.id}` : ''} (${model})`, undefined, task?.id, role);
     this.save();
     let lastSave = 0;
-    const res = await this.provider.run({
-      ...req,
-      ...this.isolation(role, req.cwd),
-      role,
-      model,
-      system: harness.prompts[role],
-      budgetUsd: cap ? cap.usd : harness.config.budgetUsd[role],
-      ...(cap ? { maxTurns: cap.turns } : {}),
-      timeoutMs: TIMEOUT_MS[role],
-      logFile: this.store.path('runs', run.id, 'logs', `${task?.id ?? 'run'}-${role}-${attempt}${sfx}.jsonl`),
-      meta: { task: task?.id, attempt, run: run.id, variant },
-      onAction: (action) => {
-        agent.lastAction = action;
-        if (role === 'worker' && !this.cacheWarmed) this.warmed();
-        if (!action.startsWith('says:')) agent.tools += 1;
-        this.emit('agent.action', action, undefined, task?.id, role);
-        if (Date.now() - lastSave > 200) {
-          lastSave = Date.now();
-          this.save();
-        }
-      },
-    });
+    let res: AgentResult;
+    try {
+      res = await this.provider.run({
+        ...req,
+        ...this.isolation(role, req.cwd),
+        role,
+        model,
+        system: harness.prompts[role],
+        budgetUsd: cap ? cap.usd : harness.config.budgetUsd[role],
+        ...(cap ? { maxTurns: cap.turns } : {}),
+        timeoutMs: TIMEOUT_MS[role],
+        logFile: this.store.path('runs', run.id, 'logs', `${task?.id ?? 'run'}-${role}-${attempt}${sfx}.jsonl`),
+        meta: { task: task?.id, attempt, run: run.id, variant },
+        onAction: (action) => {
+          agent.lastAction = action;
+          if (role === 'worker' && !this.cacheWarmed) this.warmed();
+          if (!action.startsWith('says:')) agent.tools += 1;
+          this.emit('agent.action', action, undefined, task?.id, role);
+          if (Date.now() - lastSave > 200) {
+            lastSave = Date.now();
+            this.save();
+          }
+        },
+      });
+    } catch (e) {
+      // A runner that throws must not leave a phantom active agent behind.
+      run.active = run.active.filter((a) => a !== agent);
+      throw e;
+    }
     run.active = run.active.filter((a) => a !== agent);
     if (role === 'worker' && task) {
       const u = this.workerUse.get(task.id) ?? { turns: 0, usd: 0 };

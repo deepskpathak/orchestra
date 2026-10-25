@@ -215,3 +215,38 @@ test('provider: default is the Claude adapter around the injected runner; unknow
   const bad = tempRepo({ provider: 'nope' });
   await assert.rejects(() => runGoal({ store: bad, runner: planned([task('T1')]), goal: 'g' }), /unknown model provider "nope"/);
 });
+
+test('best-of-n: the remaining worker cap is split across the parallel samples', async () => {
+  const store = tempRepo({ bestOfN: { enabled: true, n: 2 }, testCommand: 'true', budgets: { workerPrompt: { enabled: true, maxTurns: 10 } } });
+  const reqs: AgentRequest[] = [];
+  await runGoal({ store, runner: planned([task('T1')], { onReq: (r) => reqs.push(r) }), goal: 'g' });
+  const w = workers(reqs);
+  assert.equal(w.length, 2);
+  assert.equal(w[0].maxTurns, 5);
+  assert.equal(w[1].maxTurns, 5);
+  // One sample would get the whole remaining dollar cap; two share it.
+  const solo = tempRepo({ bestOfN: { enabled: false, n: 2 }, testCommand: 'true', budgets: { workerPrompt: { enabled: true, maxTurns: 10 } } });
+  const soloReqs: AgentRequest[] = [];
+  await runGoal({ store: solo, runner: planned([task('T1')], { onReq: (r) => soloReqs.push(r) }), goal: 'g' });
+  const whole = workers(soloReqs)[0];
+  assert.equal(whole.maxTurns, 10);
+  assert.ok(Math.abs(w[0].budgetUsd * 2 - whole.budgetUsd) < 0.001);
+});
+
+test('best-of-n: a crashing sample is tolerated and its worktrees and branches are cleaned up', async () => {
+  const store = tempRepo({ bestOfN: { enabled: true, n: 3 }, testCommand: 'test -f fake/GOOD.txt' });
+  const after = async (req: AgentRequest) => {
+    if (req.role !== 'worker') return;
+    if (req.meta?.variant === 's2') throw new Error('runner exploded');
+    if (req.meta?.variant === 's3') {
+      mkdirSync(`${req.cwd}/fake`, { recursive: true });
+      writeFileSync(`${req.cwd}/fake/GOOD.txt`, 'ok\n');
+    }
+  };
+  const run = await runGoal({ store, runner: planned([task('T1')], { after }), goal: 'g' });
+  assert.equal(run.status, 'done', run.error);
+  assert.deepEqual(run.active, []);
+  assert.ok(store.events(run.id).some((e) => /sample 2 crashed: runner exploded/.test(e.msg)));
+  assert.equal(execFileSync('git', ['branch', '--list', '*-s[23]'], { cwd: store.root, encoding: 'utf8' }).trim(), '', 'sample branches are cleaned up');
+  assert.doesNotMatch(execFileSync('git', ['worktree', 'list'], { cwd: store.root, encoding: 'utf8' }), /-s[23]/);
+});
