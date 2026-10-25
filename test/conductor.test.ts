@@ -763,3 +763,44 @@ test('panel contrast: orders that disagree give no pick; consistent orders pick'
   const r2 = await runGoal({ store: steady, runner: content, goal: 'g' });
   assert.equal(r2.tasks.find((t) => t.id === 'T2')!.contrast?.picked, 'B');
 });
+
+// W4.5 mutation pass. changedFiles and exec are injected, the fake runner never touches real source.
+const mutationRepo = (mutation: Record<string, unknown>) => {
+  const store = tempRepo({ testCommand: 'true', verification: { ...DEFAULT_PROJECT_CONFIG.verification, mutation: { ...DEFAULT_PROJECT_CONFIG.verification.mutation, enabled: true, ...mutation } } });
+  writeFileSync(join(store.root, 'calc.js'), 'export const ok = (a, b) => a === b && a < 3;\n');
+  execFileSync('git', ['add', '-A'], { cwd: store.root });
+  execFileSync('git', ['commit', '-qm', 'calc'], { cwd: store.root });
+  return store;
+};
+
+test('mutation enabled sets run.mutation and emits an event; scratch worktree is cleaned up', async () => {
+  const store = mutationRepo({ floor: 0.5 });
+  const seen: string[] = [];
+  const run = await runGoal({ store, runner: fakeRunner(), goal: 'g', mutation: { changedFiles: ['calc.js', 'README.md'], exec: (cwd, c) => { seen.push(cwd); return { ok: true }; } } });
+  assert.equal(run.status, 'done');
+  assert.equal(run.mutation!.total, 3);
+  assert.equal(run.mutation!.killed, 0);
+  assert.equal(run.mutation!.pass, false);
+  assert.ok(store.events(run.id).some((e) => /Mutation score 0\.00/.test(e.msg)));
+  assert.equal(store.readJson<{ mutation?: unknown }>(`runs/${run.id}/run.json`, {}).mutation !== undefined, true);
+  assert.ok(seen.every((d) => d.includes('mutation')));
+  assert.ok(!existsSync(seen[0]));
+});
+
+test('mutation failBelowFloor fails the run with a clear error; report-only does not', async () => {
+  const low = mutationRepo({ floor: 0.9, failBelowFloor: true });
+  let n = 0;
+  const bad = await runGoal({ store: low, runner: fakeRunner(), goal: 'g', mutation: { changedFiles: ['calc.js'], exec: () => ({ ok: ++n !== 3 }) } });
+  assert.equal(bad.status, 'failed');
+  assert.match(bad.error!, /Mutation score 0\.33 is below the floor 0\.9 \(2 of 3 mutants survived\)/);
+  const soft = mutationRepo({ floor: 0.9 });
+  const ok = await runGoal({ store: soft, runner: fakeRunner(), goal: 'g', mutation: { changedFiles: ['calc.js'], exec: () => ({ ok: true }) } });
+  assert.equal(ok.status, 'done');
+  assert.equal(ok.mutation!.pass, false);
+});
+
+test('mutation disabled leaves the run without mutation', async () => {
+  const store = tempRepo();
+  const run = await runGoal({ store, runner: fakeRunner(), goal: 'g', mutation: { changedFiles: ['calc.js'], exec: () => { throw new Error('must not run'); } } });
+  assert.equal(run.mutation, undefined);
+});
