@@ -665,11 +665,12 @@ test('an atlas build error is logged and the run completes with the old prompts'
   for (const s of seen) assert.doesNotMatch(s.prompt, /REPOSITORY MAP|## Task pack/);
 });
 
-test('ledger footprint.planned uses the planner footprint when provided', async () => {
+test('ledger footprint.planned stays title-derived; planner footprint goes in declared, limited to tracked files', async () => {
   const store = atlasRepo();
   await runGoal({ store, runner: fakeRunner({ footprints: true }), goal: 'g' });
   const row = store.ledgerRows().find((r) => r.outcome === 'merged' && r.task === 'T1')!;
-  assert.deepEqual(row.footprint!.planned, ['fake/T1.txt', 'README.md']);
+  assert.ok(!row.footprint!.planned.includes('fake/T1.txt'), 'declared-only path must not enter planned');
+  assert.deepEqual(row.footprint!.declared, ['README.md'], 'nonexistent fake/T1.txt dropped');
 });
 
 test('normalizeTasks sanitises footprints; schema allows them optionally', () => {

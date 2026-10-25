@@ -883,12 +883,17 @@ export class Conductor {
     this.save();
   }
 
-  // Passive: planned files are repo paths named in the task text; changed files come from the task branch diff.
-  private footprint(task: Task): { planned: string[]; changed: string[] } | undefined {
+  // Passive: planned files are repo paths named in the task text, so the metric means the same with
+  // the atlas on or off. Planner-declared footprint files go in `declared`, intersected with tracked
+  // files because the planner may name paths that do not exist. Changed files come from the task branch diff.
+  private footprint(task: Task): { planned: string[]; changed: string[]; declared?: string[] } | undefined {
     try {
-      const planned = task.footprint?.files.length ? task.footprint.files : plannedFiles([task.title, task.description, ...task.acceptance].join('\n'), g.trackedFiles(this.integration.path, 100_000));
+      const tracked = g.trackedFiles(this.integration.path, 100_000);
+      const planned = plannedFiles([task.title, task.description, ...task.acceptance].join('\n'), tracked);
+      const known = new Set(tracked);
+      const declared = task.footprint?.files.length ? task.footprint.files.filter((f) => known.has(f)) : undefined;
       const changed = g.changedFiles(task.worktree!, g.mergeBase(task.worktree!, 'HEAD', this.integration.branch));
-      return { planned, changed };
+      return declared ? { planned, changed, declared } : { planned, changed };
     } catch (e) {
       this.emit('log', `${task.id} footprint unavailable: ${(e as Error).message.split('\n')[0]}`, undefined, task.id);
       return undefined;
@@ -1105,7 +1110,7 @@ export class Conductor {
     return res;
   }
 
-  private ledgerOutcome(task: Task, outcome: string, footprint?: { planned: string[]; changed: string[] }): void {
+  private ledgerOutcome(task: Task, outcome: string, footprint?: { planned: string[]; changed: string[]; declared?: string[] }): void {
     this.store.ledger({
       t: Date.now(),
       run: this.run.id,

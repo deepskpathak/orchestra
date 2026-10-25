@@ -49,6 +49,9 @@ export interface FootprintRow {
   tasks: number;
   precision?: number;
   recall?: number;
+  declaredTasks: number; // merged tasks whose plan carried a footprint with at least one tracked file
+  declaredPrecision?: number;
+  declaredRecall?: number;
 }
 
 export interface ExplorationMetrics {
@@ -83,17 +86,23 @@ export function explorationMetrics(rows: LedgerRow[]): ExplorationMetrics {
     byKey.set(k, e);
   }
   const roles = [...byKey.values()].sort((a, b) => vnum(a.harness) - vnum(b.harness) || a.role.localeCompare(b.role));
-  const fp = new Map<string, { p: (number | undefined)[]; r: (number | undefined)[] }>();
+  const fp = new Map<string, { p: (number | undefined)[]; r: (number | undefined)[]; dp: (number | undefined)[]; dr: (number | undefined)[]; dn: number }>();
   for (const r of goal) {
     if (r.outcome !== 'merged' || !r.footprint) continue;
     const a = footprintAccuracy(r.footprint.planned, r.footprint.changed);
-    const e = fp.get(r.harness) ?? { p: [], r: [] };
+    const e = fp.get(r.harness) ?? { p: [], r: [], dp: [], dr: [], dn: 0 };
     e.p.push(a.precision);
     e.r.push(a.recall);
+    if (r.footprint.declared) {
+      const d = footprintAccuracy(r.footprint.declared, r.footprint.changed);
+      e.dn++;
+      e.dp.push(d.precision);
+      e.dr.push(d.recall);
+    }
     fp.set(r.harness, e);
   }
   const footprint = [...fp.entries()]
-    .map(([harness, e]) => ({ harness, tasks: e.p.length, precision: avg(e.p), recall: avg(e.r) }))
+    .map(([harness, e]) => ({ harness, tasks: e.p.length, precision: avg(e.p), recall: avg(e.r), declaredTasks: e.dn, declaredPrecision: avg(e.dp), declaredRecall: avg(e.dr) }))
     .sort((a, b) => vnum(a.harness) - vnum(b.harness));
   return { roles, footprint };
 }
@@ -115,6 +124,9 @@ export function renderExploration(m: ExplorationMetrics): string {
   }
   out.push('Footprint accuracy (planned files vs files changed, merged tasks)');
   if (!m.footprint.length) out.push('  no footprint data yet');
-  for (const f of m.footprint) out.push(`  ${f.harness.padEnd(8)} tasks ${String(f.tasks).padStart(3)}  precision ${pct(f.precision)}  recall ${pct(f.recall)}`);
+  for (const f of m.footprint) {
+    out.push(`  ${f.harness.padEnd(8)} tasks ${String(f.tasks).padStart(3)}  precision ${pct(f.precision)}  recall ${pct(f.recall)}`);
+    if (f.declaredTasks) out.push(`  ${''.padEnd(8)} declared ${String(f.declaredTasks).padStart(3)}  precision ${pct(f.declaredPrecision)}  recall ${pct(f.declaredRecall)}  (planner footprint files)`);
+  }
   return out.join('\n');
 }

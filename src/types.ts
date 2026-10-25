@@ -151,7 +151,7 @@ export interface LedgerRow {
   cacheReadTokens?: number;
   cacheWriteTokens?: number;
   toolCounts?: Record<string, number>; // tool_use blocks by tool name; absent on legacy rows
-  footprint?: { planned: string[]; changed: string[] }; // on merged outcome rows: planned vs changed files
+  footprint?: { planned: string[]; changed: string[]; declared?: string[] }; // on merged outcome rows: planned (named in the task text) vs changed files; declared = planner footprint files that exist
   outcome?: string; // e.g. "pass", "fail", "merged", "conflict"
   score?: number;
 }

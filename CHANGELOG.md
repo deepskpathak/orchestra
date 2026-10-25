@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Exploration metrics: planner-declared `footprint.files` no longer replace the title-derived "planned" set in the ledger. Planned keeps its meaning with the atlas on or off; declared files (intersected with tracked files) go in a separate `footprint.declared` field and a second "declared" line in `orchestra stats`.
 - Bench: `orchestra bench --reference <arm>` now fails before running when the arm is not among the arms in the run, instead of rendering every row as `(reference)`.
 - Atlas Go imports: resolution uses the `go.mod` module path when present (stdlib and external imports get no edge) and otherwise needs at least two trailing path segments, via a precomputed directory-suffix map instead of scanning every directory per import.
 - Atlas TS/JS imports: the import/export regex is anchored per statement and cannot span another import or export keyword, so in semicolon-less code an earlier `export ...` no longer swallows the next import.
