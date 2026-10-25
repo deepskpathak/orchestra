@@ -92,6 +92,7 @@ Set `ORCHESTRA_RUNNER=fake` to use the simulator instead of real Claude sessions
 | `orchestra stats` | Factory health per harness version, plus outcome metrics (merge acceptance, edits before landing, revert rate, cost per accepted merge, success by task length), merged-but-wrong rate and judge agreement split by M4 verification mode |
 | `orchestra evolve` | Propose, evaluate, and maybe promote a better harness |
 | `orchestra learnings [--domain <slug>]` | Show what the factory has learned in this repo (`--domain` filters to one domain, `global` for cross-domain lessons) |
+| `orchestra atlas find\|neighbors\|impact\|tests <symbol-or-path>` | L2 code graph queries as a capped tree (80 lines). Need `context.atlas.enabled` and a built atlas, else a hint and a non-zero exit. Files modified in the current worktree are marked `(stale: read the file)`. `context.atlas.query` adds the command to worker and judge prompts. Advisory only |
 | `orchestra atlas build` / `orchestra atlas stats` | Build or refresh the Repo Atlas code graph for HEAD (`.orchestra/atlas/<sha>.json`), or show its file, symbol and edge counts. Work even when `context.atlas.enabled` is false; `.orchestra/`, `.env*` and secret files are never indexed |
 | `orchestra evals` | List Factory Eval cases (`--regression`, `--tag <t>`) |
 | `orchestra evals add` | Add a case for a goal you choose, or harvest a failed run with `--from-run <id> --fix <commit>` |

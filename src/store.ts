@@ -24,7 +24,7 @@ export const DEFAULT_PROJECT_CONFIG: ProjectConfig = {
     mutation: { enabled: false, floor: 0.6, maxMutants: 20, failBelowFloor: false, mutantTimeoutMs: 60000 },
   },
   fastPath: { enabled: false, maxGoalChars: 400 },
-  context: { atlas: { enabled: false, mapTokens: 1024, packs: false, packTokens: 1500 } },
+  context: { atlas: { enabled: false, mapTokens: 1024, packs: false, packTokens: 1500, query: false } },
   learnings: { expiryDays: 0 },
   evolve: { every: 3, autoPromote: true, minGain: 0.02, sample: 5, minCases: 5, candidates: 1, promotionRule: 'gain', niMargin: 0.05, minJudgeAgreement: null,
     budgetUsd: 0,
