@@ -7,7 +7,7 @@ Orchestra has two config layers, both plain JSON:
 
 ## Project config (`.orchestra/config.json`)
 
-Defaults come from `DEFAULT_PROJECT_CONFIG` in `src/store.ts`. Missing keys fall back to the defaults, and the `judgeTiers`, `preJudge`, `contrastive`, `fastPath`, `verification` and `evolve` objects are merged key by key, so older configs get the defaults for newer keys automatically. On `orchestra init`, `testCommand` is filled in by auto-detection (it stays `null` if nothing is detected).
+Defaults come from `DEFAULT_PROJECT_CONFIG` in `src/store.ts`. Missing keys fall back to the defaults, and the `judgeTiers`, `preJudge`, `contrastive`, `fastPath`, `verification`, `throughput`, `oversight`, `planner`, `budgets`, `bestOfN`, `cache`, `learnings` and `evolve` objects are merged key by key, so older configs get the defaults for newer keys automatically. On `orchestra init`, `testCommand` is filled in by auto-detection (it stays `null` if nothing is detected).
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
@@ -23,6 +23,14 @@ Defaults come from `DEFAULT_PROJECT_CONFIG` in `src/store.ts`. Missing keys fall
 | `contrastive` | object | see below | Two-worker contrastive repair. |
 | `verification` | object | see below | M4 Verification checks, all off by default. |
 | `context` | object | see below | Repo context settings (`context.atlas`). |
+| `throughput` | object | see below | Footprint scheduling and batched merges (W6.1, W6.2), off. |
+| `oversight` | object | see below | Risk tiers for landing (W7.1), off. |
+| `planner` | object | see below | Planner cascade (W6.3), off. |
+| `budgets` | object | see below | Budget-aware worker prompts with hard caps (W6.5), off. |
+| `bestOfN` | object | see below | Verifier-gated best-of-n (W6.6), off. |
+| `cache` | object | see below | Prompt cache discipline (W6.4), off. |
+| `provider` | string | `"claude"` | Model provider adapter (W8.1). |
+| `learnings` | object | see below | Lesson expiry and the L3 lesson graph. |
 | `evolve` | object | see below | Self-improvement settings. |
 
 ### `sandbox`

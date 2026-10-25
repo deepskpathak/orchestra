@@ -82,7 +82,7 @@ If a worker finds that the spec and the tests contradict each other, it ends wit
 
 The integrity monitor runs on each worker diff before the judge. If a grading file that existed at the base was edited, tests are re-run with the originals restored and the attempt goes to repair with an automatic `[integrity-monitor]` note. Flags are kept on `task.integrityFlags`.
 
-Task states are `pending`, `running`, `judging`, `repair`, `merging`, `merged`, `failed`, `needs_human` and `blocked`. Tasks start in dependency order, up to `concurrency` at a time, until `runBudgetUsd` is spent.
+Task states are `pending`, `running`, `judging`, `repair`, `merging`, `awaiting_approval` (opt-in risk tiers), `merged`, `failed`, `needs_human` and `blocked`. Tasks start in dependency order, up to `concurrency` at a time, until `runBudgetUsd` is spent.
 
 Opt-in cost controls (all off by default, keys in `docs/configuration.md`) hook into this loop. With `budgets.workerPrompt` the worker prompt carries the remaining turns and dollars and a task at its cap fails instead of repairing. With `bestOfN` and an executable verifier, `sampleBest` runs several workers in separate worktrees and keeps the one the tests prefer. With `cache.discipline` sibling requests are made identical and the scheduler starts one worker before fanning out. With `planner.cascade`, `plan()` asks a cheap model first and escalates only on low confidence or a failed `planChecks`. Every agent call goes through the `ModelProvider` adapter in `src/provider.ts`.
 

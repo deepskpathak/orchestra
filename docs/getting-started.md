@@ -130,7 +130,7 @@ ORCHESTRA_RUNNER=fake orchestra run "Add a health endpoint"
 | `orchestra serve [--port N]` | Read-only web dashboard (default port 4317) |
 | `orchestra bench` | Benchmark suite against hidden checks (see [bench.md](bench.md)) |
 | `orchestra approve <runId> <taskId> --by <name>` | Land a task held for approval by `oversight.riskTiers` (not by the requester or an agent) |
-| `orchestra stats` | Factory health per harness version |
+| `orchestra stats [--json]` | Factory health per harness version, outcome metrics and oversight and throughput metrics |
 | `orchestra evolve` | Propose, evaluate and maybe promote a better harness |
 | `orchestra learnings [--domain <slug>]` | Show what the factory has learned in this repo (`--domain` filters to one domain, `global` for cross-domain lessons) |
 | `orchestra atlas find\|neighbors\|impact\|tests <symbol-or-path>` | L2 code graph queries as a capped tree (80 lines). Need `context.atlas.enabled` and a built atlas (`orchestra atlas build`), else a hint and a non-zero exit. Modified files are marked `(stale: read the file)`; `context.atlas.query` mentions the command in worker and judge prompts. Advisory only, never gates a merge |

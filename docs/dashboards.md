@@ -49,6 +49,21 @@ The page lists runs (newest first) and streams live updates for the selected run
 
 The page follows your system light or dark theme; the half-moon button overrides it. The theme and the Board or Flow choice are remembered in the browser.
 
+## Oversight and throughput metrics
+
+`orchestra stats` and the web dashboard (run header, from `/api/info` field `oversight`) show how much human attention the factory used and how well it parallelised. They are computed over all goal runs (eval runs are excluded) from data the conductor stores on each run:
+
+| Metric | Meaning |
+|--------|---------|
+| Interruptions | Tasks stopped as `needs_human`, plus approval requests (`awaiting_approval` under `oversight.riskTiers`) |
+| Review minutes | Time from approval request to `orchestra approve`, summed over decided approvals |
+| Edits before landing | Human commits (not merges, not authored by `Orchestra`) on the integration branch between the approval request and the merge |
+| Conflict rate | Merge conflicts divided by merge attempts (`Run.conflictRate`); pooled across runs |
+| Mean merge wait | Judged-pass to landed, per task (`Task.mergeWaitMs`) |
+| Cache-read share | Cache-read tokens divided by all input tokens (`Run.cacheReadShare`) |
+
+A metric with no data shows `n/a`; a run with no approvals or stops shows zeros. `orchestra stats --json` returns the same numbers per run and in total under `oversight`. The terminal dashboard is unchanged.
+
 ## Terminal dashboard
 
 ```
