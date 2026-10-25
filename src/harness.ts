@@ -34,6 +34,10 @@ export interface ArchiveEntry {
   evalDetail?: Record<string, number>;
   parents?: string[]; // composed variants list the versions they merged
   screenScore?: number | null; // mean score on the cheap screening sample
+  validationDetail?: Record<string, number>; // per-case validation scores (preferred over evalDetail for the Pareto front)
+  paretoWins?: number; // validation cases this variant is best on
+  stepping?: boolean; // kept on the Pareto front as a stepping stone, not promoted
+  holdoutScore?: number | null; // locked holdout score; never shown to the evolver
   evalInfraRate?: number; // share of the last full eval's replays that failed on infrastructure
   status: 'promoted' | 'candidate' | 'rejected' | 'retired';
 }
