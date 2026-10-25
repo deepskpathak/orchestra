@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Atlas TS/JS extractor: class methods are only the lines at the class body's own indent (learned from the first member line, as the Python extractor does), so calls such as `emit({` or `describe('x', function () {` inside a method are no longer recorded as methods.
 - Atlas tests edges: the test subject is derived only from real test naming patterns (`.test`/`.spec`, `_test`, `test_` prefix, Java `Test`/`Tests`/`IT` after a lowercase letter or digit), so names like `EDIT.java` are no longer mangled, and a name-based edge is limited to the test's own directory or the subtree above its `tests/` directory instead of any directory in the repo.
 - Exploration metrics: planner-declared `footprint.files` no longer replace the title-derived "planned" set in the ledger. Planned keeps its meaning with the atlas on or off; declared files (intersected with tracked files) go in a separate `footprint.declared` field and a second "declared" line in `orchestra stats`.
 - Bench: `orchestra bench --reference <arm>` now fails before running when the arm is not among the arms in the run, instead of rendering every row as `(reference)`.

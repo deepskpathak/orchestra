@@ -139,22 +139,25 @@ function parseNamedList(body: string): string[] {
 export function extractTsJs(text: string): Extracted {
   const symbols: AtlasSymbol[] = [];
   const lines = text.split('\n');
-  let cls: { name: string; indent: number } | null = null;
+  // body is the indent of the class members, learned from the first non-blank line inside the class
+  // (as the Python extractor does); deeper lines such as `emit({` or `describe('x', function () {` are not members.
+  let cls: { name: string; indent: number; body: number } | null = null;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     const ind = indentOf(line);
     if (cls && ind <= cls.indent && /^\s*\}/.test(line)) cls = null;
+    if (cls && cls.body < 0 && line.trim() && ind > cls.indent) cls.body = ind;
     let m: RegExpExecArray | null;
     if ((m = /^\s*(export\s+)?(?:default\s+)?(?:declare\s+)?(?:abstract\s+)?class\s+([\w$]+)/.exec(line))) {
       symbols.push({ name: m[2], kind: 'class', line: i + 1, exported: !!m[1] });
-      cls = { name: m[2], indent: ind };
+      cls = /\}\s*;?\s*$/.test(line) ? null : { name: m[2], indent: ind, body: -1 };
     } else if ((m = /^\s*(export\s+)?(?:default\s+)?(?:declare\s+)?(?:async\s+)?function\s*\*?\s*([\w$]+)/.exec(line))) {
       symbols.push({ name: m[2], kind: 'function', line: i + 1, exported: !!m[1] });
     } else if ((m = /^\s*(export\s+)?(?:declare\s+)?(?:const\s+)?(?:interface|enum)\s+([\w$]+)/.exec(line)) || (m = /^\s*(export\s+)?(?:declare\s+)?type\s+([\w$]+)\s*(?:<[^=]*>)?\s*=/.exec(line))) {
       symbols.push({ name: m[2], kind: 'type', line: i + 1, exported: !!m[1] });
     } else if ((m = /^\s*export\s+(?:const|let|var)\s+([\w$]+)/.exec(line))) {
       symbols.push({ name: m[1], kind: 'const', line: i + 1, exported: true });
-    } else if (cls && ind > cls.indent && (m = /^\s*(?:(?:public|private|protected|static|async|readonly|override|abstract|get|set)\s+)*\*?\s*([\w$]+)\s*(?:<[^>(]*>)?\s*\([^)]*\)?[^=;{]*\{/.exec(line)) && !KEYWORDS.has(m[1])) {
+    } else if (cls && ind === cls.body && (m = /^\s*(?:(?:public|private|protected|static|async|readonly|override|abstract|get|set)\s+)*\*?\s*([\w$]+)\s*(?:<[^>(]*>)?\s*\([^)]*\)?[^=;{]*\{/.exec(line)) && !KEYWORDS.has(m[1])) {
       symbols.push({ name: `${cls.name}.${m[1]}`, kind: 'method', line: i + 1, exported: false });
     }
     if (symbols.length >= MAX_SYMBOLS_PER_FILE) break;

@@ -319,3 +319,29 @@ test('name-based tests edges strip only real test suffixes and stay in scope', (
   assert.deepEqual(testsOf('pkg/tests/widget.spec.ts'), ['pkg/a/widget.ts', 'pkg/b/widget.ts']);
   assert.deepEqual(testsOf('other/lone.test.ts'), [], 'same-dir only; src/lone.ts is elsewhere');
 });
+
+test('extractTsJs only treats lines at the class body indent as methods', () => {
+  const src = `export class Bus {
+  // handlers
+  emit(evt: string) {
+    this.queue.push({
+      evt,
+    });
+    send({
+      a: 1,
+    });
+    describe('x', function () {
+    });
+  }
+  static create(): Bus {
+    return new Bus();
+  }
+}
+class Empty {}
+export function after() {
+  emit({
+  });
+}
+`;
+  assert.deepEqual(names(extractTsJs(src)), ['class:Bus', 'method:Bus.emit', 'method:Bus.create', 'class:Empty', 'function:after']);
+});
