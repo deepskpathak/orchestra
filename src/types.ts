@@ -103,6 +103,7 @@ export interface Run {
   baseRef?: string;
   requestedBy?: string; // who asked for the run: ORCHESTRA_REQUESTER or git user.name (W7.1)
   conflictRate?: number; // W6.1: merge conflicts / merge attempts
+  cacheReadShare?: number; // W6.4: cache-read tokens / all input tokens across the run's agent calls; absent without token data
   atlasSha?: string; // commit the Repo Atlas was built at, when context.atlas is enabled
   tasks: Task[];
   costUsd: number;
@@ -257,6 +258,11 @@ export interface ProjectConfig {
   };
   throughput?: { footprintScheduling: boolean; batchMerge: { enabled: boolean; maxBatch: number } }; // W6.1, W6.2
   oversight?: { riskTiers: RiskTierConfig }; // W7.1
+  planner?: { cascade: { enabled: boolean; draftModel: string; confidenceThreshold: number } }; // W6.3: cheap model drafts, harness planner model on low confidence or a failed check
+  budgets?: { workerPrompt: { enabled: boolean; maxTurns: number } }; // W6.5: turns and dollars remaining in worker prompts, hard task caps
+  bestOfN?: { enabled: boolean; n: number }; // W6.6: extra worker samples only when an executable verifier exists
+  cache?: { discipline: { enabled: boolean; warmFirst: boolean } }; // W6.4: identical sibling requests, warm one worker before fan-out
+  provider?: string; // W8.1: model provider adapter, 'claude' (default) is the only one
   verification: VerificationConfig;
   learnings?: { expiryDays: number; graph?: boolean }; // expiryDays: drop lessons with evidence older than this many days (0 = off); graph: rank lessons linked to the task footprint first (L3)
   evolve: {

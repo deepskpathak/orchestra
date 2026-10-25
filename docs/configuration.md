@@ -143,6 +143,25 @@ Off by default. When enabled, each judged-pass task is classified from its diff 
 | `oversight.riskTiers.highRiskGlobs` | string[] | auth, secrets, migrations, data, infra, terraform, k8s, Dockerfile, workflows | Any match makes the task high risk. |
 | `oversight.riskTiers.largeDiffLines` | number | `400` | Added plus removed lines above which a task is high risk. |
 
+### Cost control and provider (W6.3 to W6.6, W8.1)
+
+All off by default. Each object is merged key by key, so a partial block keeps the other defaults.
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `planner.cascade.enabled` | boolean | `false` | A cheap model drafts the plan with a `confidence` field. The harness planner model is called only when `planChecks` finds an issue (unknown dependency, dependency cycle, task without acceptance criteria, no tasks), the confidence is missing or below the threshold, or the draft call fails. One `plan_cascade_draft_accepted` or `plan_cascade_escalated` outcome row is written to the ledger (scored with the confidence) for a later router. |
+| `planner.cascade.draftModel` | string | `fast` | Model or tier for the draft. |
+| `planner.cascade.confidenceThreshold` | number | `0.7` | Drafts below this escalate. |
+| `budgets.workerPrompt.enabled` | boolean | `false` | Worker prompts get a `## Budget` section with turns and dollars remaining. The caps are per task across attempts: `maxTurns` worker turns and the harness `budgetUsd.worker` dollars. Each worker session is started with `--max-turns` and `--max-budget-usd` set to what remains. A task that fails a verdict with the cap reached becomes `failed` ("worker budget cap reached") instead of going to repair. |
+| `budgets.workerPrompt.maxTurns` | number | `100` | Worker turns allowed per task, all attempts. |
+| `bestOfN.enabled` | boolean | `false` | Run `n` worker samples per attempt, but only when a `testCommand` or a scenario `check` exists (otherwise exactly one sample, logged). Samples run in parallel in their own worktrees; the winner is chosen by the test command, then by scenario checks passed, before the judge sees only that one. A tie keeps the first sample. Not used for contrastive repair pairs. |
+| `bestOfN.n` | number | `2` | Samples per attempt. |
+| `cache.discipline.enabled` | boolean | `false` | Sibling worker requests carry the same sorted `allowedTools`, the same system prompt and the same prompt prefix (no per-task lesson ordering). |
+| `cache.discipline.warmFirst` | boolean | `true` | With discipline on, start one worker and wait for its first action before fanning out the rest. |
+| `provider` | string | `claude` | Model provider adapter (`src/provider.ts`). `claude` wraps the `claude -p` runner with no behaviour change; any other value is rejected. |
+
+The share of input tokens served from the prompt cache is recorded as `Run.cacheReadShare` and in the `run.end` event whenever the agent calls reported token usage.
+
 ### `contrastive`
 
 Off by default. Without a test command the judge scores a single attempt with no objective check, so scores are noisy. When enabled, a repair attempt runs two workers instead of one, in separate worktrees off the same base: A follows the repair notes as usual, B is told to take a different approach to the same failing criteria. One comparison judge call sees both diffs, the acceptance criteria and the hidden scenarios, scores each attempt per criterion, and picks a winner with reasons. The winner's branch continues to the merge queue, the loser's worktree and branch are deleted, and both attempts are recorded in run events and the task drawer.

@@ -84,6 +84,8 @@ The integrity monitor runs on each worker diff before the judge. If a grading fi
 
 Task states are `pending`, `running`, `judging`, `repair`, `merging`, `merged`, `failed`, `needs_human` and `blocked`. Tasks start in dependency order, up to `concurrency` at a time, until `runBudgetUsd` is spent.
 
+Opt-in cost controls (all off by default, keys in `docs/configuration.md`) hook into this loop. With `budgets.workerPrompt` the worker prompt carries the remaining turns and dollars and a task at its cap fails instead of repairing. With `bestOfN` and an executable verifier, `sampleBest` runs several workers in separate worktrees and keeps the one the tests prefer. With `cache.discipline` sibling requests are made identical and the scheduler starts one worker before fanning out. With `planner.cascade`, `plan()` asks a cheap model first and escalates only on low confidence or a failed `planChecks`. Every agent call goes through the `ModelProvider` adapter in `src/provider.ts`.
+
 ## Merge queue
 
 Passing tasks enter a queue that serializes merges into the integration branch (`enqueueMerge` and `mergeOne`). Each merge is a `--no-ff` merge. Two things send a task back for repair instead of landing:

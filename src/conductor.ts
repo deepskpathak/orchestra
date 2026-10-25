@@ -24,6 +24,9 @@ import { buildSandboxPolicy, preflightSandbox, scrubVerifierEnv, scrubWorkerEnv,
 import { newRunId, type Store } from './store.ts';
 import { bisectBatch, canStart, conflictRate, decisionLog, planBatches } from './throughput.ts';
 import { classifyRisk } from './oversight.ts';
+import { bestOfNAllowed, budgetExhausted, budgetLine, cacheReadShare, planChecks, selectBestByTests, shouldEscalatePlan, type BudgetState, type TestCandidate } from './cost.ts';
+import { DEFAULT_PROVIDER, resolveModel } from './models.ts';
+import { resolveProvider, type ModelProvider } from './provider.ts';
 import { verificationModes } from './outcomes.ts';
 import { AGENTIC_INSTRUCTION, NO_EVIDENCE_NOTE, executedChecksSection, runScenarioChecks, type CheckResult } from './judge-checks.ts';
 import type { ActiveAgent, CriterionResult, OrchestraEvent, PanelRecord, Role, Run, Scenario, Task, Verdict } from './types.ts';
@@ -349,6 +352,10 @@ const PLAN_SCHEMA = {
   required: ['tasks', 'scenarios'],
 };
 
+// W6.3: the cascade draft also reports how sure it is; the strong planner call never sees this field.
+const CONFIDENCE_ASK = 'Also return a numeric top-level "confidence" from 0 to 1: how sure you are that this plan is complete, correctly ordered and has testable acceptance criteria.';
+const withConfidence = (schema: any) => ({ ...schema, properties: { ...schema.properties, confidence: { type: 'number', minimum: 0, maximum: 1 } } });
+
 export const FAST_PLAN_SCHEMA = {
   ...PLAN_SCHEMA,
   properties: { ...PLAN_SCHEMA.properties, tasks: { ...PLAN_SCHEMA.properties.tasks, maxItems: 1 } },
@@ -471,10 +478,12 @@ const TIMEOUT_MS: Record<Role, number> = {
   evolver: 15 * 60_000,
 };
 
+type AgentVariant = NonNullable<NonNullable<AgentRequest['meta']>['variant']>;
+
 export class Conductor {
   readonly run: Run;
   private readonly store: Store;
-  private readonly runner: Runner;
+  private readonly provider: ModelProvider; // W8.1: every agent call goes through the adapter
   private readonly sandboxOpt?: ConductorOptions['sandbox'];
   private readonly scrubEnv: boolean;
   private readonly preflightExec?: ProbeExec;
@@ -492,11 +501,15 @@ export class Conductor {
   private readonly inflightIds = new Set<string>(); // tasks with an attempt in progress (scheduler)
   private batchQueue: { task: Task; resolve: () => void }[] = []; // W6.2: judged-pass tasks waiting for a batch
   private readonly mergeReadyAt = new Map<string, number>();
+  private readonly workerUse = new Map<string, { turns: number; usd: number }>(); // W6.5: worker turns and dollars per task, all attempts
+  private cacheWarmed = false; // W6.4: the first worker has started acting, so its prompt prefix is cached
+  private wakeScheduler: () => void = () => {};
+  private readonly warmSignal = new Promise<void>((r) => { this.wakeScheduler = r; });
   private readonly wtRoot: string;
 
   constructor(opts: ConductorOptions) {
     this.store = opts.store;
-    this.runner = opts.runner;
+    this.provider = resolveProvider(opts.store.config().provider, opts.runner);
     this.harness = loadHarness(opts.store, opts.harnessVersion);
     this.onUpdate = opts.onUpdate;
     this.sandboxOpt = opts.sandbox;
@@ -570,10 +583,14 @@ export class Conductor {
       run.endedAt = Date.now();
       run.active = [];
       this.cleanup();
-      run.conflictRate = round(conflictRate(this.store.ledgerRows().filter((r) => r.run === run.id)));
+      const rows = this.store.ledgerRows().filter((r) => r.run === run.id);
+      run.conflictRate = round(conflictRate(rows));
+      const share = cacheReadShare(rows);
+      if (share !== undefined) run.cacheReadShare = round(share);
       this.emit('run.end', `Run ${run.status}. satisfaction ${run.satisfaction ?? 0}, cost $${run.costUsd.toFixed(2)}`, {
         satisfaction: run.satisfaction,
         conflictRate: run.conflictRate,
+        ...(run.cacheReadShare !== undefined ? { cacheReadShare: run.cacheReadShare } : {}),
         branch: run.integrationBranch,
       });
       this.save();
@@ -654,12 +671,31 @@ export class Conductor {
     });
     const prompt = joinPrompt(built);
 
-    const res = await this.call('planner', undefined, 1, {
-      prompt,
-      cwd: this.integration.path,
-      schema: fp.fast ? FAST_PLAN_SCHEMA : PLAN_SCHEMA,
-      tools: ['Read', 'Grep', 'Glob'],
-    });
+    const schema = fp.fast ? FAST_PLAN_SCHEMA : PLAN_SCHEMA;
+    const ask = (attempt: number, model?: string, draft = false) =>
+      this.call('planner', undefined, attempt, {
+        prompt: draft ? `${prompt}\n\n${CONFIDENCE_ASK}` : prompt,
+        cwd: this.integration.path,
+        schema: draft ? withConfidence(schema) : schema,
+        tools: ['Read', 'Grep', 'Glob'],
+      }, model);
+    let res: AgentResult;
+    const cascade = cfg.planner?.cascade;
+    if (cascade?.enabled) {
+      // W6.3: a cheap model drafts; the harness planner model is called only when the draft is unsure or fails a deterministic check.
+      const draftModel = resolveModel(cascade.draftModel, harness.config.provider ?? DEFAULT_PROVIDER);
+      const draft = await ask(1, draftModel, true);
+      const dOut = draft.ok ? (extractJson(draft) as { tasks?: any[]; confidence?: unknown } | undefined) : undefined;
+      const issues = !draft.ok ? [`draft planner failed: ${draft.error}`] : dOut?.tasks?.length ? planChecks(dOut.tasks) : ['draft plan has no tasks'];
+      const confidence = typeof dOut?.confidence === 'number' ? dOut.confidence : undefined;
+      const decision = shouldEscalatePlan({ confidence, threshold: cascade.confidenceThreshold, issues });
+      this.emit('log', `Planner cascade: ${decision.escalate ? 'escalated to' : 'accepted draft from'} ${decision.escalate ? harness.config.models.planner : draftModel} (${decision.reason})`, { cascade: { draftModel, confidence, escalated: decision.escalate, reason: decision.reason } });
+      // Outcome row for a later router: one per run, scored with the draft's confidence.
+      this.store.ledger({ t: Date.now(), run: run.id, kind: run.kind, harness: harness.version, role: 'planner', attempt: 1, model: draftModel, ok: !decision.escalate, costUsd: 0, durationMs: 0, turns: 0, outcome: decision.escalate ? 'plan_cascade_escalated' : 'plan_cascade_draft_accepted', ...(confidence !== undefined ? { score: confidence } : {}) });
+      res = decision.escalate ? await ask(2) : draft;
+    } else {
+      res = await ask(1);
+    }
     const out = extractJson(res) as { tasks?: any[]; scenarios?: Scenario[]; domain?: unknown; ambiguities?: unknown } | undefined;
     if (!res.ok || !out?.tasks?.length) throw new Error(`Planner failed: ${res.error ?? 'no tasks returned'}`);
 
@@ -743,6 +779,10 @@ export class Conductor {
       // W6.1 single writer: a task with an overlapping footprint waits for the in-flight one to finish.
       const running = run.tasks.filter((t) => inflight.has(t.id));
       let slots = Math.max(0, cfg.concurrency - inflight.size);
+      // W6.4: start one worker and let it begin acting (cache warm) before the siblings fan out.
+      const warming = cfg.cache?.discipline.enabled && cfg.cache.discipline.warmFirst && !this.cacheWarmed;
+      if (warming && inflight.size > 0) slots = 0;
+      else if (warming) slots = Math.min(slots, 1);
       for (const t of ready) {
         if (slots <= 0) break;
         if (cfg.throughput?.footprintScheduling && !canStart(t, running)) continue;
@@ -752,6 +792,7 @@ export class Conductor {
         const p = this.attempt(t)
           .catch((err) => this.fail(t, `internal error: ${(err as Error).message}`))
           .finally(() => {
+            this.warmed();
             inflight.delete(t.id);
             this.inflightIds.delete(t.id);
             this.pokeBatch();
@@ -759,7 +800,7 @@ export class Conductor {
         inflight.set(t.id, p);
       }
       if (inflight.size === 0) break;
-      await Promise.race(inflight.values());
+      await Promise.race(warming && !this.cacheWarmed ? [...inflight.values(), this.warmSignal] : inflight.values());
     }
     // Anything left pending has an unmet dependency chain.
     for (const t of run.tasks) if (t.status === 'pending' || t.status === 'repair') this.block(t, 'dependency never landed');
@@ -791,7 +832,8 @@ export class Conductor {
       workerPrompt({
         goal: this.run.goal,
         learnings: formatLearnings(learnings, 'worker', this.run.domain, undefined, {
-          footprint: task.footprint?.files ?? [],
+          // Cache discipline: the same prefix for every sibling, so no per-task lesson ordering.
+          footprint: cfg.cache?.discipline.enabled ? [] : (task.footprint?.files ?? []),
           graph: cfg.learnings?.graph === true,
           // Eval trials that read the store (the with-lessons ablation arm) still get no code-linked boost.
           cleanRoom: this.run.kind === 'eval',
@@ -806,17 +848,20 @@ export class Conductor {
         pack: this.taskPack(task),
         atlasQuery: this.atlasQuery(),
       }),
-    ) + (depLog ? `\n\n## Decisions from merged dependencies\n${depLog}` : '');
+    ) + (depLog ? `\n\n## Decisions from merged dependencies\n${depLog}` : '')
+      + (cfg.budgets?.workerPrompt.enabled ? `\n\n## Budget\n${budgetLine(this.budgetState(task))}` : '');
 
     if (!this.ablate.contrastive && contrastApplies(cfg, task)) return this.attemptContrast(task, wt, base, prompt);
 
-    const work = await this.call('worker', task, task.attempts, {
-      prompt,
-      cwd: wt.path,
-      allowedTools: cfg.allowedTools,
-      disallowedTools: cfg.disallowedTools,
-      permissionMode: cfg.permissionMode,
-    });
+    // W6.4: identical tool lists across siblings, whatever order the config listed them in.
+    const common = { allowedTools: cfg.cache?.discipline.enabled ? [...cfg.allowedTools].sort() : cfg.allowedTools, disallowedTools: cfg.disallowedTools, permissionMode: cfg.permissionMode };
+    // W6.6: extra samples only where an executable verifier exists.
+    const verifier = !!cfg.testCommand || this.scenarios.some((s) => !!s.check?.trim());
+    const n = cfg.bestOfN?.enabled ? bestOfNAllowed({ n: cfg.bestOfN.n, hasExecutableVerifier: verifier }) : 1;
+    if (cfg.bestOfN?.enabled && n === 1 && !verifier) this.emit('log', `${task.id} best-of-n skipped: no test command or scenario check to select with`, undefined, task.id);
+    const work = n > 1
+      ? await this.sampleBest(task, wt, base, n, prompt, common)
+      : await this.call('worker', task, task.attempts, { prompt, cwd: wt.path, ...common });
     g.commitAll(wt.path, `${task.id}: ${task.title} (orchestra attempt ${task.attempts})`);
 
     // A flagged contradiction stops the loop: no judge, no repair, not counted as a failure.
@@ -851,6 +896,12 @@ export class Conductor {
     }
 
     // ---- self-correction ----
+    // W6.5 hard cap: out of worker turns or dollars means no further attempt, whatever attempts remain.
+    if (!verdict.pass && cfg.budgets?.workerPrompt.enabled && budgetExhausted(this.budgetState(task))) {
+      this.ledgerOutcome(task, 'budget_cap');
+      const b = this.budgetState(task);
+      return this.fail(task, `worker budget cap reached (${b.turnsUsed}/${b.maxTurns} turns, $${b.usdSpent.toFixed(2)}/$${b.usdCap.toFixed(2)}). Last issues: ${verdict.issues.join(' | ').slice(0, 200)}`);
+    }
     if (!verdict.pass) return this.repairOrFail(task, verdict.issues.length ? verdict.issues : [verdict.summary]);
 
     task.status = 'merging';
@@ -1298,6 +1349,60 @@ export class Conductor {
     return out;
   }
 
+  // W6.5: worker turns and dollars spent on this task across attempts against the caps.
+  private budgetState(task: Task): BudgetState {
+    const u = this.workerUse.get(task.id) ?? { turns: 0, usd: 0 };
+    return { turnsUsed: u.turns, maxTurns: this.store.config().budgets?.workerPrompt.maxTurns ?? 0, usdSpent: u.usd, usdCap: this.harness.config.budgetUsd.worker };
+  }
+
+  // Session caps for the next worker call: what is left of the task budget. Undefined when the feature is off.
+  private workerCap(task: Task): { turns: number; usd: number } | undefined {
+    if (!this.store.config().budgets?.workerPrompt.enabled) return undefined;
+    const b = this.budgetState(task);
+    return { turns: Math.max(1, b.maxTurns - b.turnsUsed), usd: Math.max(0.01, round(b.usdCap - b.usdSpent, 4)) };
+  }
+
+  private warmed(): void {
+    this.cacheWarmed = true;
+    this.wakeScheduler();
+  }
+
+  // W6.6: n worker samples in separate worktrees, selected by the test command and scenario checks before
+  // the judge sees only the winner. A tie keeps the first sample. Sample 1 is the task worktree itself.
+  private async sampleBest(task: Task, wt: g.Worktree, base: string, n: number, prompt: string, common: Pick<AgentRequest, 'allowedTools' | 'disallowedTools' | 'permissionMode'>): Promise<AgentResult> {
+    const { store } = this;
+    const cfg = store.config();
+    const trees: g.Worktree[] = [wt];
+    for (let i = 2; i <= n; i++) {
+      const id = `${task.id}-s${i}`;
+      g.removeWorktree(store.root, join(this.wtRoot, this.run.id, id));
+      g.deleteBranch(store.root, `orchestra/${this.run.id}/${id}`);
+      trees.push(g.createTaskWorktree(store.root, this.wtRoot, this.run.id, id, g.head(this.integration.path)));
+    }
+    this.emit('log', `${task.id} best-of-${n}: running ${n} worker samples in parallel`, undefined, task.id);
+    this.save();
+    const works = await Promise.all(trees.map((w, i) => this.call('worker', task, task.attempts, { prompt, cwd: w.path, ...common }, undefined, i === 0 ? undefined : (`s${i + 1}` as AgentVariant))));
+    const checks = this.scenarios.filter((s) => s.check?.trim()).map((s) => s.check!);
+    const cands: (TestCandidate & { index: number })[] = [];
+    for (let i = 0; i < trees.length; i++) {
+      g.commitAll(trees[i].path, `${task.id}: ${task.title} (orchestra attempt ${task.attempts}, sample ${i + 1})`);
+      if (!works[i].ok || !g.hasChangesSince(trees[i].path, base)) continue;
+      const tests = cfg.testCommand ? await g.runTestsAsync(trees[i].path, cfg.testCommand, undefined, scrubVerifierEnv(process.env)) : undefined;
+      let passed = 0;
+      for (const c of checks) if ((await g.runTestsAsync(trees[i].path, c, undefined, scrubVerifierEnv(process.env))).ok) passed++;
+      cands.push({ index: i, id: String(i), testsPassed: tests ? (tests.ok ? 1 : 0) : 0, testsTotal: tests ? 1 : 0, distinguishingPasses: passed });
+    }
+    const winner = (cands.length ? (selectBestByTests(cands) ?? cands[0]) : undefined)?.index ?? 0;
+    this.emit('log', `${task.id} best-of-${n}: sample ${winner + 1} selected${cands.length ? ` (${cands.map((c) => `#${c.index + 1} tests ${c.testsPassed}/${c.testsTotal}, checks ${c.distinguishingPasses}`).join('; ')})` : ' (no sample produced a change)'}`, { bestOfN: { n, winner: winner + 1, candidates: cands } }, task.id);
+    this.ledgerOutcome(task, 'best_of_n');
+    if (winner !== 0) g.resetTo(wt.path, g.head(trees[winner].path));
+    for (const t of trees.slice(1)) {
+      g.removeWorktree(store.root, t.path);
+      g.deleteBranch(store.root, t.branch);
+    }
+    return works[winner];
+  }
+
   // Judged-pass task: risk-tier gate (W7.1), then the merge queue (per task, or batched W6.2).
   private land(task: Task): Promise<void> {
     const cfg = this.store.config();
@@ -1615,8 +1720,9 @@ export class Conductor {
     return out;
   }
 
-  private async call(role: Role, task: Task | undefined, attempt: number, req: Omit<AgentRequest, 'role' | 'system' | 'model' | 'budgetUsd'>, modelOverride?: string, variant?: 'a' | 'b'): Promise<AgentResult> {
+  private async call(role: Role, task: Task | undefined, attempt: number, req: Omit<AgentRequest, 'role' | 'system' | 'model' | 'budgetUsd'>, modelOverride?: string, variant?: AgentVariant): Promise<AgentResult> {
     const { run, harness } = this;
+    const cap = role === 'worker' && task ? this.workerCap(task) : undefined;
     const sfx = variant ? `-${variant}` : '';
     const model = modelOverride ?? harness.config.models[role];
     const agent: ActiveAgent = {
@@ -1633,18 +1739,20 @@ export class Conductor {
     this.emit('agent.start', `${role} started${task ? ` on ${task.id}` : ''} (${model})`, undefined, task?.id, role);
     this.save();
     let lastSave = 0;
-    const res = await this.runner({
+    const res = await this.provider.run({
       ...req,
       ...this.isolation(role, req.cwd),
       role,
       model,
       system: harness.prompts[role],
-      budgetUsd: harness.config.budgetUsd[role],
+      budgetUsd: cap ? cap.usd : harness.config.budgetUsd[role],
+      ...(cap ? { maxTurns: cap.turns } : {}),
       timeoutMs: TIMEOUT_MS[role],
       logFile: this.store.path('runs', run.id, 'logs', `${task?.id ?? 'run'}-${role}-${attempt}${sfx}.jsonl`),
       meta: { task: task?.id, attempt, run: run.id, variant },
       onAction: (action) => {
         agent.lastAction = action;
+        if (role === 'worker' && !this.cacheWarmed) this.warmed();
         if (!action.startsWith('says:')) agent.tools += 1;
         this.emit('agent.action', action, undefined, task?.id, role);
         if (Date.now() - lastSave > 200) {
@@ -1654,6 +1762,10 @@ export class Conductor {
       },
     });
     run.active = run.active.filter((a) => a !== agent);
+    if (role === 'worker' && task) {
+      const u = this.workerUse.get(task.id) ?? { turns: 0, usd: 0 };
+      this.workerUse.set(task.id, { turns: u.turns + res.turns, usd: u.usd + res.costUsd });
+    }
     run.costUsd = round(run.costUsd + res.costUsd, 4);
     if (task) task.costUsd = round(task.costUsd + res.costUsd, 4);
     this.store.ledger({
