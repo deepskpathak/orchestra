@@ -109,6 +109,15 @@ Off by default. The Repo Atlas is a deterministic, commit-keyed code graph (file
 | `context.atlas.mapTokens` | number | `1024` | Token budget of the ranked repo map (L0). |
 | `context.atlas.packs` | boolean | `false` | Add a per-task pack (L1: footprint signatures, callers, importers, related tests) to the worker prompt body. |
 | `context.atlas.packTokens` | number | `1500` | Token budget of each task pack. |
+| `context.atlas.external` | `off` \| `auto` \| `ctags` \| `graphify` | `off` | Merge symbols and edges from an optional external source into the atlas (W9.5). Absent means `off`. |
+
+**External inputs (opt-in, never required).** With `context.atlas.external` set, the atlas build adds nodes and edges from one extra source to the built-in graph. Only paths already in the built-in atlas are accepted, so excluded and secret paths stay out. The merge happens on each load; the cache at `.orchestra/atlas/<sha>.json` keeps the built-in graph only. If the chosen source is missing or fails, the build logs `Atlas external source (<mode>) unavailable, using built-in: <reason>` and continues. No network is used.
+
+- `ctags`: needs [universal-ctags](https://ctags.io) on PATH (`brew install universal-ctags`, `apt install universal-ctags`). Orchestra runs `ctags --output-format=json` in the repo root. Exuberant or BSD ctags is detected and ignored.
+- `graphify`: reads a graphify `graph.json` (`graphify-out/graph.json` or `graph.json` in the repo root). Node-link `nodes` and `links` map to atlas files, symbols and `contains`, `imports`, `references`, `tests` edges; unknown node kinds and relations are ignored.
+- `auto`: graphify if a `graph.json` is found, else ctags if available, else the built-in graph.
+
+External MCP code-graph servers such as codegraph and Serena are user opt-ins. Add them to your Claude settings (`claude mcp add ...` or `.mcp.json`); Orchestra does not install, start or configure them.
 
 ### `contrastive`
 

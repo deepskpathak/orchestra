@@ -7,6 +7,7 @@
 import { existsSync, readdirSync, statSync, unlinkSync } from 'node:fs';
 import { commitExists, diffNamesBetween, filesAtRef, git, readBlobsAtRef, tryGit } from './git.ts';
 import { isSecretPath } from './guard.ts';
+import { applyExternal, type ExternalOpts } from './atlas-external.ts';
 import { Store } from './store.ts';
 
 // Bump when the cached shape changes; caches with another version are rebuilt from scratch.
@@ -719,7 +720,13 @@ function nearestCandidates(root: string, store: Store, full: string): string[] {
 
 // Exact cache hit, else incremental from the nearby cached commit with the smallest diff, else full.
 // The cache is pruned to the MAX_CACHED_ATLASES most recent files.
-export function loadOrBuildAtlas(root: string, sha: string): Atlas {
+export function loadOrBuildAtlas(root: string, sha: string, external?: ExternalOpts): Atlas {
+  const base = loadOrBuildBase(root, sha);
+  return external && external.mode !== 'off' ? applyExternal(root, base, external) : base;
+}
+
+// The cache holds only the built-in atlas; external inputs are merged per load so they never go stale.
+function loadOrBuildBase(root: string, sha: string): Atlas {
   const store = new Store(root);
   const full = git(root, 'rev-parse', sha);
   const hit = readCached(store, full);

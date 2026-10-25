@@ -116,6 +116,8 @@ With `verification.oracles.enabled`, the judge path first asks a separate oracle
 
 An optional, deterministic code graph of the repo at one commit (`src/atlas.ts`). Nodes are directories, files and symbols; edges are `contains`, `imports`, `references` and `tests`. Extraction is regex based for TS/JS, Python, Go, Java and Rust, with a file-level fallback for other languages. The graph is read from git objects at the commit, cached as `.orchestra/atlas/<sha>.json`, and rebuilt incrementally from the nearest cached commit using `git diff --name-only`. Enable it with `context.atlas` (see [configuration](configuration.md)); inspect it with `orchestra atlas build` and `orchestra atlas stats`.
 
+**External inputs.** `src/atlas-external.ts` can merge universal-ctags JSON or a graphify `graph.json` into the same node and edge types (`context.atlas.external`, default `off`). Probes are injected and any miss degrades to the built-in graph with a logged reason. See [configuration](configuration.md#contextatlas).
+
 **Exclusions.** The atlas never indexes `.orchestra/` (holdout, scenarios, evals, archive), `.env*` files or paths matching the guard's secret patterns, so none of it can reach a prompt. The atlas code is not in `EVOLVABLE_FILES` and the frozen scorer never consumes atlas output.
 
 Harness versions, evals and an archive also live here, covered in [self-improvement](self-improvement.md).

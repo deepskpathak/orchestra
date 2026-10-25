@@ -243,6 +243,7 @@ export interface ProjectConfig {
       mapTokens: number; // budget for the L0 ranked map
       packs: boolean; // L1 task packs in worker prompts
       packTokens: number; // budget for one L1 pack
+      external?: 'off' | 'auto' | 'ctags' | 'graphify'; // optional external graph input (W9.5); absent means 'off'
     };
   };
   verification: VerificationConfig;
