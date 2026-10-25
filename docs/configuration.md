@@ -116,6 +116,20 @@ Off by default. Without a test command the judge scores a single attempt with no
 | `evolve.sample` | number | `5` | Eval cases used per evaluation, newest first. Bounds cost. Keep it at or above `evolve.minCases`, or promotion is never possible. |
 | `evolve.minCases` | number | `5` | Minimum eval cases that must be evaluated before a candidate can be promoted. Fewer cases and the candidate is rejected with a reason. |
 | `evolve.candidates` | number | `1` | Variants proposed per evolve cycle. `1` keeps the single-variant cycle. Above `1`, candidates are screened on `min(2, sample)` cases, survivors are composed into one variant, and only that variant gets the full evaluation. See [self-improvement.md](self-improvement.md#multi-candidate-evolution-evolvecandidates). |
+| `evolve.budgetUsd` | number | `0` | Hard cap in USD on spend per evolve cycle (evolver calls plus eval replays). The cycle checks the cap before each replay batch using the running average cost per replay, and halts with the candidate kept for later evaluation. `0` means no cap. See [self-improvement.md](self-improvement.md#cycle-controls-m3). |
+| `evolve.sequential.enabled` | boolean | `false` | Evaluate the candidate in rounds and stop as soon as the 95% CI on the paired gain settles the comparison (lower bound above zero, or upper bound below zero or below `-niMargin`). |
+| `evolve.sequential.roundSize` | number | `3` | Cases per round. A value below 1 means one round. A CI needs at least two source goals, so the first round alone rarely settles. |
+| `evolve.splits.enabled` | boolean | `false` | Split eval cases by age into feedback, validation and a locked holdout. The evolver sees feedback cases only, selection uses validation, and the holdout (newest cases) is touched only to confirm a promotion. |
+| `evolve.splits.feedback` / `validation` / `holdout` | number | `0.3` / `0.5` / `0.2` | Split ratios (normalised, so they need not sum to 1). With 3 or more cases the holdout and validation each get at least one. |
+| `evolve.splits.signoffBelow` | number | `12` | With splits on and fewer eval cases in total than this, a winning candidate is kept and is not promoted until a human promotes it (`orchestra promote <vN>`). |
+| `evolve.cascade.enabled` | boolean | `false` | Cascade screening: a smoke test, then a minibatch against the parent, then full validation for the top finalists only. A cycle where nothing clears the minibatch stops with no full-validation spend. |
+| `evolve.cascade.minibatch` | number | `2` | Newest validation cases a candidate must beat its parent on (without regressing). |
+| `evolve.cascade.finalists` | number | `2` | Candidates that go on to full validation, best minibatch gain first. |
+| `evolve.pareto.enabled` | boolean | `false` | Choose the parent from the Pareto archive (variants best on at least one validation case), show the evolver the scored archive history, and record per-case wins and stepping stones in `archive.json`. |
+| `evolve.cost.enabled` | boolean | `false` | Cost-aware objective: a variant whose cost rises more than `maxCostRisePct` without a matching gain is rejected, and candidates are ranked by utility rather than raw score. |
+| `evolve.cost.maxCostRisePct` | number | `25` | Largest allowed cost rise over the incumbent, in percent. |
+| `evolve.cost.minGainForCost` | number | `0.02` | Score gain that excuses a cost rise above the limit. |
+| `evolve.cost.costWeight` / `timeWeight` | number | `0.1` / `0.02` | SICA-style utility: `score - costWeight x USD - timeWeight x minutes`. |
 
 Example:
 
@@ -127,6 +141,24 @@ Example:
   "evolve": { "every": 0, "candidates": 3 }
 }
 ```
+
+All M3 evolve options are off by default, so an existing config behaves exactly as before. A fuller opt-in example:
+
+```json
+{
+  "evolve": {
+    "budgetUsd": 15,
+    "splits": { "enabled": true },
+    "cascade": { "enabled": true, "minibatch": 2, "finalists": 2 },
+    "sequential": { "enabled": true, "roundSize": 3 },
+    "cost": { "enabled": true },
+    "pareto": { "enabled": true }
+  },
+  "learnings": { "expiryDays": 60 }
+}
+```
+
+Eval case files (`.orchestra/evals/<id>.json`) also accept optional `createdAt` (ms epoch, orders the time split), `tags` (for example `regression`) and `reference` (a known-good fix, never shown to workers). `orchestra evals add` writes them for you.
 
 ## Harness config (`harness/v1/config.json`)
 

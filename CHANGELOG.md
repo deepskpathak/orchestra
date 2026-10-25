@@ -8,6 +8,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- M3 Evolution, all opt-in and off by default (config keys in `docs/configuration.md`, behaviour in `docs/self-improvement.md#cycle-controls-m3`).
+- Time-split eval sets (W3.1): `evolve.splits` orders cases by `createdAt` into feedback, validation and a locked holdout (default 30/50/20). The evolver sees feedback cases only, the holdout confirms a promotion, and below `signoffBelow` (12) cases promotion needs a human.
+- Harder and imported eval cases (W3.2): `orchestra evals add "<goal>"`, human-fix harvest with `evals add --from-run <runId> --fix <commit>` (the fix diff becomes the case `reference`), `evals list --regression|--tag`, and `orchestra evals audit` for solution leakage in goals, references and lessons. Audit exits 0 when clean, empty or uninitialised and 1 with findings; CI runs it. Unknown `evals` subcommands are rejected. Logic is in `src/evalcases.ts`.
+- Cascade screening (W3.3): `evolve.cascade` runs a smoke test (guards, checklist, one case), a minibatch against the parent, and full validation for the top finalists only; a cycle with no viable candidate spends nothing on full validation.
+- Sequential testing and budget cap (W3.4): `evolve.sequential` evaluates in rounds and stops when the paired CI settles; `evolve.budgetUsd` is a hard per-cycle cap.
+- Cost in the objective (W3.5): `evolve.cost` adds a SICA-style utility and rejects variants whose cost rises more than `maxCostRisePct` without a matching gain.
+- Pareto archive (W3.6): `evolve.pareto` keeps variants best on at least one validation case, picks parents by Pareto wins plus descendant success, shows the evolver the scored archive history and keeps `stepping` variants in `archive.json`.
 - Lesson hygiene (W3.7): the librarian now returns item edits (add, update, remove by lesson id) applied by `applyLessonEdits`, so no code path replaces a domain's lessons from model output. Lessons carry stable ids and helpful/harmful counters (old files load with zeros). Opt-in `learnings.expiryDays` (default 0 = off) expires stale or harmful lessons. New `orchestra evals ablation` replays the holdout with and without learnings and reports the paired delta and CI.
 
 ### Fixed

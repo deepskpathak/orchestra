@@ -92,7 +92,10 @@ Set `ORCHESTRA_RUNNER=fake` to use the simulator instead of real Claude sessions
 | `orchestra evolve` | Propose, evaluate, and maybe promote a better harness |
 | `orchestra learnings [--domain <slug>]` | Show what the factory has learned in this repo (`--domain` filters to one domain, `global` for cross-domain lessons) |
 | `orchestra atlas build` / `orchestra atlas stats` | Build or refresh the Repo Atlas code graph for HEAD (`.orchestra/atlas/<sha>.json`), or show its file, symbol and edge counts. Work even when `context.atlas.enabled` is false; `.orchestra/`, `.env*` and secret files are never indexed |
-| `orchestra evals` | List Factory Eval cases |
+| `orchestra evals` | List Factory Eval cases (`--regression`, `--tag <t>`) |
+| `orchestra evals add` | Add a case for a goal you choose, or harvest a failed run with `--from-run <id> --fix <commit>` |
+| `orchestra evals audit` | Check cases and lessons for solution leakage (exit 1 on findings) |
+| `orchestra evals ablation` | Replay the holdout with and without learnings |
 | `orchestra promote <vN>` | Promote a harness version (also used for rollback) |
 | `orchestra doctor` | Check Claude CLI and headless auth |
 | `orchestra demo` | Simulated run in a temp repo (no tokens spent) |
