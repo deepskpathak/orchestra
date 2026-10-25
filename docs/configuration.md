@@ -88,6 +88,8 @@ M4 Verification. Every part is off by default; later releases fill in the behavi
 | `verification.mutation.failBelowFloor` | boolean | `false` | Fail the run when the score is under the floor. `false` reports only. |
 
 
+Mutation scoring runs once, after all merges, in a throwaway worktree. It mutates only source files (`.js .ts .mjs .cjs .jsx .tsx`, not tests) changed on the integration branch, up to `maxMutants`, thinned evenly in source order. A mutant is killed when `testCommand` or any scenario `check` fails. If there is no command to kill with, or the unmutated checks already fail, the pass is skipped. A run with no mutants scores 1 and passes. The result is on `Run.mutation` and appears in `orchestra status` and the run summary.
+
 With the panel on, `judgeTiers` is bypassed. Each member sees a framing line chosen by `lineage` (`strict`, `literal`, `scenario`, or any custom name; omit or `default` for none). Votes are per criterion; a tie on any criterion calls `escalateModel` once and its verdict decides (`verdict.panel.escalated` is `true`). Members that return no verdict are skipped. `verdict.panel.disagreement` is the mean share of judges in the minority per criterion. Contrastive repair also compares in both orders and picks nothing when the orders disagree.
 
 ### `context.atlas`

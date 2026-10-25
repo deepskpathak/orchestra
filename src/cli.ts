@@ -281,6 +281,7 @@ export function summary(run: Run): string {
   const human = run.tasks.filter((t) => t.status === 'needs_human');
   const failed = run.tasks.filter((t) => t.status === 'failed').length;
   const blocked = run.tasks.filter((t) => t.status === 'blocked').length;
+  if (run.mutation) lines.push(`  mutation score ${run.mutation.score.toFixed(2)} (${run.mutation.killed}/${run.mutation.total} killed, floor ${run.mutation.floor}, ${run.mutation.pass ? 'pass' : 'below floor'})`);
   if (human.length || failed || blocked) lines.push(`  ${failed} failed, ${blocked} blocked, ${human.length} need a human`);
   for (const t of human) lines.push(`  ? ${t.id} needs a human: ${t.humanReason ?? 'no reason recorded'}`);
   if (run.error) lines.push(`  ${run.error}`);

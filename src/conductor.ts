@@ -3,6 +3,7 @@
 // Planners never code, workers never judge, judges never edit (role separation).
 
 import { spawnSync } from 'node:child_process';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { extractJson, parseWorkerOutcome, type AgentRequest, type AgentResult, type Runner } from './agent.ts';
@@ -14,6 +15,7 @@ import { buildTaskPack, renderMap } from './atlas-context.ts';
 import { plannedFiles } from './exploration.ts';
 import { buildContract, contractSha, unresolvedAmbiguities } from './contracts.ts';
 import { analyzeDiff, MONITOR_MARK, type IntegrityFlag } from './integrity.ts';
+import { mutationScore, runMutation } from './mutation.ts';
 import { loadHarness, type Harness } from './harness.ts';
 import { applyLessonEdits, editsFromResponse, expireDomain, formatLearnings, listDomains, normalizeDomain, readAllLearnings, readLearnings, GLOBAL } from './learnings.ts';
 import { buildSandboxPolicy, preflightSandbox, scrubWorkerEnv, type ProbeExec } from './sandbox.ts';
@@ -45,6 +47,8 @@ export interface ConductorOptions {
   unattended?: boolean;
   // Injectable exec for the sandbox pre-flight probes (tests). Defaults to spawnSync.
   preflightExec?: ProbeExec;
+  // Injectable inputs for the W4.5 mutation pass (tests). Default: files changed on the integration branch, real exec.
+  mutation?: { changedFiles?: string[]; exec?: (cwd: string, command: string) => { ok: boolean } };
 }
 
 // ---------- prompt builders ----------
@@ -372,6 +376,7 @@ export class Conductor {
   private readonly harness: Harness;
   private readonly onUpdate?: (run: Run) => void;
   private scenarios: Scenario[] = [];
+  private mutationOpts?: ConductorOptions['mutation'];
   private atlas?: Atlas;
   private map = '';
   private ablate: Ablation;
@@ -387,6 +392,7 @@ export class Conductor {
     this.onUpdate = opts.onUpdate;
     this.sandboxOpt = opts.sandbox;
     this.preflightExec = opts.preflightExec;
+    this.mutationOpts = opts.mutation;
     this.scrubEnv = Boolean(opts.sandbox || opts.unattended);
     this.ablate = opts.ablate ?? {};
     this.evalLearnings = opts.evalLearnings ?? false;
@@ -424,6 +430,7 @@ export class Conductor {
       run.status = 'running';
       this.save();
       await this.schedule();
+      const mutationFailure = this.mutationPass();
 
       const merged = run.tasks.filter((t) => t.status === 'merged');
       const meanScore = merged.length ? merged.reduce((s, t) => s + (t.verdict?.score ?? 0), 0) / merged.length : 0;
@@ -434,7 +441,8 @@ export class Conductor {
         this.save();
         await this.learn();
       }
-      run.status = merged.length === run.tasks.length ? 'done' : 'failed';
+      run.status = merged.length === run.tasks.length && !mutationFailure ? 'done' : 'failed';
+      if (mutationFailure && !run.error) run.error = mutationFailure;
       if (run.status === 'failed' && !run.error) {
         const human = run.tasks.filter((t) => t.status === 'needs_human').length;
         const blocked = run.tasks.filter((t) => t.status === 'blocked').length;
@@ -459,6 +467,45 @@ export class Conductor {
   }
 
   // ---------- phases ----------
+
+  // W4.5: mutate the source files this run changed, in a scratch worktree, and see whether the test
+  // command and scenario checks notice. Returns an error message only when failBelowFloor trips.
+  private mutationPass(): string | undefined {
+    const { run, store } = this;
+    const cfg = store.config().verification.mutation;
+    if (!cfg.enabled || !run.tasks.some((t) => t.status === 'merged')) return undefined;
+    const testCommand = store.config().testCommand;
+    let wt: { path: string; branch: string } | undefined;
+    try {
+      const changed = this.mutationOpts?.changedFiles ?? g.changedFiles(this.integration.path, this.integration.base);
+      const files = changed.filter((f) => /\.(?:[cm]?[jt]s|[jt]sx)$/.test(f) && !/(?:^|\/)(?:tests?|__tests__)\/|\.(?:test|spec)\./.test(f));
+      wt = g.createTaskWorktree(store.root, this.wtRoot, run.id, 'mutation', g.head(this.integration.path));
+      const cwd = wt.path;
+      const exec = this.mutationOpts?.exec ?? ((d: string, c: string) => g.runTests(d, c));
+      const out = runMutation({
+        files,
+        max: cfg.maxMutants,
+        commands: [...(testCommand ? [testCommand] : []), ...this.scenarios.flatMap((s) => (s.check ? [s.check] : []))],
+        read: (f) => readFileSync(join(cwd, f), 'utf8'),
+        write: (f, c) => writeFileSync(join(cwd, f), c),
+        exec: (c) => exec(cwd, c),
+      });
+      if (out.skipped) this.emit('log', `Mutation skipped: ${out.skipped}`);
+      const m = mutationScore(out.results, cfg.floor);
+      run.mutation = { total: m.total, killed: m.killed, score: m.score, floor: m.floor, pass: m.pass };
+      this.emit('log', `Mutation score ${m.score.toFixed(2)} (${m.killed}/${m.total} killed, floor ${m.floor}) ${m.pass ? 'pass' : 'below floor'}`, { mutation: run.mutation });
+      this.save();
+      if (!m.pass && cfg.failBelowFloor) return `Mutation score ${m.score.toFixed(2)} is below the floor ${m.floor} (${m.survived} of ${m.total} mutants survived)`;
+    } catch (e) {
+      this.emit('log', `Mutation pass failed, continuing without a score: ${(e as Error).message.split('\n')[0]}`);
+    } finally {
+      if (wt) {
+        g.removeWorktree(store.root, wt.path);
+        g.deleteBranch(store.root, wt.branch);
+      }
+    }
+    return undefined;
+  }
 
   private async plan(): Promise<void> {
     const { run, store, harness } = this;

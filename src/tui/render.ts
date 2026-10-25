@@ -162,6 +162,8 @@ export function renderDashboard(run: Run, events: OrchestraEvent[], o: RenderOpt
       (run.satisfaction !== undefined ? `  sat ${c('bold', run.satisfaction.toFixed(2))}` : ''),
   );
 
+  if (run.mutation) row(`mutation ${c(run.mutation.pass ? 'green' : 'red', run.mutation.score.toFixed(2))} (${run.mutation.killed}/${run.mutation.total} killed, floor ${run.mutation.floor})`);
+
   rule(`Agents (${run.active.length})`);
   if (!run.active.length) row(c('gray', run.endedAt ? 'all agents finished' : 'waiting…'));
   for (const [i, a] of run.active.entries()) {
