@@ -10,6 +10,7 @@ import { currentVersion, readArchive, writeArchive } from '../src/harness.ts';
 import { selectParent } from '../src/pareto.ts';
 import type { Store } from '../src/store.ts';
 import type { ProjectConfig } from '../src/types.ts';
+import { writeLearnings as writeLessons } from '../src/learnings.ts';
 import { tempRepo } from './helpers.ts';
 import { DEFAULT_PROJECT_CONFIG } from '../src/store.ts';
 
@@ -49,6 +50,57 @@ test('splits: evolver prompt has no holdout case id or goal text', async () => {
   assert.ok(holdout.length > 0 && s.evolverPrompts.length === 1);
   assert.deepEqual(holdoutLeaks(s.evolverPrompts[0], holdout), []);
   assert.ok(s.evolverPrompts[0].includes(feedback[0].goal), 'feedback cases are shown');
+});
+
+const task = (id: string, notes: string[], status: 'merged' | 'failed' = 'merged') => ({ id, title: id, description: '', acceptance: [], deps: [], status, attempts: 1, notes, costUsd: 0 });
+const goalRun = (id: string, goal: string, notes: string[], status: 'merged' | 'failed' = 'merged') => ({ id, goal, harness: 'v1', kind: 'goal' as const, status: 'done' as const, startedAt: 1, endedAt: 2, baseRef: 'abc', tasks: [task('T1', notes, status)], costUsd: 0, active: [] }) as never;
+
+test('splits: runs, notes, metrics and lessons derived from holdout cases stay out of the evolver prompt', async () => {
+  const { store, cases } = repoWith(10, { splits: { enabled: true, feedback: 0.3, validation: 0.5, holdout: 0.2, signoffBelow: 12 }, minCases: 9 });
+  const holdout = splitEvals(cases).holdout;
+  assert.ok(holdout.length > 0);
+  // A harvested holdout case id is the run id that produced it.
+  store.saveRun(goalRun(holdout[0].id, 'some other wording', ['SECRET-HOLDOUT-NOTE retry the flaky parser'], 'failed'));
+  store.saveRun(goalRun('r-ordinary', 'ordinary goal', ['ORDINARY-NOTE keep prompts short']));
+  writeLessons(store, [{ role: 'worker', lesson: 'SECRET-HOLDOUT-LESSON', evidence: [{ run: holdout[0].id }], hits: 0 }, { role: 'worker', lesson: 'ORDINARY-LESSON', evidence: [{ run: 'r-ordinary' }], hits: 0 }]);
+  const s = spy(fakeRunner());
+  await evolve(store, s.runner, quiet);
+  const p = s.evolverPrompts[0];
+  assert.ok(p.includes('ORDINARY-NOTE') && p.includes('ORDINARY-LESSON'), 'ordinary evidence still reaches the evolver');
+  assert.ok(!p.includes('SECRET-HOLDOUT-NOTE') && !p.includes('SECRET-HOLDOUT-LESSON'));
+  assert.ok(!p.includes(holdout[0].id));
+  assert.deepEqual(holdoutLeaks(p, holdout), []);
+});
+
+test('splits: a prompt that still names a holdout goal is not sent to the evolver', async () => {
+  const { store, cases } = repoWith(10, { splits: { enabled: true, feedback: 0.3, validation: 0.5, holdout: 0.2, signoffBelow: 12 }, minCases: 9 });
+  const holdout = splitEvals(cases).holdout;
+  // An unrelated run's repair note quotes a holdout goal verbatim, which no run-level filter can see.
+  store.saveRun(goalRun('r-quote', 'unrelated', [`worker said: ${holdout[0].goal}`]));
+  const s = spy(fakeRunner());
+  const out = await evolve(store, s.runner, quiet);
+  assert.equal(s.evolverPrompts.length, 0, 'the evolver was never called');
+  assert.equal(out.promoted, false);
+  assert.match(out.reason, /would leak locked holdout case/);
+  assert.equal(store.ledgerRows().filter((r) => r.role === 'evolver').length, 0);
+});
+
+test('splits: the holdout is sticky, so earlier holdout cases never move into feedback as new cases arrive', async () => {
+  const { store, cases } = repoWith(10, { splits: { enabled: true, feedback: 0.3, validation: 0.5, holdout: 0.2, signoffBelow: 12 }, minCases: 99 });
+  const s = spy(fakeRunner());
+  await evolve(store, s.runner, quiet);
+  const firstHoldout = splitEvals(cases).holdout;
+  assert.deepEqual(Object.entries(store.readJson<Record<string, string>>('splits.json', {})).filter(([, v]) => v === 'holdout').map(([k]) => k).sort(), firstHoldout.map((c) => c.id).sort());
+  const base = cases[0].base;
+  for (let i = 10; i < 25; i++) store.writeJson(`evals/case-${i}.json`, { id: `case-${i}`, goal: `unique goal text zq${i}x`, base, source: `src-${i}`, taskType: 'cli', createdAt: 1000 + i });
+  await evolve(store, s.runner, quiet);
+  const saved = store.readJson<Record<string, string>>('splits.json', {});
+  for (const c of firstHoldout) assert.equal(saved[c.id], 'holdout', `${c.id} stays holdout`);
+  const second = s.evolverPrompts[1];
+  for (const c of firstHoldout) assert.ok(!second.includes(c.goal), `${c.id} goal is not shown to the evolver`);
+  // A plain time-window re-split would have moved at least one of them out of the holdout.
+  const naive = splitEvals([...cases, ...Array.from({ length: 15 }, (_, i) => ({ ...cases[0], id: `case-${i + 10}`, createdAt: 1010 + i }))]).holdout.map((c) => c.id);
+  assert.ok(firstHoldout.some((c) => !naive.includes(c.id)));
 });
 
 test('cascade: nothing clears the minibatch, so the cycle stops with no full validation', async () => {

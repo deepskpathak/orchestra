@@ -329,10 +329,12 @@ export function formatLearnings(
   return picked.length ? picked.map((l) => `- [${l.role}] ${l.lesson}`).join('\n') : '(none yet)';
 }
 
-/** Compact per-domain summary for evolve: counts and the top lessons, not the full store. */
-export function summarizeLearnings(store: Store, top = 3): Record<string, { count: number; byRole: Record<string, number>; top: string[] }> {
+/** Compact per-domain summary for evolve: counts and the top lessons, not the full store. excludeRuns drops lessons whose evidence cites those runs. */
+export function summarizeLearnings(store: Store, top = 3, excludeRuns: ReadonlySet<string> = new Set()): Record<string, { count: number; byRole: Record<string, number>; top: string[] }> {
   const out: Record<string, { count: number; byRole: Record<string, number>; top: string[] }> = {};
-  for (const [d, ls] of Object.entries(readAllLearnings(store))) {
+  for (const [d, all] of Object.entries(readAllLearnings(store))) {
+    // Lessons with evidence from an excluded run (a locked holdout case) are left out of the summary entirely.
+    const ls = excludeRuns.size ? all.filter((l) => !l.evidence.some((e) => excludeRuns.has(e.run))) : all;
     if (!ls.length) continue;
     const byRole: Record<string, number> = {};
     for (const l of ls) byRole[l.role] = (byRole[l.role] ?? 0) + 1;

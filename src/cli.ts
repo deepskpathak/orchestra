@@ -11,8 +11,8 @@ import { atlasStats, loadOrBuildAtlas } from './atlas.ts';
 import { runGoal } from './conductor.ts';
 import { explorationMetrics, renderExploration } from './exploration.ts';
 import { collectOutcomes, renderOutcomes } from './outcomes.ts';
-import { evaluate, evolutionDue, evolve, harvest, listEvals, metrics } from './evolve.ts';
-import { DEFAULT_RATIOS, splitEvals } from './evalsets.ts';
+import { evaluate, evolutionDue, evolve, harvest, listEvals, metrics, resolveSplits } from './evolve.ts';
+import { DEFAULT_RATIOS } from './evalsets.ts';
 import { REGRESSION_TAG, auditCases, buildAddedCase, buildHarvestedCase, filterByTags, formatFindings } from './evalcases.ts';
 import { fakeRunner } from './fake.ts';
 import { commitExists, excludeOrchestra, fixDiff, tryGit } from './git.ts';
@@ -571,7 +571,7 @@ function cmdEvalsAudit(): void {
 async function cmdEvalsAblation(): Promise<void> {
   const store = storeOrDie();
   const cfg = store.config().evolve.splits;
-  const { holdout } = splitEvals(listEvals(store), cfg ? { feedback: cfg.feedback, validation: cfg.validation, holdout: cfg.holdout } : DEFAULT_RATIOS);
+  const { holdout } = resolveSplits(store, listEvals(store), cfg ? { feedback: cfg.feedback, validation: cfg.validation, holdout: cfg.holdout } : DEFAULT_RATIOS);
   if (!holdout.length) {
     console.log('No holdout cases yet, so there is nothing to ablate. Harvested evals fill the holdout over time (orchestra evals).');
     return;

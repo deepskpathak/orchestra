@@ -24,7 +24,7 @@ import {
   writeArchive,
 } from './harness.ts';
 import { archiveHistory, archivePatches, selectParent } from './pareto.ts';
-import { needsHumanSignoff, splitEvals } from './evalsets.ts';
+import { holdoutLeaks, holdoutRunIds, needsHumanSignoff, stickySplit, type EvalSplits, type SplitAssignment, type SplitRatios } from './evalsets.ts';
 import { summarizeLearnings } from './learnings.ts';
 import { BudgetTracker, costGate, roundsOf, sequentialDecision, utility } from './selection.ts';
 import { loadScorer, scoreReplay, type Scorer } from './scorer.ts';
@@ -63,9 +63,9 @@ export function goalRuns(store: Store, kind: 'goal' | 'eval' = 'goal'): Run[] {
     .filter((r): r is Run => !!r && (r.kind ?? 'goal') === kind && !!r.endedAt);
 }
 
-export function metrics(store: Store): VersionMetrics[] {
-  const runs = goalRuns(store);
-  const rows = store.ledgerRows().filter((r) => (r.kind ?? 'goal') === 'goal');
+export function metrics(store: Store, excludeRuns: ReadonlySet<string> = new Set()): VersionMetrics[] {
+  const runs = goalRuns(store).filter((r) => !excludeRuns.has(r.id));
+  const rows = store.ledgerRows().filter((r) => (r.kind ?? 'goal') === 'goal' && !excludeRuns.has(r.run));
   const versions = [...new Set(runs.map((r) => r.harness))].sort((a, b) => Number(a.slice(1)) - Number(b.slice(1)));
   return versions.map((version) => {
     const rs = runs.filter((r) => r.harness === version);
@@ -98,6 +98,16 @@ export function listEvals(store: Store): EvalCase[] {
     .filter((f) => f.endsWith('.json'))
     .sort()
     .map((f) => JSON.parse(readFileSync(join(dir, f), 'utf8')) as EvalCase);
+}
+
+// Splits that never move a case once assigned: the assignment is persisted in .orchestra/splits.json and only
+// unassigned (new) cases are placed, so a case in the locked holdout can never slide into the feedback set the
+// evolver sees. Time order still decides placement of new cases (newest to holdout, oldest to feedback).
+export function resolveSplits(store: Store, cases: EvalCase[], ratios: SplitRatios): EvalSplits {
+  const prior = store.readJson<SplitAssignment>('splits.json', {});
+  const { assignment, ...splits } = stickySplit(cases, ratios, prior);
+  if (JSON.stringify(assignment) !== JSON.stringify(prior)) store.writeJson('splits.json', assignment);
+  return splits;
 }
 
 // Harvest: a clean, high-satisfaction run becomes a regression case for future harnesses.
@@ -404,10 +414,18 @@ async function evolveCycle(store: Store, runner: Runner, log: (msg: string) => v
   // Variants derive from a Pareto-selected parent; evaluation and promotion still compare against the incumbent.
   const parent = (usePareto ? selectParent(readArchive(store), undefined, (v) => existsSync(store.path('harness', v)))?.version : null) ?? incumbent;
   const h = loadHarness(store, incumbent);
-  const m = metrics(store);
+  const allCases = listEvals(store);
+  const useSplits = !!cfg.evolve.splits?.enabled;
+  const sp = useSplits ? resolveSplits(store, allCases, { feedback: cfg.evolve.splits!.feedback, validation: cfg.evolve.splits!.validation, holdout: cfg.evolve.splits!.holdout }) : null;
+  // The locked holdout stays hidden from the evolver: runs that produced a holdout case (and what was learned from
+  // them) are kept out of the metrics, repair notes and learnings summary, not just the case list.
+  const allRuns = goalRuns(store);
+  const hiddenRuns = sp ? holdoutRunIds(allRuns, sp.holdout) : new Set<string>();
+  const m = metrics(store, hiddenRuns);
   const blocked = agreementBlock(storeCalibration(store), incumbent, cfg.evolve.minJudgeAgreement);
   if (blocked) return { candidate: null, incumbent, candidateScore: null, incumbentScore: null, promoted: false, reason: blocked };
-  const recentIssues = goalRuns(store)
+  const recentIssues = allRuns
+    .filter((r) => !hiddenRuns.has(r.id))
     .slice(-5)
     // Monitor output must never reach the evolver, or it could learn to evade the monitor.
     .flatMap((r) => r.tasks.flatMap((t) => [...t.notes, ...(t.status === 'failed' ? [`${t.id} FAILED: ${t.verdict?.summary ?? ''}`] : [])]))
@@ -420,9 +438,6 @@ async function evolveCycle(store: Store, runner: Runner, log: (msg: string) => v
     .map((a) => `- ${a.version} (score ${a.evalScore}): ${a.rationale}`);
 
   const k = Math.max(1, Math.floor(cfg.evolve.candidates ?? 1));
-  const allCases = listEvals(store);
-  const useSplits = !!cfg.evolve.splits?.enabled;
-  const sp = useSplits ? splitEvals(allCases, { feedback: cfg.evolve.splits!.feedback, validation: cfg.evolve.splits!.validation, holdout: cfg.evolve.splits!.holdout }) : null;
   const budget = new BudgetTracker(cfg.evolve.budgetUsd);
   const prompt = [
     ...(k > 1 ? [`PROPOSE ${k} VARIANTS in one response. Each variant must target a different weakness; do not overlap edits.`] : []),
@@ -437,7 +452,7 @@ async function evolveCycle(store: Store, runner: Runner, log: (msg: string) => v
     `METRICS PER VERSION:\n${JSON.stringify(m, null, 2)}`,
     `RECENT REPAIR NOTES AND FAILURES:\n${recentIssues.map((i) => `- ${i.split('\n')[0]}`).join('\n') || '(none)'}`,
     `PREVIOUSLY REJECTED VARIANTS (do not repeat):\n${rejected.join('\n') || '(none)'}`,
-    `LEARNINGS SUMMARY (per domain):\n${JSON.stringify(summarizeLearnings(store))}`,
+    `LEARNINGS SUMMARY (per domain):\n${JSON.stringify(summarizeLearnings(store, 3, hiddenRuns))}`,
     // With splits on the evolver sees feedback cases only; validation and holdout stay hidden.
     ...(usePareto ? [`SCORED ARCHIVE HISTORY (validation scores; build on what scored well):\n${archiveHistory(readArchive(store))}`] : []),
     ...(sp ? [`FEEDBACK CASES (the only eval cases you may study):\n${sp.feedback.map((c) => `- ${c.id}: ${c.goal}`).join('\n') || '(none)'}`] : []),
@@ -445,6 +460,13 @@ async function evolveCycle(store: Store, runner: Runner, log: (msg: string) => v
 
   // One evolver call, always ledgered.
   const askEvolver = async (p: string) => {
+    // Last line of defence for the locked holdout: refuse to send a prompt that names a holdout case id or goal.
+    const leaks = sp ? holdoutLeaks(p, sp.holdout) : [];
+    if (leaks.length) {
+      const error = `evolver prompt would leak locked holdout case(s) ${leaks.join(', ')}; not sent`;
+      log(error);
+      return { res: { ok: false, text: '', costUsd: 0, turns: 0, durationMs: 0, error }, variants: [] as ProposedVariant[] };
+    }
     const res = await runner({
       role: 'evolver',
       prompt: p,
