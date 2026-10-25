@@ -629,7 +629,8 @@ async function evolveCycle(store: Store, runner: Runner, log: (msg: string) => v
       if (pr.incumbent.inconclusive) return { version, error: pr.incumbent.inconclusive, rates: `infra failure rate: incumbent ${pr.incumbent.infraFailureRate}, candidate ${pr.candidate.infraFailureRate}` };
       parts.push({ r: pr.incumbent, n: rc.length }, { r: pr.candidate, n: rc.length });
       evaluated.push(...rc);
-      if (seq && ri < rounds.length - 1) {
+      // Never stop before the minCases floor: an early stop on fewer cases than the floor could not promote anyway.
+      if (seq && ri < rounds.length - 1 && evaluated.length >= cfg.evolve.minCases) {
         const sd = sequentialDecision(pairedCases(evaluated, parts), { roundSize, totalCases: cases.length, niMargin: cfg.evolve.niMargin ?? 0.05 });
         if (sd.verdict !== 'continue') {
           note = `sequential stop after ${evaluated.length} of ${cases.length} cases: ${sd.verdict}, ${sd.reason}`;
@@ -660,8 +661,9 @@ async function evolveCycle(store: Store, runner: Runner, log: (msg: string) => v
       candidateScores: res.cases.map((c) => cand.detail[c.id] ?? 0),
       regressions,
       minGain: cfg.evolve.minGain,
-      // An early sequential stop judges fewer cases than the pool; the pool size was already checked above.
-      minCases: Math.min(cfg.evolve.minCases, res.cases.length),
+      // Not clamped to the evaluated count: a sequential stop is only allowed once minCases cases are in, and a
+      // halted or short run must still be refused by the floor.
+      minCases: cfg.evolve.minCases,
       incumbent,
       monitorFireRate: monitor,
       rule: cfg.evolve.promotionRule ?? 'gain',

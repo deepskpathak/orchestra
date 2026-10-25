@@ -105,11 +105,21 @@ test('budgetUsd halts the cycle with a budget reason and stays within one replay
 });
 
 test('sequential: stops before all validation cases once the CI settles', async () => {
-  const { store } = repoWith(6, { sequential: { enabled: true, roundSize: 2 } });
+  const { store } = repoWith(6, { sequential: { enabled: true, roundSize: 2 }, minCases: 2 });
   const s = spy(fakeRunner());
   const out = await evolve(store, s.runner, quiet);
   assert.match(out.reason, /sequential stop after 2 of 6 cases/);
   assert.equal(s.planners(), 4, 'one round of two pairs, not six');
+  assert.equal(out.promoted, true, out.reason);
+});
+
+test('sequential: never stops (or promotes) on fewer cases than minCases', async () => {
+  const { store } = repoWith(6, { sequential: { enabled: true, roundSize: 2 }, minCases: 4 });
+  const s = spy(fakeRunner());
+  const out = await evolve(store, s.runner, quiet);
+  // The CI would settle after round one (2 cases), but the floor is 4, so the first allowed stop is after round two.
+  assert.match(out.reason, /sequential stop after 4 of 6 cases/);
+  assert.equal(s.planners(), 8, 'four pairs, not two and not six');
   assert.equal(out.promoted, true, out.reason);
 });
 
