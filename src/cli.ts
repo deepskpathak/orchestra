@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { claudeRunner, preflight, type Runner } from './agent.ts';
 import { importGrades, readBenchRows, renderCalibration, storeCalibration, writeSample } from './calibration.ts';
-import { ABLATION_ARMS, SINGLE_SESSION_ARM, ablationTable, defaultReference, loadArms, renderAblationTable, summarize, renderSummary, runBench, verifyOracles } from './bench.ts';
+import { ABLATION_ARMS, SINGLE_SESSION_ARM, ablationTable, defaultReference, loadArms, referenceError, renderAblationTable, summarize, renderSummary, runBench, verifyOracles } from './bench.ts';
 import { atlasStats, loadOrBuildAtlas } from './atlas.ts';
 import { runGoal } from './conductor.ts';
 import { explorationMetrics, renderExploration } from './exploration.ts';
@@ -589,6 +589,8 @@ async function cmdBench(args: string[]): Promise<void> {
   if (!Number.isInteger(repeats) || repeats < 1) die('--repeats must be a positive integer');
   const named = flag(args, '--arms')?.split(',').filter(Boolean);
   const arms = args.includes('--ablations') ? [...ABLATION_ARMS, SINGLE_SESSION_ARM] : loadArms(suite, named);
+  const refErr = referenceError(flag(args, '--reference'), arms);
+  if (refErr) die(refErr);
   const res = await runBench({ store, runner: runner(), suite, arms, goals, repeats, onRow: (r) => console.log(`${r.arm} ${r.goal} #${r.repeat}: ${r.checkPass ? 'pass' : 'fail'} ($${r.costUsd.toFixed(3)})`) });
   console.log(`\n${renderSummary(res.summary)}`);
   const ref = flag(args, '--reference') ?? defaultReference(res.rows);

@@ -179,6 +179,12 @@ export function defaultReference(rows: BenchRow[]): string | undefined {
   return rows.some((r) => r.arm === 'full') ? 'full' : rows[0]?.arm;
 }
 
+// Error message when a requested `--reference` is not one of the arms in the run, else undefined.
+export function referenceError(ref: string | undefined, arms: BenchArm[]): string | undefined {
+  if (ref === undefined || arms.some((a) => a.name === ref)) return undefined;
+  return `--reference "${ref}" is not among the arms in this run (${arms.map((a) => a.name).join(', ')})`;
+}
+
 // Mean cost per goal of the compared arm (cost per row, so repeats average out). Falls back to the worker budget
 // when the compared arm has no recorded cost.
 export function matchedBudget(rows: BenchRow[], arm: BenchArm, arms: BenchArm[], fallback: number | (() => number)): number {

@@ -130,7 +130,7 @@ test('summarize: pass@1 and pass^3 per arm', () => {
 
 // ---------- ablation arms and the matched-cost baseline (W2.3, W2.4) ----------
 
-import { ABLATION_ARMS, SINGLE_SESSION_ARM, ablationTable, matchedBudget, renderAblationTable } from '../src/bench.ts';
+import { ABLATION_ARMS, SINGLE_SESSION_ARM, ablationTable, matchedBudget, referenceError, renderAblationTable } from '../src/bench.ts';
 
 test('built-in arms: full plus five ablations and the evolver pinned to v1', () => {
   assert.deepEqual(ABLATION_ARMS.map((a) => a.name), ['full', '-scenarios', '-repair', '-learnings', '-contrastive', '-evolver']);
@@ -327,4 +327,11 @@ test('defaultReference: full when present, else the first arm', () => {
   assert.equal(defaultReference([row('atlas-off'), row('atlas-l0')]), 'atlas-off');
   assert.equal(defaultReference([row('a'), row('full')]), 'full');
   assert.equal(defaultReference([]), undefined);
+});
+
+test('referenceError rejects a reference that is not among the arms in the run', () => {
+  const arms = [{ name: 'full' }, { name: 'atlas-l0' }];
+  assert.equal(referenceError(undefined, arms), undefined);
+  assert.equal(referenceError('atlas-l0', arms), undefined);
+  assert.match(referenceError('nope', arms) ?? '', /"nope" is not among the arms in this run \(full, atlas-l0\)/);
 });
