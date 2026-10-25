@@ -684,3 +684,82 @@ test('normalizeTasks sanitises footprints; schema allows them optionally', () =>
   assert.ok('footprint' in props.properties);
   assert.ok(!props.required.includes('footprint'));
 });
+
+// ---------- judge panel (W4.1) ----------
+
+const panelJudges = [{ model: 'haiku', lineage: 'strict' }, { model: 'sonnet', lineage: 'literal' }, { model: 'opus-mini' }];
+const crit = (...passes: boolean[]) => passes.map((p, i) => ({ criterion: `c${i + 1}`, pass: p, score: p ? 0.9 : 0.3, note: '' }));
+const panelRunner = (byModel: Record<string, boolean[]>, seen: Array<{ model: string; prompt: string }>): Runner => {
+  const base = fakeRunner({ failFirstAttemptOf: [] });
+  return async (req) => {
+    if (req.role === 'planner') {
+      return { ok: true, text: '', costUsd: 0, turns: 1, durationMs: 1, structured: { tasks: [{ id: 'T1', title: 'a', description: 'a', acceptance: ['c1', 'c2'], deps: [] }], scenarios: [] } };
+    }
+    const passes = req.role === 'judge' ? byModel[req.model] : undefined;
+    if (passes) {
+      seen.push({ model: req.model, prompt: req.prompt });
+      const ok = passes.every(Boolean);
+      return { ok: true, text: '', costUsd: 0.01, turns: 1, durationMs: 1, structured: { pass: ok, score: ok ? 0.9 : 0.4, summary: `by ${req.model}`, issues: [], criteria: crit(...passes) } };
+    }
+    return base(req);
+  };
+};
+
+test('panel: a clear majority records votes and disagreement without escalating', async () => {
+  const seen: Array<{ model: string; prompt: string }> = [];
+  const store = tempRepo({ verification: { ...DEFAULT_PROJECT_CONFIG.verification, panel: { enabled: true, judges: panelJudges, escalateModel: null } } });
+  const run = await runGoal({ store, runner: panelRunner({ haiku: [true, true], sonnet: [true, true], 'opus-mini': [true, false] }, seen), goal: 'g' });
+  const t = run.tasks[0];
+  assert.equal(t.status, 'merged');
+  assert.equal(seen.length, 3);
+  assert.equal(t.verdict!.panel!.votes.length, 3);
+  assert.ok(t.verdict!.panel!.disagreement > 0);
+  assert.equal(t.verdict!.panel!.escalated, false);
+  assert.notEqual(seen[0].prompt, seen[1].prompt, 'lineages produce different prompts');
+  assert.match(seen[0].prompt, /REVIEW STANCE/);
+  assert.ok(store.events(run.id).some((e) => e.kind === 'log' && /judge panel of 3: disagreement 0\.17/.test(e.msg)));
+});
+
+test('panel: a split vote makes exactly one escalation call whose verdict decides', async () => {
+  const seen: Array<{ model: string; prompt: string }> = [];
+  const store = tempRepo({ verification: { ...DEFAULT_PROJECT_CONFIG.verification, panel: { enabled: true, judges: panelJudges.slice(0, 2), escalateModel: 'big' } } });
+  const run = await runGoal({ store, runner: panelRunner({ haiku: [true, true], sonnet: [true, false], big: [true, true] }, seen), goal: 'g' });
+  const t = run.tasks[0];
+  assert.equal(seen.filter((s) => s.model === 'big').length, 1);
+  assert.equal(seen.length, 3);
+  assert.equal(t.verdict!.panel!.escalated, true);
+  assert.equal(t.verdict!.panel!.votes.length, 2);
+  assert.equal(t.verdict!.summary, 'by big');
+  assert.equal(t.status, 'merged');
+});
+
+test('panel disabled: one judge call and no panel field', async () => {
+  const { runner, calls } = oneTaskRunner(0);
+  const run = await runGoal({ store: tempRepo(), runner, goal: 'g' });
+  assert.equal(calls.judge, 1);
+  assert.equal('panel' in run.tasks[0].verdict!, false);
+});
+
+test('panel contrast: orders that disagree give no pick; consistent orders pick', async () => {
+  const panel = { ...DEFAULT_PROJECT_CONFIG.verification, panel: { enabled: true, judges: [], escalateModel: null } };
+  // The fake always prefers the displayed B, so the swapped run contradicts the first.
+  const biased = tempRepo({ concurrency: 1, contrastive, verification: panel });
+  const { seen, wrapped } = countBy(fakeRunner({ contrastPick: 'B' }));
+  const run = await runGoal({ store: biased, runner: wrapped, goal: 'g' });
+  assert.equal(seen.compare, 2);
+  assert.equal(run.tasks.find((t) => t.id === 'T2')!.contrast?.picked, null);
+  assert.match(run.tasks.find((t) => t.id === 'T2')!.contrast!.reasons, /not consistent/);
+
+  const steady = tempRepo({ concurrency: 1, contrastive, verification: panel });
+  const base = fakeRunner();
+  const content: Runner = async (req) => {
+    const res = await base(req);
+    if (req.role === 'judge' && /ATTEMPT A DIFF/.test(req.prompt) && res.structured) {
+      const aSection = req.prompt.slice(req.prompt.indexOf('ATTEMPT A DIFF'), req.prompt.indexOf('ATTEMPT B WORKER SUMMARY'));
+      res.structured = { ...(res.structured as object), preferred: /T2-b/.test(aSection) ? 'A' : 'B' };
+    }
+    return res;
+  };
+  const r2 = await runGoal({ store: steady, runner: content, goal: 'g' });
+  assert.equal(r2.tasks.find((t) => t.id === 'T2')!.contrast?.picked, 'B');
+});

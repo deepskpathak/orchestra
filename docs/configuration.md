@@ -87,6 +87,9 @@ M4 Verification. Every part is off by default; later releases fill in the behavi
 | `verification.mutation.maxMutants` | number | `20` | Cap on mutants generated per run. |
 | `verification.mutation.failBelowFloor` | boolean | `false` | Fail the run when the score is under the floor. `false` reports only. |
 
+
+With the panel on, `judgeTiers` is bypassed. Each member sees a framing line chosen by `lineage` (`strict`, `literal`, `scenario`, or any custom name; omit or `default` for none). Votes are per criterion; a tie on any criterion calls `escalateModel` once and its verdict decides (`verdict.panel.escalated` is `true`). Members that return no verdict are skipped. `verdict.panel.disagreement` is the mean share of judges in the minority per criterion. Contrastive repair also compares in both orders and picks nothing when the orders disagree.
+
 ### `context.atlas`
 
 Off by default. The Repo Atlas is a deterministic, commit-keyed code graph (files, symbols, imports, references, tests) built with regex extractors, no LLM and no dependencies. It is stored at `.orchestra/atlas/<sha>.json` and refreshed incrementally from the nearest cached commit. Build or inspect it by hand with `orchestra atlas build` and `orchestra atlas stats`; those commands work even when the atlas is disabled.
