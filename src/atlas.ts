@@ -4,8 +4,8 @@
 // functions of source text. Cached at .orchestra/atlas/<sha>.json and rebuilt incrementally from
 // the nearest cached commit. Never indexes the Orchestra state dir, .env* or guard secret paths.
 
-import { existsSync, readdirSync } from 'node:fs';
-import { commitExists, diffNamesBetween, filesAtRef, git, readBlobsAtRef } from './git.ts';
+import { existsSync, readdirSync, statSync, unlinkSync } from 'node:fs';
+import { commitExists, diffNamesBetween, filesAtRef, git, readBlobsAtRef, tryGit } from './git.ts';
 import { isSecretPath } from './guard.ts';
 import { Store } from './store.ts';
 
@@ -13,6 +13,7 @@ export const ATLAS_VERSION = 1;
 const MAX_FILE_BYTES = 256 * 1024;
 const MAX_SYMBOLS_PER_FILE = 500;
 const MAX_NEAREST_CANDIDATES = 8;
+const MAX_CACHED_ATLASES = 16;
 // Extensions that are never source text; skipped before any blob is read.
 const BINARY_EXT = /\.(png|jpe?g|gif|bmp|ico|webp|pdf|zip|gz|tgz|bz2|xz|7z|jar|war|class|so|dylib|dll|exe|o|a|bin|wasm|woff2?|ttf|otf|eot|mp[34]|mov|avi|wav|ogg|sqlite|db|parquet|lock)$/i;
 
@@ -595,6 +596,32 @@ function cachedShas(store: Store): string[] {
     .map((f) => f.slice(0, -5));
 }
 
+// Cached shas, most recently written first (ties broken by sha for determinism).
+function cachedByRecency(store: Store): string[] {
+  const mtime = (s: string) => {
+    try {
+      return statSync(store.path(`atlas/${s}.json`)).mtimeMs;
+    } catch {
+      return 0;
+    }
+  };
+  return cachedShas(store)
+    .map((s) => ({ s, t: mtime(s) }))
+    .sort((a, b) => b.t - a.t || (a.s < b.s ? -1 : 1))
+    .map((x) => x.s);
+}
+
+// Keeps only the `keep` most recent cached atlases, never removing `protect`.
+function pruneCache(store: Store, keep: number, protect: string): void {
+  for (const s of cachedByRecency(store).filter((x) => x !== protect).slice(Math.max(0, keep - 1))) {
+    try {
+      unlinkSync(store.path(`atlas/${s}.json`));
+    } catch {
+      // best effort: a stale cache file is harmless
+    }
+  }
+}
+
 function readCached(store: Store, sha: string): Atlas | null {
   try {
     const a = store.readJson<Atlas | null>(`atlas/${sha}.json`, null);
@@ -604,24 +631,39 @@ function readCached(store: Store, sha: string): Atlas | null {
   }
 }
 
-// Exact cache hit, else incremental from the cached commit with the smallest diff, else full.
+// Picks at most MAX_NEAREST_CANDIDATES cached shas without diffing them all: ancestors of `full`
+// nearest first (one rev-list), then the most recently written caches for unrelated history.
+function nearestCandidates(root: string, store: Store, full: string): string[] {
+  const cached = new Set(cachedShas(store));
+  cached.delete(full);
+  if (!cached.size) return [];
+  const picked: string[] = [];
+  const log = tryGit(root, 'rev-list', '--max-count=500', full);
+  if (log.ok) for (const s of log.out.split('\n')) if (cached.has(s) && picked.length < MAX_NEAREST_CANDIDATES) picked.push(s);
+  for (const s of cachedByRecency(store)) {
+    if (picked.length >= MAX_NEAREST_CANDIDATES) break;
+    if (cached.has(s) && !picked.includes(s) && commitExists(root, s)) picked.push(s);
+  }
+  return picked;
+}
+
+// Exact cache hit, else incremental from the nearby cached commit with the smallest diff, else full.
+// The cache is pruned to the MAX_CACHED_ATLASES most recent files.
 export function loadOrBuildAtlas(root: string, sha: string): Atlas {
   const store = new Store(root);
   const full = git(root, 'rev-parse', sha);
   const hit = readCached(store, full);
   if (hit) return hit;
   let best: { atlas: Atlas; n: number } | null = null;
-  const candidates = cachedShas(store).filter((s) => s !== full && commitExists(root, s));
-  const scored = candidates.map((s) => ({ s, n: diffNamesBetween(root, s, full).length })).sort((a, b) => a.n - b.n).slice(0, MAX_NEAREST_CANDIDATES);
-  for (const c of scored) {
-    const atlas = readCached(store, c.s);
-    if (atlas) {
-      best = { atlas, n: c.n };
-      break;
-    }
+  for (const s of nearestCandidates(root, store, full)) {
+    const atlas = readCached(store, s);
+    if (!atlas) continue;
+    const n = diffNamesBetween(root, s, full).length;
+    if (!best || n < best.n) best = { atlas, n };
   }
   const built = buildAtlas(root, full, best?.atlas);
   store.writeText(`atlas/${full}.json`, JSON.stringify(built) + '\n');
+  pruneCache(store, MAX_CACHED_ATLASES, full);
   return built;
 }
 

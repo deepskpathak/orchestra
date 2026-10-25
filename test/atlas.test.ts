@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
 import { atlasStats, buildAtlas, extractFile, extractGo, extractJava, extractPython, extractRust, extractTsJs, isExcludedPath, loadOrBuildAtlas } from '../src/atlas.ts';
@@ -246,4 +246,20 @@ test('readBlobsAtRef skips oversized blobs without loading them, and the atlas s
   const atlas = buildAtlas(dir, sha);
   assert.ok('small.ts' in atlas.files);
   assert.ok(!('logo.png' in atlas.files));
+});
+
+test('loadOrBuildAtlas diffs only a few ancestor candidates and prunes the cache', () => {
+  const store = tempRepo();
+  const dir = store.root;
+  const shas: string[] = [];
+  for (let i = 0; i < 20; i++) {
+    put(dir, `src/f${i}.ts`, `export const F${i} = ${i};\n`);
+    shas.push(commit(dir, `c${i}`));
+    loadOrBuildAtlas(dir, shas[i]);
+  }
+  const cached = readdirSync(join(dir, '.orchestra/atlas')).filter((f) => f.endsWith('.json'));
+  assert.equal(cached.length, 16);
+  assert.ok(cached.includes(`${shas[19]}.json`), 'newest atlas kept');
+  const inc = loadOrBuildAtlas(dir, shas[19]);
+  assert.deepEqual(inc, buildAtlas(dir, shas[19]));
 });

@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Atlas build: blobs are sized with `git cat-file --batch-check` and only those within 256KB are read, binary extensions are skipped up front, and a failed chunk read degrades to per-blob reads, so large or binary files can no longer overflow the buffer and abort the build.
+- Atlas cache: `loadOrBuildAtlas` picks at most 8 candidates cheaply (ancestors from one `git rev-list`, then most recently written caches) before diffing instead of diffing every cached sha, and prunes `.orchestra/atlas` to the 16 most recent files.
 - Sandbox: the srt and claude write policy now includes the shared git common dir (hooks and config stay read-only inside it), so a worker's `git commit` in a worktree can write objects, refs and worktree metadata. Matches the docker backend.
 - Sandbox: `permissions.deny` rules now use Claude Code's absolute-path form (`Read(//home/u/.ssh)`, not `Read(/home/u/.ssh)`, which means settings-relative) and add a `/**` variant so directories cover their contents. Globs such as `**/.env` are unchanged. Unverified against a live Claude Code, so both the bare and `/**` forms are emitted.
 - Sandbox: `srt --settings` now gets a file in srt's own shape (top-level `network.allowedDomains`, `filesystem.allowWrite/denyRead/denyWrite`) instead of the Claude Code shape. The `claude` backend keeps the Claude shape. Key names follow the sandbox-runtime README as recalled and are unverified against an installed srt.
