@@ -21,12 +21,16 @@ export interface Lesson {
   helpful?: number; // runs where this lesson was credited with helping
   harmful?: number; // runs where it was blamed for hurting
   updatedAt?: number; // ms epoch of the last add or update edit; drives expiry
+  links?: LessonLinks; // optional L3 graph links to code; absent on legacy lessons
 }
+
+/** Repo-relative files (and optionally symbols) a lesson is about. */
+export interface LessonLinks { files: string[]; symbols?: string[] }
 
 /** One item-level change. Edits address lessons by id and never replace the whole set. */
 export type LessonEdit =
-  | { op: 'add'; role?: Lesson['role']; lesson: string; evidence: Evidence[] }
-  | { op: 'update'; id: string; role?: Lesson['role']; lesson?: string; evidence?: Evidence[]; helped?: boolean }
+  | { op: 'add'; role?: Lesson['role']; lesson: string; evidence: Evidence[]; links?: LessonLinks }
+  | { op: 'update'; id: string; role?: Lesson['role']; lesson?: string; evidence?: Evidence[]; helped?: boolean; links?: LessonLinks }
   | { op: 'remove'; id: string };
 
 export interface EditResult { added: number; updated: number; removed: number; skipped: number; evicted: number }
@@ -60,6 +64,21 @@ function cleanEvidence(e: unknown): Evidence[] {
   return out;
 }
 
+/** Valid links or undefined: files must be a non-empty array of non-empty strings, symbols (if present) likewise. Malformed input is dropped. */
+export function cleanLinks(x: unknown): LessonLinks | undefined {
+  const l = x as { files?: unknown; symbols?: unknown } | null;
+  if (!l || typeof l !== 'object' || !Array.isArray(l.files)) return undefined;
+  const strs = (a: unknown[]) => [...new Set(a.filter((v): v is string => typeof v === 'string' && !!v.trim()).map((v) => v.trim()))];
+  const files = strs(l.files);
+  if (!files.length) return undefined;
+  const out: LessonLinks = { files };
+  if (Array.isArray(l.symbols)) {
+    const symbols = strs(l.symbols);
+    if (symbols.length) out.symbols = symbols;
+  }
+  return out;
+}
+
 const count = (n: unknown): number => (typeof n === 'number' && Number.isFinite(n) && n > 0 ? Math.floor(n) : 0);
 
 /** Deterministic id from the lesson text, so a legacy lesson without one is addressable. */
@@ -83,6 +102,7 @@ function cleanLessons(lessons: unknown[]): Lesson[] {
       helpful: count(l.helpful),
       harmful: count(l.harmful),
       ...(typeof l.updatedAt === 'number' && Number.isFinite(l.updatedAt) ? { updatedAt: l.updatedAt } : {}),
+      ...(cleanLinks(l.links) ? { links: cleanLinks(l.links) } : {}),
     });
   }
   return out;
@@ -183,10 +203,11 @@ export function applyLessonEdits(store: Store, domain: string | undefined, edits
   for (const e of Array.isArray(edits) ? edits : []) {
     if (!e || typeof e !== 'object') { res.skipped++; continue; }
     if (e.op === 'add') {
-      const [l] = cleanLessons([{ role: e.role, lesson: e.lesson, evidence: e.evidence, updatedAt: now }]);
+      const [l] = cleanLessons([{ role: e.role, lesson: e.lesson, evidence: e.evidence, links: e.links, updatedAt: now }]);
       if (!l) { res.skipped++; continue; }
       const dup = byId.get(l.id!);
-      if (dup) { dup.evidence = mergeEvidence(dup.evidence, l.evidence); dup.updatedAt = now; res.updated++; continue; }
+      if (dup) { dup.evidence = mergeEvidence(dup.evidence, l.evidence); if (l.links) dup.links = l.links;
+        dup.updatedAt = now; res.updated++; continue; }
       byId.set(l.id!, l);
       res.added++;
     } else if (e.op === 'update') {
@@ -195,6 +216,8 @@ export function applyLessonEdits(store: Store, domain: string | undefined, edits
       if (typeof e.lesson === 'string' && e.lesson.trim()) cur.lesson = e.lesson.trim();
       if (e.role && ROLES.includes(e.role)) cur.role = e.role;
       if (e.evidence) cur.evidence = mergeEvidence(cur.evidence, e.evidence);
+      const links = cleanLinks(e.links);
+      if (links) cur.links = links;
       if (e.helped === true) cur.helpful = (cur.helpful ?? 0) + 1;
       if (e.helped === false) cur.harmful = (cur.harmful ?? 0) + 1;
       cur.updatedAt = now;
@@ -220,14 +243,23 @@ export function applyLessonEdits(store: Store, domain: string | undefined, edits
  */
 export function editsFromResponse(out: { edits?: unknown; lessons?: unknown } | undefined, existing: Lesson[]): LessonEdit[] {
   const edits: LessonEdit[] = [];
-  if (Array.isArray(out?.edits)) edits.push(...(out!.edits as LessonEdit[]));
+  if (Array.isArray(out?.edits)) {
+    for (const e of out!.edits as LessonEdit[]) {
+      if (e && typeof e === 'object' && (e.op === 'add' || e.op === 'update') && 'links' in e) {
+        const { links, ...rest } = e as typeof e & { links?: unknown };
+        const ok = cleanLinks(links);
+        edits.push(ok ? { ...rest, links: ok } as LessonEdit : rest as LessonEdit);
+      } else edits.push(e);
+    }
+  }
   if (Array.isArray(out?.lessons)) {
     const byId = new Map(existing.map((l) => [l.id!, l]));
     for (const raw of out!.lessons as Partial<Lesson>[]) {
       if (!raw || typeof raw.lesson !== 'string') continue;
+      const links = cleanLinks(raw.links);
       const id = typeof raw.id === 'string' && byId.has(raw.id) ? raw.id : lessonId(raw.lesson);
-      if (byId.has(id)) edits.push({ op: 'update', id, lesson: raw.lesson, role: raw.role, evidence: raw.evidence });
-      else edits.push({ op: 'add', role: raw.role, lesson: raw.lesson, evidence: raw.evidence as Evidence[] });
+      if (byId.has(id)) edits.push({ op: 'update', id, lesson: raw.lesson, role: raw.role, evidence: raw.evidence, ...(links ? { links } : {}) });
+      else edits.push({ op: 'add', role: raw.role, lesson: raw.lesson, evidence: raw.evidence as Evidence[], ...(links ? { links } : {}) });
     }
   }
   return edits;
@@ -298,16 +330,47 @@ function isStore(x: unknown): x is Store {
   return !!x && typeof (x as Store).readJson === 'function';
 }
 
+/** Retrieval order: the domain's lessons (role first), then global, unchanged by the graph. */
+function orderedLessons(all: Record<string, Lesson[]>, role: Lesson['role'], d: string | undefined): Lesson[] {
+  const byRole = (ls: Lesson[]) => [...ls.filter((l) => l.role === role), ...ls.filter((l) => l.role !== role)];
+  return [...(d && d !== GLOBAL ? byRole(all[d] ?? []) : []), ...byRole(all[GLOBAL] ?? [])];
+}
+
+export interface CodeRetrievalOpts {
+  role?: Lesson['role'];
+  graph?: boolean; // learnings.graph; off keeps retrieval identical to the domain order
+  cleanRoom?: boolean; // eval trials: never boost by linked code
+}
+
+/**
+ * L3 retrieval: lessons whose links overlap the task footprint first (stable), then the existing order,
+ * cut to the budget. With graph off, cleanRoom on, or an empty footprint this is exactly the plain order.
+ */
+export function retrieveByCode(
+  source: Store | Record<string, Lesson[]>,
+  domain: string | undefined,
+  footprintFiles: readonly string[],
+  budget: number = RETRIEVAL_BUDGET,
+  opts: CodeRetrievalOpts = {},
+): Lesson[] {
+  const all = isStore(source) ? readAllLearnings(source) : source;
+  const d = domain === undefined ? undefined : normalizeDomain(domain);
+  const ordered = orderedLessons(all, opts.role ?? 'worker', d);
+  const fp = new Set(footprintFiles);
+  const boost = opts.graph === true && opts.cleanRoom !== true && fp.size > 0;
+  const hit = (l: Lesson) => boost && !!l.links?.files.some((f) => fp.has(f));
+  const ranked = boost ? [...ordered.filter(hit), ...ordered.filter((l) => !hit(l))] : ordered;
+  return ranked.slice(0, Math.max(0, budget));
+}
+
 export function formatLearnings(
   source: Store | Record<string, Lesson[]>,
   role: Lesson['role'],
   domain?: string,
   budget: number = RETRIEVAL_BUDGET,
+  code?: { footprint: readonly string[]; graph?: boolean; cleanRoom?: boolean },
 ): string {
-  const all = isStore(source) ? readAllLearnings(source) : source;
-  const d = domain === undefined ? undefined : normalizeDomain(domain);
-  const byRole = (ls: Lesson[]) => [...ls.filter((l) => l.role === role), ...ls.filter((l) => l.role !== role)];
-  const picked = [...(d && d !== GLOBAL ? byRole(all[d] ?? []) : []), ...byRole(all[GLOBAL] ?? [])].slice(0, Math.max(0, budget));
+  const picked = retrieveByCode(source, domain, code?.footprint ?? [], budget, { role, graph: code?.graph, cleanRoom: code?.cleanRoom });
   return picked.length ? picked.map((l) => `- [${l.role}] ${l.lesson}`).join('\n') : '(none yet)';
 }
 

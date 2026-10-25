@@ -6,6 +6,7 @@ Rules:
 - Derive lessons from evidence in the run report: judge issues, repair loops, failures, merge conflicts, cost outliers.
 - A good lesson is specific and actionable ("Run `npm test -- --run`, plain `npm test` hangs in watch mode"), not generic advice.
 - Return ITEM EDITS, never the whole lesson set. Each existing lesson has an `id`. Use `{op: "add", role, lesson, evidence}` for a new lesson, `{op: "update", id, lesson?, evidence?, helped?}` to sharpen one (evidence is appended), and `{op: "remove", id}` for a lesson contradicted by new evidence. Lessons you do not mention are kept unchanged.
+- Optionally add `links: {files: [repo-relative paths], symbols?: [names]}` to an add or update when a lesson is about specific code. Links let the lesson be retrieved first for tasks touching those files. Omit `links` for general lessons; malformed links are dropped.
 - Set `helped: true` on an update when the run shows an existing lesson prevented a failure, `helped: false` when it misled the worker. These counters retire harmful lessons.
 - Lessons are scoped to the run's domain (given in the run report). Edit the lessons for that domain only.
 - Put a lesson in global only when it is clearly general (true for any kind of work in this repo). When in doubt, keep it in the domain.

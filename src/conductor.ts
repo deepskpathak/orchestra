@@ -768,7 +768,12 @@ export class Conductor {
     const prompt = joinPrompt(
       workerPrompt({
         goal: this.run.goal,
-        learnings: formatLearnings(learnings, 'worker', this.run.domain),
+        learnings: formatLearnings(learnings, 'worker', this.run.domain, undefined, {
+          footprint: task.footprint?.files ?? [],
+          graph: cfg.learnings?.graph === true,
+          // Eval trials that read the store (the with-lessons ablation arm) still get no code-linked boost.
+          cleanRoom: this.run.kind === 'eval',
+        }),
         testCommand: cfg.testCommand,
         task,
         others,
