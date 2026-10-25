@@ -94,6 +94,10 @@ orchestra bench calibrate --import graded.jsonl    # merges grades, prints human
 
 The sample oversamples disagreements between judge and check, contrastive pairs whose two verdicts disagreed, and scores within 0.1 of `passThreshold`. About 70% of the sample is reserved for those; the rest is random. The same seed gives the same sample. Set `evolve.minJudgeAgreement` to block evolution when agreement falls below a floor.
 
+### By verification mode (H2)
+
+Each run records which M4 verification modes were enabled (`Run.verificationModes`: `panel`, `agentic`, `contracts`, `oracles`, `mutation`). `orchestra stats` prints judge agreement with the hidden check per mode, joining bench rows to runs by `runId`, next to the merged-but-wrong rate per mode. Rows from runs with no mode enabled, or whose run file is missing, count as `none`. A run using several modes counts under each, so rows overlap and are not additive. To test H2, bench once with a mode off and once with it on, then compare its row with `none`. Small samples are noisy, so read `n` before the rate.
+
 ## Ablations and the single-session baseline
 
 `orchestra bench --ablations` runs six built-in arms, each over all goals and `--repeats` times. Every factory arm enables contrastive repair so that `-contrastive` has something to turn off.

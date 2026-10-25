@@ -25,6 +25,7 @@ You give Orchestra a goal. It plans a task graph, builds tasks in parallel git w
 - **Planner, worker, judge, librarian, evolver.** Separate roles with fresh context per attempt. Planners never code and judges never edit.
 - **Parallel git worktrees.** Each task builds in its own worktree. Your checkout is never touched.
 - **Hidden holdout scenarios.** The judge checks work against scenarios the workers cannot read.
+- **Opt-in M4 verification.** Judge panel, agentic judge, acceptance contracts, oracles and a mutation score, all off by default (`verification.*`, see docs/configuration.md).
 - **Self-correcting.** Judge rejections, merge conflicts, and red post-merge tests all trigger a retry.
 - **Merge queue.** Tasks merge one at a time onto `orchestra/<run>/integration`, with tests after each merge.
 - **Self-evaluating.** Every agent session is recorded in a ledger, and `orchestra stats` reports health per harness version.
@@ -88,7 +89,7 @@ Set `ORCHESTRA_RUNNER=fake` to use the simulator instead of real Claude sessions
 | `orchestra watch [runId]` | Full-screen live dashboard (q to quit) |
 | `orchestra status [runId]` | One-shot board of the current or given run |
 | `orchestra bench` | Run the fixed benchmark suite (arms x goals x repeats, hidden checks); `--verify-oracles` validates the suite, `--ablations` runs the ablation arms and a matched-cost single-session baseline. See [docs/bench.md](docs/bench.md) |
-| `orchestra stats` | Factory health per harness version, plus outcome metrics (merge acceptance, edits before landing, revert rate, cost per accepted merge, success by task length) |
+| `orchestra stats` | Factory health per harness version, plus outcome metrics (merge acceptance, edits before landing, revert rate, cost per accepted merge, success by task length), merged-but-wrong rate and judge agreement split by M4 verification mode |
 | `orchestra evolve` | Propose, evaluate, and maybe promote a better harness |
 | `orchestra learnings [--domain <slug>]` | Show what the factory has learned in this repo (`--domain` filters to one domain, `global` for cross-domain lessons) |
 | `orchestra atlas build` / `orchestra atlas stats` | Build or refresh the Repo Atlas code graph for HEAD (`.orchestra/atlas/<sha>.json`), or show its file, symbol and edge counts. Work even when `context.atlas.enabled` is false; `.orchestra/`, `.env*` and secret files are never indexed |
