@@ -219,3 +219,25 @@ test('approve: failing post-merge tests restore the integration branch and keep 
     else process.env.ORCHESTRA_REQUESTER = prev;
   }
 });
+
+test('batch merge: tasks that start while a batch is under test branch from the last known-good commit', async () => {
+  // T2 lands first (batch of one). T1 then lands on top of it and breaks the suite, and its post-merge test run is
+  // slow. T3 depends on T2, so it starts while T1's rejected merge sits on the integration worktree.
+  const store = tempRepo({ concurrency: 3, throughput: { footprintScheduling: false, batchMerge: { enabled: true, maxBatch: 1 } } });
+  store.writeJson('config.json', { ...store.config(), testCommand: 'sleep 0.4; ! (test -f fake/T1.txt && test -f fake/T2.txt)' });
+  const seen: Record<string, boolean> = {};
+  const inner = planned([t('T1'), t('T2'), { ...t('T3'), deps: ['T2'] }], {}, 0);
+  const runner: Runner = async (req) => {
+    if (req.role === 'worker') {
+      const { existsSync } = await import('node:fs');
+      seen[req.meta?.task ?? ''] ??= existsSync(`${req.cwd}/fake/T1.txt`);
+      // T1 reaches the merge queue after T2, so its batch is queued behind T2's.
+      if (req.meta?.task === 'T1') await new Promise((r) => setTimeout(r, 250));
+    }
+    return inner(req);
+  };
+  const run = await runGoal({ store, runner, goal: 'g' });
+  assert.equal(run.tasks.find((x) => x.id === 'T2')!.status, 'merged');
+  assert.equal(seen.T3, false, 'T3 must not inherit the rejected T1 merge');
+  assert.equal(run.tasks.find((x) => x.id === 'T3')!.status, 'merged');
+});

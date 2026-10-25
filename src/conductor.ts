@@ -498,6 +498,9 @@ export class Conductor {
   private evalLearnings: boolean;
   private integration!: { path: string; branch: string; base: string };
   private mergeChain: Promise<unknown> = Promise.resolve();
+  // Last integration commit whose tests passed. Batch merging parks transient and rejected merge states on
+  // the integration worktree while tests run, so new task worktrees branch from this commit, never from HEAD.
+  private knownGood = '';
   private readonly inflightIds = new Set<string>(); // tasks with an attempt in progress (scheduler)
   private batchQueue: { task: Task; resolve: () => void }[] = []; // W6.2: judged-pass tasks waiting for a batch
   private readonly mergeReadyAt = new Map<string, number>();
@@ -547,6 +550,7 @@ export class Conductor {
       this.integration = g.createIntegration(store.root, this.wtRoot, run.id, run.baseRef);
       run.integrationBranch = this.integration.branch;
       run.baseRef = this.integration.base;
+      this.knownGood = this.integration.base;
       this.emit('run.start', `Run started: ${run.goal}`, { harness: run.harness });
       this.save();
 
@@ -611,7 +615,7 @@ export class Conductor {
     try {
       const changed = this.mutationOpts?.changedFiles ?? g.changedFiles(this.integration.path, this.integration.base, false);
       const files = changed.filter((f) => /\.(?:[cm]?[jt]s|[jt]sx)$/.test(f) && !/(?:^|\/)(?:tests?|__tests__)\/|\.(?:test|spec)\./.test(f));
-      wt = g.createTaskWorktree(store.root, this.wtRoot, run.id, 'mutation', g.head(this.integration.path));
+      wt = g.createTaskWorktree(store.root, this.wtRoot, run.id, 'mutation', this.knownGood);
       const cwd = wt.path;
       const exec = this.mutationOpts?.exec ?? ((d: string, c: string, t?: number) => g.runTestsAsync(d, c, t, scrubVerifierEnv(process.env)));
       const out = await runMutation({
@@ -813,7 +817,7 @@ export class Conductor {
     task.attempts += 1;
     task.status = 'running';
     task.startedAt ??= Date.now();
-    const wt = g.createTaskWorktree(store.root, this.wtRoot, this.run.id, task.id, g.head(this.integration.path));
+    const wt = g.createTaskWorktree(store.root, this.wtRoot, this.run.id, task.id, this.knownGood);
     // A contrastive winner B leaves task.worktree on the -b path; retire it before reusing the normal one.
     if (task.worktree && task.worktree !== wt.path) {
       g.removeWorktree(store.root, task.worktree);
@@ -1025,7 +1029,7 @@ export class Conductor {
     // Stale leftovers from an earlier pair would make createTaskWorktree reuse them.
     g.removeWorktree(store.root, join(this.wtRoot, this.run.id, idB));
     g.deleteBranch(store.root, `orchestra/${this.run.id}/${idB}`);
-    const wtB = g.createTaskWorktree(store.root, this.wtRoot, this.run.id, idB, g.head(this.integration.path));
+    const wtB = g.createTaskWorktree(store.root, this.wtRoot, this.run.id, idB, this.knownGood);
     const baseB = g.mergeBase(wtB.path, 'HEAD', this.integration.branch);
     this.emit('log', `${task.id} contrastive repair: running attempts A and B in parallel`, undefined, task.id);
     this.save();
@@ -1377,7 +1381,7 @@ export class Conductor {
       const id = `${task.id}-s${i}`;
       g.removeWorktree(store.root, join(this.wtRoot, this.run.id, id));
       g.deleteBranch(store.root, `orchestra/${this.run.id}/${id}`);
-      trees.push(g.createTaskWorktree(store.root, this.wtRoot, this.run.id, id, g.head(this.integration.path)));
+      trees.push(g.createTaskWorktree(store.root, this.wtRoot, this.run.id, id, this.knownGood));
     }
     this.emit('log', `${task.id} best-of-${n}: running ${n} worker samples in parallel`, undefined, task.id);
     this.save();
@@ -1453,6 +1457,7 @@ export class Conductor {
           await this.mergeBatch(batch);
         } catch (err) {
           for (const t of batch) if (t.status === 'merging') this.fail(t, `internal error: ${(err as Error).message}`);
+          g.resetTo(this.integration.path, this.knownGood);
         }
       }
     } finally {
@@ -1502,6 +1507,7 @@ export class Conductor {
         this.repairOrFail(t, [`After merging with other tasks the test suite fails. Re-implement on the latest code. Output tail:\n${tail.slice(-1200)}`]);
       }
     }
+    this.knownGood = g.head(ip);
     for (const t of landing) this.markMerged(t, footprints.get(t.id));
   }
 
@@ -1553,6 +1559,7 @@ export class Conductor {
         return this.repairOrFail(task, [`After merging with other tasks the test suite fails. Re-implement on the latest code. Output tail:\n${t.tail.slice(-1200)}`]);
       }
     }
+    this.knownGood = g.head(ip);
     this.markMerged(task, footprint);
   }
 
