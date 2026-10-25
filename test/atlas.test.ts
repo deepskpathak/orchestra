@@ -224,9 +224,9 @@ test('incremental build equals a full build after edit, add and delete', () => {
 
 test('context.atlas config defaults and deep merge; EVOLVABLE_FILES untouched', () => {
   const store = tempRepo();
-  assert.deepEqual(store.config().context.atlas, { enabled: false, mapTokens: 1024, packs: false, packTokens: 1500 });
+  assert.deepEqual(store.config().context.atlas, { enabled: false, mapTokens: 1024, packs: false, packTokens: 1500, query: false });
   store.writeJson('config.json', { ...DEFAULT_PROJECT_CONFIG, context: { atlas: { enabled: true } } });
-  assert.deepEqual(store.config().context.atlas, { enabled: true, mapTokens: 1024, packs: false, packTokens: 1500 });
+  assert.deepEqual(store.config().context.atlas, { enabled: true, mapTokens: 1024, packs: false, packTokens: 1500, query: false });
   store.writeJson('config.json', { testCommand: 'x' });
   assert.equal(store.config().context.atlas.enabled, false);
   assert.ok(!JSON.stringify(EVOLVABLE_FILES).includes('atlas'));

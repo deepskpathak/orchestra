@@ -1,13 +1,14 @@
 // `orchestra` command line. Thin layer over conductor / evolve / render.
 
 import { spawn, spawnSync, execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, openSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, openSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { claudeRunner, preflight, type Runner } from './agent.ts';
 import { importGrades, readBenchRows, renderCalibration, renderCalibrationByMode, storeCalibration, storeCalibrationByMode, writeSample } from './calibration.ts';
 import { ABLATION_ARMS, SINGLE_SESSION_ARM, ablationTable, defaultReference, loadArms, referenceError, renderAblationTable, summarize, renderSummary, runBench, verifyOracles } from './bench.ts';
 import { atlasStats, loadOrBuildAtlas } from './atlas.ts';
+import { QUERY_COMMANDS, parsePorcelain, runQuery, type QueryCommand } from './atlas-query.ts';
 import { runGoal } from './conductor.ts';
 import { explorationMetrics, renderExploration } from './exploration.ts';
 import { collectOutcomes, renderOutcomes } from './outcomes.ts';
@@ -57,6 +58,9 @@ Usage:
                                  Show what the factory has learned (all, or one domain; "global" for cross-domain lessons)
   orchestra atlas build          Build or incrementally refresh the Repo Atlas code graph for HEAD (.orchestra/atlas/<sha>.json)
   orchestra atlas stats          Show file, symbol and edge counts of the atlas for HEAD (builds it if missing)
+  orchestra atlas find|neighbors|impact|tests <symbol-or-path>
+                                 L2 code graph queries as a tree (80 line cap). Need context.atlas.enabled and a built atlas;
+                                 files modified in this worktree are marked stale. Advisory, never gates a merge
                                  Both work regardless of context.atlas.enabled; the atlas never indexes .orchestra/, .env* or secrets
   orchestra bench                Run the fixed benchmark suite: arms x goals x repeats, hidden checks, JSONL + summary
       --arms a,b --goals g1,g2 --repeats N   Choose arms (default bench/arms.json), goals and repeats per goal
@@ -435,10 +439,42 @@ function cmdLearnings(args: string[]): void {
   }
 }
 
-const ATLAS_USAGE = 'Usage: orchestra atlas build | orchestra atlas stats';
+const ATLAS_USAGE = 'Usage: orchestra atlas build | stats | find|neighbors|impact|tests <symbol-or-path>';
+
+// Files modified in the calling worktree; injectable so tests need no git.
+export function gitStatusPaths(root: string): string[] {
+  try {
+    return parsePorcelain(execFileSync('git', ['status', '--porcelain'], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }));
+  } catch {
+    return [];
+  }
+}
+
+function cmdAtlasQuery(root: string, sub: QueryCommand, arg: string | undefined, statusPaths: (root: string) => string[] = gitStatusPaths): void {
+  if (!arg) die(`Usage: orchestra atlas ${sub} <symbol-or-path>`);
+  if (!new Store(root).config().context.atlas.enabled) die('The Repo Atlas is disabled. Set context.atlas.enabled to true in .orchestra/config.json, then run `orchestra atlas build`.');
+  const dir = join(root, '.orchestra', 'atlas');
+  if (!existsSync(dir) || !readdirSync(dir).some((f) => f.endsWith('.json'))) die('No atlas has been built. Run `orchestra atlas build` first.');
+  let sha: string;
+  try {
+    sha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+  } catch {
+    die('No commits yet. Commit something first; the atlas is keyed by commit.');
+  }
+  const atlas = loadOrBuildAtlas(root, sha);
+  const r = runQuery(atlas, sub, arg, { stale: statusPaths(root) });
+  console.log(r.text);
+  if (!r.found) process.exitCode = 1;
+}
 
 function cmdAtlas(args: string[]): void {
   const sub = args[0];
+  if ((QUERY_COMMANDS as readonly string[]).includes(sub ?? '')) {
+    const root = findRepoRoot(process.cwd());
+    if (!root) die('Not inside a git repository.');
+    cmdAtlasQuery(root, sub as QueryCommand, args.slice(1).join(' ').trim() || undefined);
+    return;
+  }
   if (sub !== 'build' && sub !== 'stats') die(sub ? `unknown atlas subcommand "${sub}". ${ATLAS_USAGE}` : ATLAS_USAGE);
   const root = findRepoRoot(process.cwd());
   if (!root) die('Not inside a git repository.');

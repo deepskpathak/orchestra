@@ -109,6 +109,7 @@ Off by default. The Repo Atlas is a deterministic, commit-keyed code graph (file
 | `context.atlas.mapTokens` | number | `1024` | Token budget of the ranked repo map (L0). |
 | `context.atlas.packs` | boolean | `false` | Add a per-task pack (L1: footprint signatures, callers, importers, related tests) to the worker prompt body. |
 | `context.atlas.packTokens` | number | `1500` | Token budget of each task pack. |
+| `context.atlas.query` | boolean | `false` | Mention `orchestra atlas find\|neighbors\|impact\|tests` in worker and judge prompts (L2, W9.3). The command itself works whenever the atlas is enabled and built. Output is advisory and never gates a merge. |
 | `context.atlas.external` | `off` \| `auto` \| `ctags` \| `graphify` | `off` | Merge symbols and edges from an optional external source into the atlas (W9.5). Absent means `off`. |
 
 **External inputs (opt-in, never required).** With `context.atlas.external` set, the atlas build adds nodes and edges from one extra source to the built-in graph. Only paths already in the built-in atlas are accepted, so excluded and secret paths stay out. The merge happens on each load; the cache at `.orchestra/atlas/<sha>.json` keeps the built-in graph only. If the chosen source is missing or fails, the build logs `Atlas external source (<mode>) unavailable, using built-in: <reason>` and continues. No network is used.

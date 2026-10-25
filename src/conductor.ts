@@ -12,6 +12,7 @@ import { alternateWorkerSection, comparePrompt, COMPARE_SCHEMA, contrastApplies,
 import { aggregatePanel, lineageFraming, pairwiseBothOrders, type PanelJudgeVote } from './panel.ts';
 import { isExcludedPath, loadOrBuildAtlas, type Atlas } from './atlas.ts';
 import { buildTaskPack, renderMap } from './atlas-context.ts';
+import { ATLAS_QUERY_HINT } from './atlas-query.ts';
 import { plannedFiles } from './exploration.ts';
 import { applyContractUpdate, buildContract, contractSha, criteriaForTask, isContractPath, markPassing, unresolvedAmbiguities, type Contract } from './contracts.ts';
 import { analyzeDiff, MONITOR_MARK, type IntegrityFlag } from './integrity.ts';
@@ -141,6 +142,7 @@ export function workerPrompt(i: {
   style?: string;
   map?: string; // L0 repo map, shared prefix
   pack?: string; // L1 task pack, body only
+  atlasQuery?: boolean; // L2: mention the atlas query command (context.atlas.query)
 }): BuiltPrompt {
   const { task } = i;
   return {
@@ -151,6 +153,7 @@ export function workerPrompt(i: {
       guidanceSection('TOOL GUIDANCE', i.tools),
       guidanceSection('STYLE', i.style),
       i.map ? `REPOSITORY MAP:\n${i.map}` : '',
+      i.atlasQuery ? ATLAS_QUERY_HINT : '',
     ]
       .filter(Boolean)
       .join('\n\n'),
@@ -204,13 +207,14 @@ export function judgePrompt(i: {
   checklist?: string;
   agentic?: CheckResult[]; // set (even when empty) in agentic mode (W4.2)
   indexed?: boolean; // panel mode: ask each criterion entry for its 1-based `index`, so panel votes line up by position
+  atlasQuery?: boolean; // L2: mention the atlas query command (context.atlas.query)
 }): BuiltPrompt {
   const { task, tests } = i;
   const base = `HIDDEN SCENARIOS for the whole goal (judge only the parts this task is responsible for):\n${i.scenarios
     .map((s) => `- ${s.id}: GIVEN ${s.given} WHEN ${s.when} THEN ${s.then}`)
     .join('\n') || '(none)'}\n\nAlso return criteria: one entry per acceptance criterion, in order, each with pass, score and a short note${i.indexed ? ', plus `index`: its 1-based position in the ACCEPTANCE CRITERIA list' : ''}.`;
   return {
-    prefix: [base, guidanceSection('TOOL GUIDANCE', i.tools), guidanceSection('REVIEW CHECKLIST', i.checklist), i.agentic ? AGENTIC_INSTRUCTION : ''].filter(Boolean).join('\n\n'),
+    prefix: [base, guidanceSection('TOOL GUIDANCE', i.tools), guidanceSection('REVIEW CHECKLIST', i.checklist), i.agentic ? AGENTIC_INSTRUCTION : '', i.atlasQuery ? ATLAS_QUERY_HINT : ''].filter(Boolean).join('\n\n'),
     body: [
       `TASK ${task.id}: ${task.title}\n${task.description}`,
       `ACCEPTANCE CRITERIA:\n${bullets(task.acceptance)}`,
@@ -680,6 +684,11 @@ export class Conductor {
 
   // Opt-in Repo Atlas: built or loaded once per run at the integration base. Any failure is logged
   // and the run proceeds with the old prompts.
+  // L2: the query command is only mentioned when the atlas is loaded and context.atlas.query is on.
+  private atlasQuery(): boolean {
+    return !!this.atlas && !!this.store.config().context.atlas.query;
+  }
+
   private loadAtlas(): void {
     const cfg = this.store.config().context.atlas;
     if (!cfg.enabled) return;
@@ -768,6 +777,7 @@ export class Conductor {
         style: harness.guidance.style,
         map: this.map || undefined,
         pack: this.taskPack(task),
+        atlasQuery: this.atlasQuery(),
       }),
     );
 
@@ -1104,6 +1114,7 @@ export class Conductor {
         tools: this.harness.guidance.tools,
         checklist: this.harness.guidance.checklist,
         indexed: panelOn,
+        atlasQuery: this.atlasQuery(),
         agentic: agentic ? await runScenarioChecks({ cwd, scenarios: this.scenarios, testCommand: cfg.testCommand, testsResult: tests, timeoutMs: agentic.checkTimeoutMs, exec: (d, c, t) => g.runTestsAsync(d, c, t, scrubVerifierEnv(process.env)) }) : undefined,
       });
     const prompt = joinPrompt(built);

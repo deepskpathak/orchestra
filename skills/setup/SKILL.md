@@ -21,4 +21,4 @@ allowed-tools: Bash(orchestra *) Read
 
    Write the absolute path that `${CLAUDE_PLUGIN_ROOT}` resolves to above, not the variable. If the user already has a statusLine, do not overwrite it; explain how to combine them instead.
 4. Tell the user the three ways to watch: `orchestra watch` (full-screen live dashboard in any terminal), the statusline, and `/orchestra:status` in chat.
-5. Optional: mention the Repo Atlas. `orchestra atlas stats` shows the code graph for HEAD, and `context.atlas.enabled` in `.orchestra/config.json` (off by default) feeds a ranked repo map to the planner and workers.
+5. Optional: mention the Repo Atlas. `orchestra atlas stats` shows the code graph for HEAD, and `context.atlas.enabled` in `.orchestra/config.json` (off by default) feeds a ranked repo map to the planner and workers. `context.atlas.query` (also off) lets workers and the judge run `orchestra atlas find|neighbors|impact|tests <name>`.

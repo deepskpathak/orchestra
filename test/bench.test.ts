@@ -56,9 +56,10 @@ test('atlas ablation arms ship in arms.json and set context.atlas per arm, keepi
   assert.deepEqual(loadArms(DEFAULT_SUITE).map((a) => a.name), ['default'], 'optional arms stay out of a plain bench');
   const by = (n: string) => armConfig(arms.find((a) => a.name === n)!).context.atlas;
   assert.ok(['default', 'atlas-off', 'atlas-l0', 'atlas-l0-l1'].every((n) => arms.some((a) => a.name === n)));
-  assert.deepEqual(by('atlas-off'), { enabled: false, mapTokens: 1024, packs: false, packTokens: 1500 });
-  assert.deepEqual(by('atlas-l0'), { enabled: true, mapTokens: 1024, packs: false, packTokens: 1500 });
-  assert.deepEqual(by('atlas-l0-l1'), { enabled: true, mapTokens: 1024, packs: true, packTokens: 1500 });
+  assert.deepEqual(by('atlas-off'), { enabled: false, mapTokens: 1024, packs: false, packTokens: 1500, query: false });
+  assert.deepEqual(by('atlas-l0'), { enabled: true, mapTokens: 1024, packs: false, packTokens: 1500, query: false });
+  assert.deepEqual(by('atlas-l0-l1'), { enabled: true, mapTokens: 1024, packs: true, packTokens: 1500, query: false });
+  assert.equal(armConfig(loadArms(DEFAULT_SUITE, ['atlas-l0-l1-l2']).find((a) => a.name === 'atlas-l0-l1-l2')!).context.atlas.query, true);
   assert.equal(armConfig(arms.find((a) => a.name === 'default')!).context.atlas.enabled, false);
 });
 
