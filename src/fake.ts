@@ -8,7 +8,7 @@ import type { AgentRequest, AgentResult, Runner } from './agent.ts';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-export function fakeRunner(opts: { stepMs?: number; failFirstAttemptOf?: string[]; failAlways?: string[]; flagForHuman?: string[]; flagOnRepair?: string[]; tamper?: (req: AgentRequest) => boolean; judgeFailTimes?: number; contrastPick?: 'A' | 'B'; contrastScores?: { a: number; b: number }; footprints?: boolean; ambiguities?: { question: string; resolution?: string }[] } = {}): Runner {
+export function fakeRunner(opts: { stepMs?: number; failFirstAttemptOf?: string[]; failAlways?: string[]; flagForHuman?: string[]; flagOnRepair?: string[]; tamper?: (req: AgentRequest) => boolean; judgeFailTimes?: number; contrastPick?: 'A' | 'B'; contrastScores?: { a: number; b: number }; footprints?: boolean; ambiguities?: { question: string; resolution?: string }[]; invariants?: string[]; workerFiles?: (task: string) => Record<string, string>; oracleFiles?: Record<string, string> } = {}): Runner {
   const step = opts.stepMs ?? 0;
   const failFirst = new Set(opts.failFirstAttemptOf ?? ['T2']);
   const flagHuman = new Set(opts.flagForHuman ?? []);
@@ -49,7 +49,7 @@ export function fakeRunner(opts: { stepMs?: number; failFirstAttemptOf?: string[
               { id: 'T2', title: 'Config loader', description: 'Load config', acceptance: ['config.txt exists'], deps: [] },
               { id: 'T3', title: 'CLI wiring', description: 'Wire CLI to core', acceptance: ['cli.txt exists'], deps: ['T1'] },
               { id: 'T4', title: 'Docs', description: 'Document usage', acceptance: ['docs.txt exists'], deps: ['T2', 'T3'] },
-            ].map((t) => (opts.footprints ? { ...t, footprint: { files: [`fake/${t.id}.txt`, 'README.md'] } } : t)),
+            ].map((t) => (opts.invariants ? { ...t, invariants: opts.invariants } : t)).map((t) => (opts.footprints ? { ...t, footprint: { files: [`fake/${t.id}.txt`, 'README.md'] } } : t)),
             domain: 'cli',
             ...(opts.ambiguities ? { ambiguities: opts.ambiguities } : {}),
             scenarios: [{ id: 'S1', given: 'a fresh repo', when: 'user runs the CLI', then: 'it prints help' }],
@@ -69,6 +69,11 @@ export function fakeRunner(opts: { stepMs?: number; failFirstAttemptOf?: string[
         writeFileSync(join(dir, `${task}.txt`), `task ${task} attempt ${attempt}${careful ? ' edge-cases-covered' : ''}\n`);
         // Contrastive worker B leaves a distinguishable artifact.
         if (req.meta?.variant === 'b') writeFileSync(join(dir, `${task}-b.txt`), `task ${task} alternate approach B\n`);
+        // Extra files the scenario wants this worker to leave behind (its own tests, bugs).
+        for (const [rel, content] of Object.entries(opts.workerFiles?.(task) ?? {})) {
+          mkdirSync(join(req.cwd, rel, '..'), { recursive: true });
+          writeFileSync(join(req.cwd, rel), content);
+        }
         // Simulated reward hacking: drop the assertions from an existing test file.
         const sample = join(req.cwd, 'test', 'sample.test.js');
         if (opts.tamper && existsSync(sample)) {
@@ -88,6 +93,15 @@ export function fakeRunner(opts: { stepMs?: number; failFirstAttemptOf?: string[
         return done(undefined, `Implemented ${task}`, 0.2);
       }
       case 'judge': {
+        if (req.prompt.startsWith('ORACLE TESTS')) {
+          // Oracle author: writes files into its own cwd (a run-owned directory), never the worker tree.
+          await act('Write oracle files');
+          for (const [rel, content] of Object.entries(opts.oracleFiles ?? {})) {
+            mkdirSync(join(req.cwd, rel, '..'), { recursive: true });
+            writeFileSync(join(req.cwd, rel), content);
+          }
+          return done(undefined, 'oracles written', 0.03);
+        }
         if (req.prompt.startsWith('FROZEN SCORER REPLAY')) {
           // Frozen scorer: judges the diff, never the replay's self-reported satisfaction.
           await act('says: scoring replay');

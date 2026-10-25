@@ -3,7 +3,7 @@
 // Planners never code, workers never judge, judges never edit (role separation).
 
 import { spawnSync } from 'node:child_process';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { extractJson, parseWorkerOutcome, type AgentRequest, type AgentResult, type Runner } from './agent.ts';
@@ -16,6 +16,7 @@ import { plannedFiles } from './exploration.ts';
 import { buildContract, contractSha, unresolvedAmbiguities } from './contracts.ts';
 import { analyzeDiff, MONITOR_MARK, type IntegrityFlag } from './integrity.ts';
 import { mutationScore, runMutation } from './mutation.ts';
+import { runOracles, type OracleOutcome } from './oracle-run.ts';
 import { loadHarness, type Harness } from './harness.ts';
 import { applyLessonEdits, editsFromResponse, expireDomain, formatLearnings, listDomains, normalizeDomain, readAllLearnings, readLearnings, GLOBAL } from './learnings.ts';
 import { buildSandboxPolicy, preflightSandbox, scrubWorkerEnv, type ProbeExec } from './sandbox.ts';
@@ -307,6 +308,24 @@ export function buildVerdict(v: Partial<Verdict>, testsOk: boolean | null, passT
   if (agg) issues.unshift(...agg.failing.map((c) => `Criterion failed: ${c.criterion}${c.note ? `: ${c.note}` : ''}`));
   if (testsOk === false && testIssue) issues.unshift(testIssue);
   return { pass, score: round(score), summary: v.summary ?? '', issues, testsPassed: testsOk, ...(agg ? { criteria: agg.list } : {}) };
+}
+
+export function oraclePrompt(i: { task: Task; invariants: string[]; target: string; dir: string }): string {
+  return [
+    `ORACLE TESTS for task ${i.task.id}: ${i.task.title}`,
+    'You write independent checks. You did not write the code under test and must not edit it.',
+    `Acceptance criteria:\n${bullets(i.task.acceptance)}`,
+    `Invariants to check:\n${bullets(i.invariants)}`,
+    `The code under test is at ${i.target} (read only). The environment variable ORACLE_TARGET holds that path when your files run; import code from it.`,
+    `Write files only inside ${i.dir}:`,
+    '- *.test.mjs: node:test files with property-style checks. Use process.env.ORACLE_SEED and process.env.ORACLE_RUNS for a deterministic seed and case count.',
+    '- probe*.mjs: scripts that print the output of functions that must NOT change. They run on the base commit and on the worker tree and their stdout must match.',
+  ].join('\n\n');
+}
+
+export function applyOracle(v: Verdict, o: OracleOutcome): Verdict {
+  if (o.pass) return o.issues.length ? { ...v, issues: [...v.issues, ...o.issues] } : v;
+  return { ...v, pass: false, summary: `Oracle checks failed. ${v.summary}`.trim(), issues: [...o.issues, ...v.issues] };
 }
 
 const VERDICT_SCHEMA = {
@@ -925,6 +944,7 @@ export class Conductor {
         checklist: this.harness.guidance.checklist,
       });
     const prompt = joinPrompt(built);
+    const oracle = await this.oraclePass(task, cwd, base);
 
     const testsOk = tests ? tests.ok : null;
     const runJudge = async (model?: string, framing = ''): Promise<{ res: AgentResult; v?: Partial<Verdict> }> => {
@@ -1001,7 +1021,53 @@ export class Conductor {
       return { pass: false, score: 0, summary: `Judge failed twice: ${error}`, issues: [], testsPassed: tests?.ok ?? null, judgeError: error };
     }
     const verdict = buildVerdict(v, testsOk, this.harness.config.passThreshold, testsOk === false ? `Test command \`${cfg.testCommand}\` fails. Output tail:\n${tests!.tail.slice(-1200)}` : undefined);
-    return panel ? { ...verdict, panel } : verdict;
+    const withOracle = oracle ? applyOracle(verdict, oracle) : verdict;
+    return panel ? { ...withOracle, panel } : withOracle;
+  }
+
+  // W4.4 (opt-in): oracle tests written by a separate session into a run-owned directory outside the
+  // worker worktree, then executed against the worker's tree. Returns null when oracles do not apply.
+  private async oraclePass(task: Task, cwd: string, base: string): Promise<OracleOutcome | null> {
+    const cfg = this.store.config().verification.oracles;
+    if (!cfg.enabled) return null;
+    const invariants = task.invariants ?? [];
+    if (!invariants.length) {
+      this.emit('log', `${task.id} oracles skipped: the contract has no invariants for this task`, undefined, task.id);
+      return null;
+    }
+    const models = this.harness.config.models;
+    let model = cfg.model ?? models.judge;
+    if (model === models.worker && models.judge !== models.worker) model = models.judge;
+    const dir = this.store.path('runs', this.run.id, 'oracles', task.id);
+    rmSync(dir, { recursive: true, force: true });
+    mkdirSync(dir, { recursive: true });
+    const res = await this.call(
+      'judge',
+      task,
+      task.attempts,
+      {
+        prompt: oraclePrompt({ task, invariants, target: cwd, dir }),
+        cwd: dir,
+        tools: ['Read', 'Grep', 'Glob', 'Write'],
+        allowedTools: ['Read', 'Grep', 'Glob', 'Write'],
+        disallowedTools: ['Edit', 'Bash'],
+        permissionMode: 'default',
+      },
+      model,
+    );
+    if (!res.ok) this.emit('log', `${task.id} oracle session failed (${res.error ?? 'error'}); grading with no oracle evidence`, undefined, task.id);
+    const out = runOracles({
+      repoRoot: this.store.root,
+      baseRef: this.integration.base,
+      tree: cwd,
+      taskBase: base,
+      oracleDir: dir,
+      env: { seed: cfg.seed, propertyRuns: cfg.propertyRuns },
+      differential: cfg.differential,
+      excludeWorkerTests: cfg.excludeWorkerTests,
+    });
+    this.emit('log', `${task.id} oracles ${out.pass ? 'passed' : 'FAILED'} (${out.files.length} file(s)${out.nonGrading.length ? `, ${out.nonGrading.length} worker test(s) non-grading` : ''})`, undefined, task.id);
+    return out;
   }
 
   // Refinery: merges are serialized; post-merge tests guard the integration branch.

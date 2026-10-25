@@ -93,6 +93,10 @@ Passing tasks enter a queue that serializes merges into the integration branch (
 
 Run satisfaction is the mean judge score of merged tasks, scaled by the fraction of tasks that merged. A run is `done` only if every task merged.
 
+## Independent oracles
+
+With `verification.oracles.enabled`, the judge path first asks a separate oracle session to write checks for the task's contract invariants. Those files live under `.orchestra/runs/<id>/oracles/<task>/`, outside the worker worktree, and run against the worker's tree. Probe scripts also run on a temporary worktree at the run base commit so unchanged behaviour is compared (differential). Worker-added or modified tests are excluded from grading and reported as non-grading. A worker's own tests never grade its own work.
+
 ## State under .orchestra/
 
 `src/store.ts` owns the layout. Writes go to a temp file and are renamed, so the dashboards can read while a run is writing. Shapes are defined in `src/types.ts`.

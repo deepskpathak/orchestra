@@ -804,3 +804,85 @@ test('mutation disabled leaves the run without mutation', async () => {
   const run = await runGoal({ store, runner: fakeRunner(), goal: 'g', mutation: { changedFiles: ['calc.js'], exec: () => { throw new Error('must not run'); } } });
   assert.equal(run.mutation, undefined);
 });
+
+// ---- W4.4 oracle wiring: a repo with no tests graded by files the worker never touched ----
+
+const ORACLE_TEST = `import test from 'node:test';
+import assert from 'node:assert/strict';
+import { pathToFileURL } from 'node:url';
+const m = await import(pathToFileURL(process.env.ORACLE_TARGET + '/src/math.mjs').href);
+test('double is 2x', () => {
+  for (let x = -5; x <= 5; x++) assert.equal(m.double(x), 2 * x);
+});
+`;
+const ORACLE_PROBE = `import { pathToFileURL } from 'node:url';
+const m = await import(pathToFileURL(process.env.ORACLE_TARGET + '/src/math.mjs').href);
+console.log(m.add(2, 3));
+`;
+const OWN_TEST = `import test from 'node:test';\ntest('worker own test', () => {});\n`;
+const MATH_OK = 'export const add = (a, b) => a + b;\nexport const double = (x) => x * 2;\n';
+const MATH_BUG = 'export const add = (a, b) => a + b + 1;\nexport const double = (x) => x * 3;\n';
+
+function noTestRepo(oracles: Record<string, unknown>) {
+  const store = tempRepo({ verification: { ...DEFAULT_PROJECT_CONFIG.verification, oracles: { ...DEFAULT_PROJECT_CONFIG.verification.oracles, enabled: true, ...oracles } } });
+  mkdirSync(join(store.root, 'src'), { recursive: true });
+  writeFileSync(join(store.root, 'src', 'math.mjs'), MATH_OK);
+  execFileSync('git', ['add', '-A'], { cwd: store.root });
+  execFileSync('git', ['commit', '-qm', 'math'], { cwd: store.root });
+  return store;
+}
+
+test('oracles: the oracle files, not the worker test, grade a repo without tests', async () => {
+  const store = noTestRepo({ model: 'oracle-model' });
+  const runner = fakeRunner({
+    failFirstAttemptOf: [],
+    invariants: ['double(x) equals 2x', 'add is unchanged'],
+    workerFiles: (t) => (t === 'T1' ? { 'test/own.test.mjs': OWN_TEST, 'src/math.mjs': MATH_BUG } : {}),
+    oracleFiles: { 'invariants.test.mjs': ORACLE_TEST, 'probe-add.mjs': ORACLE_PROBE },
+  });
+  const run = await runGoal({ store, runner, goal: 'g' });
+  const t1 = run.tasks.find((t) => t.id === 'T1')!;
+  assert.equal(t1.status, 'failed');
+  assert.ok(t1.verdict && !t1.verdict.pass);
+  assert.ok(t1.verdict!.issues.some((i) => /^oracle: independent tests failed/.test(i)), t1.verdict!.issues.join('\n'));
+  // The differential probe flags the untouched add() whose output changed.
+  assert.ok(t1.verdict!.issues.some((i) => /differential mismatch.*probe-add\.mjs/.test(i)));
+  // The worker's own passing test is listed as non-grading.
+  assert.ok(t1.verdict!.issues.some((i) => /non-grading: worker test file test\/own\.test\.mjs/.test(i)));
+  // Oracle files live in the run-owned dir, never in the worker tree.
+  assert.ok(existsSync(store.path('runs', run.id, 'oracles', 'T1', 'invariants.test.mjs')));
+  assert.equal(existsSync(join(t1.worktree!, 'invariants.test.mjs')), false);
+  // Tasks that leave the code alone pass the oracles and merge.
+  assert.equal(run.tasks.find((t) => t.id === 'T2')!.status, 'merged');
+  // The oracle session used the configured model, not the worker's.
+  const rows = store.ledgerRows().filter((r) => r.task === 'T1' && r.role === 'judge' && r.model === 'oracle-model');
+  assert.ok(rows.length >= 1);
+  assert.ok(!store.ledgerRows().some((r) => r.role === 'worker' && r.model === 'oracle-model'));
+});
+
+test('oracles: default model is the judge model, differential can be turned off', async () => {
+  const store = noTestRepo({ differential: false });
+  const runner = fakeRunner({
+    failFirstAttemptOf: [],
+    invariants: ['double(x) equals 2x'],
+    workerFiles: (t) => (t === 'T1' ? { 'src/math.mjs': 'export const add = (a, b) => a + b + 1;\nexport const double = (x) => x * 2;\n' } : {}),
+    oracleFiles: { 'invariants.test.mjs': ORACLE_TEST, 'probe-add.mjs': ORACLE_PROBE },
+  });
+  const run = await runGoal({ store, runner, goal: 'g' });
+  const t1 = run.tasks.find((t) => t.id === 'T1')!;
+  // double is right and the differential is off, so the oracles pass.
+  assert.equal(t1.status, 'merged');
+  assert.ok(!t1.verdict!.issues.some((i) => /differential/.test(i)));
+});
+
+test('oracles disabled: no oracle session and unchanged call counts', async () => {
+  const count = async (cfg: Record<string, unknown>) => {
+    const store = tempRepo(cfg);
+    await runGoal({ store, runner: fakeRunner({ invariants: ['x'], oracleFiles: { 'a.test.mjs': 'x' } }), goal: 'g' });
+    return store.ledgerRows().filter((r) => r.role === 'judge').length;
+  };
+  const off = await count({});
+  const on = await count({ verification: { ...DEFAULT_PROJECT_CONFIG.verification, oracles: { ...DEFAULT_PROJECT_CONFIG.verification.oracles, enabled: true } } });
+  assert.equal(off, 5, 'four tasks plus one repair judge, no oracle sessions');
+  assert.ok(on > off);
+});

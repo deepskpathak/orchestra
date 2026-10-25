@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+- W4.4 oracle wiring: with `verification.oracles.enabled`, tasks with contract invariants are graded by oracle files written by a separate session outside the worker worktree, plus a differential run against the run base commit; worker tests are listed as non-grading.
+
 ### Added
 
 - Mutation score per run (W4.5, `verification.mutation.enabled`): after all merges, `src/mutation.ts` mutates the source files the run changed (`===`/`!==`, `<`/`<=`, `>`/`>=`, `+`/`-`, `&&`/`||`, `true`/`false`, never inside strings or comments) in a scratch worktree, and counts a mutant killed when the test command or any scenario `check` fails. The result is stored on `Run.mutation`, logged as an event and shown in `orchestra status` and the run summary. With `failBelowFloor` a score under `floor` fails the run; otherwise it only reports. No mutants (or no checks, or a baseline that already fails) is reported as skipped and never fails the run.
