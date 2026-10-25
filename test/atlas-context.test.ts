@@ -19,7 +19,7 @@ const SRC: Record<string, string> = {
 function fixture(order: string[] = Object.keys(SRC)): Atlas {
   const files: Atlas['files'] = {};
   for (const p of order) files[p] = extractFile(p, SRC[p]);
-  return { version: ATLAS_VERSION, sha: 'abc', files, ...buildGraph(files) };
+  return { version: ATLAS_VERSION, sha: 'abc', files, skipped: [], ...buildGraph(files) };
 }
 
 test('rankFiles puts goal matches and their importers first', () => {

@@ -9,7 +9,9 @@ import { commitExists, diffNamesBetween, filesAtRef, git, readBlobsAtRef, tryGit
 import { isSecretPath } from './guard.ts';
 import { Store } from './store.ts';
 
-export const ATLAS_VERSION = 1;
+// Bump when the cached shape changes; caches with another version are rebuilt from scratch.
+// v2: adds `skipped` (paths not indexed because they were oversized, binary or unreadable).
+export const ATLAS_VERSION = 2;
 const MAX_FILE_BYTES = 256 * 1024;
 const MAX_SYMBOLS_PER_FILE = 500;
 const MAX_NEAREST_CANDIDATES = 8;
@@ -68,6 +70,7 @@ export interface Atlas {
   version: number;
   sha: string;
   files: Record<string, FileEntry>;
+  skipped: string[]; // indexable paths left out (oversized, binary, unreadable); not re-read on incremental builds unless changed
   nodes: AtlasNode[];
   edges: AtlasEdge[];
 }
@@ -605,27 +608,32 @@ function readEntry(path: string, buf: Buffer | null | undefined): FileEntry | nu
   return extractFile(path, buf.toString('utf8'));
 }
 
-function assemble(sha: string, files: Record<string, FileEntry>): Atlas {
+function assemble(sha: string, files: Record<string, FileEntry>, skipped: Iterable<string>): Atlas {
   const sorted: Record<string, FileEntry> = {};
   for (const p of Object.keys(files).sort()) sorted[p] = files[p];
-  return { version: ATLAS_VERSION, sha, files: sorted, ...buildGraph(sorted) };
+  return { version: ATLAS_VERSION, sha, files: sorted, skipped: [...new Set(skipped)].sort(), ...buildGraph(sorted) };
 }
 
 function indexableFiles(root: string, sha: string): string[] {
   return filesAtRef(root, sha).filter((p) => !isExcludedPath(p));
 }
 
-function extractMany(root: string, sha: string, paths: string[]): Record<string, FileEntry> {
-  const out: Record<string, FileEntry> = {};
+function extractMany(root: string, sha: string, paths: string[]): { files: Record<string, FileEntry>; skipped: string[] } {
+  const files: Record<string, FileEntry> = {};
+  const skipped: string[] = [];
   const CHUNK = 2000;
   for (let i = 0; i < paths.length; i += CHUNK) {
-    const blobs = readBlobsAtRef(root, sha, paths.slice(i, i + CHUNK).filter((p) => !BINARY_EXT.test(p)), MAX_FILE_BYTES);
-    for (const [p, buf] of blobs) {
-      const e = readEntry(p, buf);
-      if (e) out[p] = e;
+    const chunk = paths.slice(i, i + CHUNK);
+    const readable = chunk.filter((p) => !BINARY_EXT.test(p));
+    for (const p of chunk) if (BINARY_EXT.test(p)) skipped.push(p);
+    const blobs = readBlobsAtRef(root, sha, readable, MAX_FILE_BYTES);
+    for (const p of readable) {
+      const e = readEntry(p, blobs.get(p));
+      if (e) files[p] = e;
+      else skipped.push(p);
     }
   }
-  return out;
+  return { files, skipped };
 }
 
 // Full build of the tracked tree at `sha`, or an incremental one when `prev` (a cached atlas for an
@@ -635,13 +643,19 @@ export function buildAtlas(root: string, sha: string, prev?: Atlas): Atlas {
   if (prev && prev.version === ATLAS_VERSION && commitExists(root, prev.sha)) {
     const changed = new Set(diffNamesBetween(root, prev.sha, full));
     const now = new Set(indexableFiles(root, full));
+    const prevSkipped = new Set(prev.skipped);
     const files: Record<string, FileEntry> = {};
+    const skipped: string[] = [];
     for (const [p, e] of Object.entries(prev.files)) if (now.has(p) && !changed.has(p)) files[p] = e;
-    const redo = [...now].filter((p) => changed.has(p) || (!files[p] && !(p in prev.files)));
-    Object.assign(files, extractMany(root, full, redo));
-    return assemble(full, files);
+    for (const p of prevSkipped) if (now.has(p) && !changed.has(p)) skipped.push(p);
+    // Re-extract changed paths and genuinely new ones; unchanged skipped paths are not re-read.
+    const redo = [...now].filter((p) => changed.has(p) || (!(p in prev.files) && !prevSkipped.has(p)));
+    const got = extractMany(root, full, redo);
+    Object.assign(files, got.files);
+    return assemble(full, files, [...skipped, ...got.skipped]);
   }
-  return assemble(full, extractMany(root, full, indexableFiles(root, full)));
+  const got = extractMany(root, full, indexableFiles(root, full));
+  return assemble(full, got.files, got.skipped);
 }
 
 function cachedShas(store: Store): string[] {

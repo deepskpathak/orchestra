@@ -345,3 +345,47 @@ export function after() {
 `;
   assert.deepEqual(names(extractTsJs(src)), ['class:Bus', 'method:Bus.emit', 'method:Bus.create', 'class:Empty', 'function:after']);
 });
+
+test('atlas persists skipped paths; incremental builds do not re-read them; old-version caches rebuild', () => {
+  const store = tempRepo();
+  const dir = store.root;
+  put(dir, 'src/a.ts', 'export const A = 1;\n');
+  put(dir, 'big.txt', 'x'.repeat(300 * 1024));
+  put(dir, 'bin.dat', 'ab\0cd');
+  put(dir, 'src/marker.ts', 'export const M = 1;\n');
+  const sha1 = commit(dir, 'one');
+  const first = loadOrBuildAtlas(dir, sha1);
+  assert.deepEqual(first.skipped, ['big.txt', 'bin.dat']);
+  assert.equal(first.version, 2);
+
+  // Prove unchanged skipped paths are not re-read: pretend marker.ts was skipped in the cache.
+  const cachePath = join(dir, '.orchestra/atlas', `${sha1}.json`);
+  const cached = JSON.parse(readFileSync(cachePath, 'utf8'));
+  delete cached.files['src/marker.ts'];
+  cached.skipped = [...cached.skipped, 'src/marker.ts'].sort();
+  writeFileSync(cachePath, JSON.stringify(cached));
+  put(dir, 'src/a.ts', 'export const A = 2;\n');
+  put(dir, 'src/new.ts', 'export const N = 1;\n');
+  const sha2 = commit(dir, 'two');
+  const inc = loadOrBuildAtlas(dir, sha2);
+  assert.ok(!('src/marker.ts' in inc.files));
+  assert.ok(inc.skipped.includes('src/marker.ts'));
+  assert.ok('src/new.ts' in inc.files);
+
+  // A changed skipped path is re-extracted (big.txt shrinks and becomes indexable).
+  put(dir, 'big.txt', 'small now\n');
+  const sha3 = commit(dir, 'three');
+  const inc3 = loadOrBuildAtlas(dir, sha3);
+  assert.ok('big.txt' in inc3.files);
+  assert.ok(!inc3.skipped.includes('big.txt'));
+
+  // A v1 cache (no skipped list) is ignored and rebuilt (drop the tampered caches so it is a full build).
+  for (const s of [sha1, sha2]) rmSync(join(dir, '.orchestra/atlas', `${s}.json`));
+  const old = JSON.parse(readFileSync(join(dir, '.orchestra/atlas', `${sha3}.json`), 'utf8'));
+  old.version = 1;
+  delete old.skipped;
+  writeFileSync(join(dir, '.orchestra/atlas', `${sha3}.json`), JSON.stringify(old));
+  const rebuilt = loadOrBuildAtlas(dir, sha3);
+  assert.equal(rebuilt.version, 2);
+  assert.deepEqual(rebuilt, buildAtlas(dir, sha3));
+});
