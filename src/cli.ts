@@ -10,6 +10,7 @@ import { importGrades, readBenchRows, renderCalibration, renderCalibrationByMode
 import { ABLATION_ARMS, SINGLE_SESSION_ARM, ablationTable, defaultReference, loadArms, referenceError, renderAblationTable, summarize, renderSummary, runBench, verifyOracles } from './bench.ts';
 import { atlasStats, loadOrBuildAtlas } from './atlas.ts';
 import { oversightSummary, renderOversight } from './dashboard-data.ts';
+import { ctagsExec } from './atlas-external.ts';
 import { QUERY_COMMANDS, parsePorcelain, runQuery, type QueryCommand } from './atlas-query.ts';
 import { runGoal } from './conductor.ts';
 import { explorationMetrics, renderExploration } from './exploration.ts';
@@ -468,6 +469,12 @@ function cmdLearnings(args: string[]): void {
   }
 }
 
+// The same external-source options the conductor passes, so the CLI sees the graph agents were given.
+// Messages go to stderr: stdout is the query result.
+function atlasExternal(root: string) {
+  return { mode: new Store(root).config().context.atlas.external ?? 'off', exec: ctagsExec, log: (m: string) => console.error(m) } as const;
+}
+
 const ATLAS_USAGE = 'Usage: orchestra atlas build | stats | find|neighbors|impact|tests <symbol-or-path>';
 
 // Files modified in the calling worktree; injectable so tests need no git.
@@ -492,7 +499,7 @@ function cmdAtlasQuery(root: string, sub: QueryCommand, arg: string | undefined,
   } catch {
     die('No commits yet. Commit something first; the atlas is keyed by commit.');
   }
-  const atlas = loadOrBuildAtlas(root, sha);
+  const atlas = loadOrBuildAtlas(root, sha, atlasExternal(root));
   const r = runQuery(atlas, sub, arg, { stale: statusPaths(cwd) });
   console.log(r.text);
   if (!r.found) process.exitCode = 1;
@@ -516,7 +523,7 @@ function cmdAtlas(args: string[]): void {
   } catch {
     die('No commits yet. Commit something first; the atlas is keyed by commit.');
   }
-  const atlas = loadOrBuildAtlas(root, sha);
+  const atlas = loadOrBuildAtlas(root, sha, atlasExternal(root));
   const st = atlasStats(atlas);
   const edges = Object.entries(st.edges).map(([k, n]) => `${k} ${n}`).join(', ');
   if (sub === 'build') {

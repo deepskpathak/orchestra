@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
 import { buildAtlas, loadOrBuildAtlas, type Atlas } from '../src/atlas.ts';
 import { applyExternal, detectCtags, loadGraphify, mergeExternal, parseCtagsJson } from '../src/atlas-external.ts';
+import { spawnSync } from 'node:child_process';
+import { PACKAGE_ROOT } from '../src/harness.ts';
 import { tempRepo } from './helpers.ts';
 
 function repoWithFiles(): { dir: string; sha: string } {
@@ -136,4 +138,76 @@ test('explicit graphify mode with no file falls back; ctags failing mid-run degr
   };
   assert.equal(applyExternal(dir, base, { mode: 'ctags', exec, log: (m) => logs.push(m) }), base);
   assert.equal(logs.length, 2);
+});
+
+test('ctags runs on the atlas commit files in a scratch copy, with excludes, never on the live checkout', () => {
+  const { dir, sha } = repoWithFiles();
+  // Working-tree drift that must not reach ctags: an edit, and an untracked file.
+  writeFileSync(join(dir, 'src/a.ts'), 'export function edited() {}\n');
+  mkdirSync(join(dir, 'build'), { recursive: true });
+  writeFileSync(join(dir, 'build/junk.ts'), 'export function junk() {}\n');
+  const calls: { args: string[]; cwd: string; input?: string; aText?: string }[] = [];
+  const exec = (_c: string, args: string[], cwd: string, input?: string) => {
+    if (args[0] === '--version') return 'Universal Ctags 6.1';
+    calls.push({ args, cwd, input, aText: existsSync(join(cwd, 'src/a.ts')) ? readFileSync(join(cwd, 'src/a.ts'), 'utf8') : undefined });
+    return CTAGS;
+  };
+  const out = loadOrBuildAtlas(dir, sha, { mode: 'ctags', exec, read: () => null });
+  assert.equal(calls.length, 1);
+  const [c] = calls;
+  assert.notEqual(c.cwd, dir, 'not the live checkout');
+  assert.ok(c.args.includes('-L') && c.args[c.args.indexOf('-L') + 1] === '-', 'file list on stdin');
+  assert.ok(!c.args.includes('-R'), 'no recursive scan');
+  for (const e of ['.git', '.orchestra', 'node_modules']) assert.ok(c.args.includes(`--exclude=${e}`), e);
+  assert.deepEqual(c.input!.split('\n').filter(Boolean).sort(), ['README.md', 'src/a.ts', 'src/b.ts']);
+  assert.equal(c.aText, 'export function alpha() {}\n', 'committed content, not the edited working copy');
+  assert.ok(!existsSync(c.cwd), 'scratch copy removed');
+  assert.ok(out.nodes.some((n) => n.id === 'src/b.ts#Svc.gamma'));
+});
+
+test('ctags output is cached by sha, so a second start does not rescan', () => {
+  const { dir, sha } = repoWithFiles();
+  let scans = 0;
+  const exec = (_c: string, args: string[]) => {
+    if (args[0] === '--version') return 'Universal Ctags 6.1';
+    scans++;
+    return CTAGS;
+  };
+  const first = loadOrBuildAtlas(dir, sha, { mode: 'ctags', exec, read: () => null });
+  const second = loadOrBuildAtlas(dir, sha, { mode: 'ctags', exec, read: () => null });
+  assert.equal(scans, 1);
+  assert.deepEqual(second.nodes, first.nodes);
+});
+
+test('graphify graph.json is read as committed at the atlas commit, not from the working tree', () => {
+  const { dir } = repoWithFiles();
+  const graph = (name: string) => JSON.stringify({ nodes: [{ id: 'n1', label: `${name}()`, source_file: 'src/a.ts', source_location: 'L1', kind: 'function' }], links: [] });
+  mkdirSync(join(dir, 'graphify-out'), { recursive: true });
+  writeFileSync(join(dir, 'graphify-out/graph.json'), graph('committedSym'));
+  execFileSync('git', ['add', '-A'], { cwd: dir });
+  execFileSync('git', ['commit', '-qm', 'graph'], { cwd: dir });
+  const sha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf8' }).trim();
+  writeFileSync(join(dir, 'graphify-out/graph.json'), graph('workingTreeSym'));
+  const atlas = loadOrBuildAtlas(dir, sha, { mode: 'graphify' });
+  assert.ok(atlas.nodes.some((n) => n.name === 'committedSym'));
+  assert.ok(!atlas.nodes.some((n) => n.name === 'workingTreeSym'));
+});
+
+test('CLI: atlas find applies context.atlas.external like the conductor does', () => {
+  const { dir } = repoWithFiles();
+  mkdirSync(join(dir, 'graphify-out'), { recursive: true });
+  writeFileSync(join(dir, 'graphify-out/graph.json'), JSON.stringify({ nodes: [{ id: 'n1', label: 'onlyInGraphify()', source_file: 'src/a.ts', source_location: 'L1', kind: 'function' }], links: [] }));
+  execFileSync('git', ['add', '-A'], { cwd: dir });
+  execFileSync('git', ['commit', '-qm', 'graph'], { cwd: dir });
+  const cfg = (external: string) => writeFileSync(join(dir, '.orchestra', 'config.json'), JSON.stringify({ context: { atlas: { enabled: true, external } } }));
+  mkdirSync(join(dir, '.orchestra'), { recursive: true });
+  const cli = join(PACKAGE_ROOT, 'bin', 'orchestra.ts');
+  const run = (...a: string[]) => spawnSync(process.execPath, [cli, ...a], { cwd: dir, encoding: 'utf8', timeout: 30000 });
+  cfg('off');
+  assert.equal(run('atlas', 'build').status, 0);
+  assert.notEqual(run('atlas', 'find', 'onlyInGraphify').status, 0);
+  cfg('graphify');
+  const ok = run('atlas', 'find', 'onlyInGraphify');
+  assert.equal(ok.status, 0, ok.stderr);
+  assert.match(ok.stdout, /onlyInGraphify/);
 });

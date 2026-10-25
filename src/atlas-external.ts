@@ -2,13 +2,17 @@
 // onto the same node and edge types src/atlas.ts produces. Never required and never networked: every
 // probe (exec, file read) is injected, and any miss degrades to the built-in source with a reason.
 
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join, relative } from 'node:path';
 import type { Atlas, AtlasEdge, AtlasNode, EdgeKind, SymbolKind } from './atlas.ts';
+import { readBlobsAtRef, tryGit } from './git.ts';
+import { Store } from './store.ts';
 
 export type ExternalMode = 'off' | 'auto' | 'ctags' | 'graphify';
 export const EXTERNAL_MODES: ExternalMode[] = ['off', 'auto', 'ctags', 'graphify'];
-export type ExecFn = (cmd: string, args: string[], cwd: string) => string; // returns stdout, throws on failure
+export type ExecFn = (cmd: string, args: string[], cwd: string, input?: string) => string; // returns stdout, throws on failure
 export type ReadFn = (path: string) => string | null; // null when absent
 
 export interface ExternalGraph {
@@ -16,6 +20,18 @@ export interface ExternalGraph {
   nodes: AtlasNode[]; // symbol (and, for graphify, file) nodes
   edges: AtlasEdge[];
 }
+
+// Real exec for the optional ctags probe: stdout on success, throws when the binary is missing or fails.
+export function ctagsExec(cmd: string, args: string[], cwd: string, input?: string): string {
+  const r = spawnSync(cmd, args, { cwd, encoding: 'utf8', input, maxBuffer: 64 * 1024 * 1024, timeout: 60_000 });
+  if (r.error || r.status !== 0) throw new Error(r.error?.message ?? `${cmd} exited ${r.status}`);
+  return r.stdout;
+}
+
+// Never indexed, even if a path under them slips into the file list.
+const CTAGS_EXCLUDES = ['.git', '.orchestra', 'node_modules'];
+const CTAGS_CACHE_KEEP = 5;
+const CTAGS_MAX_FILE_BYTES = 1024 * 1024;
 
 const GRAPHIFY_PATHS = ['graphify-out/graph.json', 'graph.json'];
 
@@ -139,6 +155,61 @@ function defaultRead(_root: string): ReadFn {
   };
 }
 
+// The graph as committed at `sha`, so the same commit always yields the same graph whatever checkout or
+// worktree asks. graphify output is often left untracked; then fall back to the checkout's copy and say so.
+function readAtCommit(root: string, sha: string, log: (msg: string) => void): ReadFn {
+  const disk = defaultRead(root);
+  return (p) => {
+    const rel = relative(root, p).replace(/\\/g, '/');
+    const r = tryGit(root, 'show', `${sha}:${rel}`);
+    if (r.ok) return r.out;
+    const text = disk(p);
+    if (text !== null) log(`Atlas graphify ${rel} is not committed at ${sha.slice(0, 8)}; using the working-tree copy, which may differ between checkouts`);
+    return text;
+  };
+}
+
+// ctags runs on the atlas commit's own files (blobs written to a scratch directory), never on the live
+// checkout, so untracked output, build directories and edits made after the commit cannot leak in. Output is
+// cached by sha, and the probe cannot rescan the repository on every start.
+function ctagsGraph(root: string, atlas: Atlas, execFn: ExecFn, log: (msg: string) => void): ExternalGraph {
+  const store = new Store(root);
+  const rel = `atlas-ctags/${atlas.sha}.jsonl`;
+  const cached = store.readText(rel);
+  if (cached) return parseCtagsJson(cached);
+  const paths = Object.keys(atlas.files).filter((f) => !f.split('/').some((seg) => CTAGS_EXCLUDES.includes(seg)));
+  const dir = mkdtempSync(join(tmpdir(), 'orchestra-ctags-'));
+  let out: string;
+  try {
+    const written: string[] = [];
+    for (const [p, buf] of readBlobsAtRef(root, atlas.sha, paths, CTAGS_MAX_FILE_BYTES)) {
+      if (!buf) continue;
+      mkdirSync(dirname(join(dir, p)), { recursive: true });
+      writeFileSync(join(dir, p), buf);
+      written.push(p);
+    }
+    if (!written.length) return { source: 'ctags', nodes: [], edges: [] };
+    out = execFn('ctags', ['--output-format=json', '--fields=+nK', ...CTAGS_EXCLUDES.map((e) => `--exclude=${e}`), '-L', '-', '-f', '-'], dir, written.join('\n') + '\n');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  store.writeText(rel, out);
+  pruneCtagsCache(store, atlas.sha);
+  log(`Atlas ctags output cached for ${atlas.sha.slice(0, 8)}`);
+  return parseCtagsJson(out);
+}
+
+function pruneCtagsCache(store: Store, keep: string): void {
+  const d = store.path('atlas-ctags');
+  if (!existsSync(d)) return;
+  const old = readdirSync(d)
+    .filter((f) => f.endsWith('.jsonl') && f !== `${keep}.jsonl`)
+    .map((f) => ({ f, t: statSync(join(d, f)).mtimeMs }))
+    .sort((a, b) => b.t - a.t)
+    .slice(CTAGS_CACHE_KEEP - 1);
+  for (const { f } of old) unlinkSync(join(d, f));
+}
+
 // Returns a new atlas with the external nodes and edges added. Only paths already in the built-in
 // atlas are accepted (so excluded and secret paths stay out); duplicates and dangling edges are dropped.
 export function mergeExternal(atlas: Atlas, ext: ExternalGraph): Atlas {
@@ -179,7 +250,7 @@ export function applyExternal(root: string, atlas: Atlas, opts: ExternalOpts): A
   };
   try {
     if (mode === 'graphify' || mode === 'auto') {
-      const g = loadGraphify(root, opts.read);
+      const g = loadGraphify(root, opts.read ?? readAtCommit(root, atlas.sha, log));
       if (g) {
         log(`Atlas merged ${g.nodes.length} nodes from graphify`);
         return mergeExternal(atlas, g);
@@ -190,7 +261,7 @@ export function applyExternal(root: string, atlas: Atlas, opts: ExternalOpts): A
     if (!execFn) return fallback('no exec available');
     const det = detectCtags(execFn, root);
     if (!det.available) return fallback(det.reason);
-    const g = parseCtagsJson(execFn('ctags', ['--output-format=json', '--fields=+nK', '-R', '-f', '-', '.'], root));
+    const g = ctagsGraph(root, atlas, execFn, log);
     log(`Atlas merged ${g.nodes.length} nodes from ctags`);
     return mergeExternal(atlas, g);
   } catch (e) {

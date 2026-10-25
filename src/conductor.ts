@@ -13,6 +13,7 @@ import { aggregatePanel, lineageFraming, pairwiseBothOrders, type PanelJudgeVote
 import { isExcludedPath, loadOrBuildAtlas, type Atlas } from './atlas.ts';
 import { buildTaskPack, renderMap } from './atlas-context.ts';
 import { ATLAS_QUERY_HINT } from './atlas-query.ts';
+import { ctagsExec } from './atlas-external.ts';
 import { plannedFiles } from './exploration.ts';
 import { applyContractUpdate, buildContract, contractSha, criteriaForTask, isContractPath, markPassing, unresolvedAmbiguities, type Contract } from './contracts.ts';
 import { analyzeDiff, MONITOR_MARK, type IntegrityFlag } from './integrity.ts';
@@ -1940,9 +1941,3 @@ export async function runGoal(opts: ConductorOptions): Promise<Run> {
   return new Conductor(opts).execute();
 }
 
-// Real exec for the optional ctags probe: stdout on success, throws when the binary is missing or fails.
-function ctagsExec(cmd: string, args: string[], cwd: string): string {
-  const r = spawnSync(cmd, args, { cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 60_000 });
-  if (r.error || r.status !== 0) throw new Error(r.error?.message ?? `${cmd} exited ${r.status}`);
-  return r.stdout;
-}
