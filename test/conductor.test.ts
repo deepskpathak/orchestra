@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import type { AgentRequest, Runner } from '../src/agent.ts';
 import * as g from '../src/git.ts';
-import { runGoal, normalizeTasks, shouldEscalate, missingTestIssues, preJudgeIssues, fastPathDecision, FAST_PLAN_SCHEMA } from '../src/conductor.ts';
+import { runGoal, normalizeTasks, shouldEscalate, missingTestIssues, preJudgeIssues, fastPathDecision, FAST_PLAN_SCHEMA, panelMajorityVerdict, buildVerdict } from '../src/conductor.ts';
 import { DEFAULT_PROJECT_CONFIG } from '../src/store.ts';
 import { fakeRunner } from '../src/fake.ts';
 import { readLearnings, writeLearnings } from '../src/learnings.ts';
@@ -905,4 +905,16 @@ test('agentic judge: failing scenario check and its exit code reach the judge pr
   assert.match(judge.prompt, /EXECUTED CHECKS/);
   assert.match(judge.prompt, /S1: `echo bad >&2; exit 4` FAILED \(exit 4\)/);
   assert.match(judge.prompt, /tests: `true` PASSED \(exit 0\)/);
+});
+
+test('agentic judge + panel: majority verdict keeps per-criterion evidence so passes are not flagged', () => {
+  const crit = (evidence?: string) => [{ criterion: 'c1', pass: true, score: 1, ...(evidence ? { evidence } : {}) }];
+  const raws = [
+    { pass: true, score: 1, summary: 's', issues: [], criteria: crit() },
+    { pass: true, score: 1, summary: 's', issues: [], criteria: crit('ran npm test: ok') },
+  ];
+  const merged = panelMajorityVerdict(raws, { c1: true }, ['c1']);
+  assert.equal(merged.criteria![0].evidence, 'ran npm test: ok');
+  const v = buildVerdict(merged, true, 0.7, undefined, true);
+  assert.ok(!v.issues.some((i) => i.includes('without executed evidence')));
 });

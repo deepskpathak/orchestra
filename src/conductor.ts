@@ -231,13 +231,16 @@ export function panelMajorityVerdict(raws: Partial<Verdict>[], majority: Record<
   const issues = [...new Set(raws.flatMap((r) => r.issues ?? []))];
   const lead = raws.find((r) => r.pass === (raws.filter((x) => x.pass).length * 2 > raws.length)) ?? raws[0];
   const perCriterion = keys.length === 1 && keys[0] === 'overall' ? undefined : keys.map((criterion) => {
-    const scores = raws.flatMap((r) => {
+    const found = raws.flatMap((r) => {
       const list = aggregateCriteria(r.criteria)?.list;
       if (!list) return [];
       const c = list.length === acceptance.length ? list[acceptance.indexOf(criterion)] : list.find((x) => x.criterion === criterion);
-      return c ? [c.score] : [];
+      return c ? [c] : [];
     });
-    return { criterion, pass: majority[criterion], score: scores.length ? scores.reduce((a, b) => a + b, 0) / scores.length : majority[criterion] ? 1 : 0 };
+    const scores = found.map((c) => c.score);
+    // W4.2 + W4.1: keep the evidence of the first judge that sided with the majority, so agentic mode can still see it.
+    const evidence = found.find((c) => c.pass === majority[criterion] && c.evidence)?.evidence;
+    return { criterion, pass: majority[criterion], score: scores.length ? scores.reduce((a, b) => a + b, 0) / scores.length : majority[criterion] ? 1 : 0, ...(evidence ? { evidence } : {}) };
   });
   return { pass: Object.values(majority).every(Boolean), score, summary: lead.summary ?? '', issues, ...(perCriterion ? { criteria: perCriterion } : {}) };
 }
