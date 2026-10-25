@@ -6,7 +6,8 @@ export type SequentialVerdict = 'promote' | 'reject' | 'continue';
 export interface SequentialOptions {
   roundSize: number;
   totalCases?: number; // cases planned in all; the comparison is exhausted once all are seen
-  niMargin?: number; // upper bound below -niMargin also rejects; default 0 (upper bound below 0)
+  niMargin?: number; // reject only once the upper bound is below -niMargin (a loss within the margin keeps going); default 0 (upper bound below 0)
+  looks?: number; // planned interim looks, for the Bonferroni-style widening; default ceil(totalCases / roundSize), 1 = one look, no widening
 }
 
 export interface SequentialDecision {
@@ -28,22 +29,58 @@ export function roundsOf<T>(cases: T[], roundSize: number): T[][] {
 
 const f3 = (x: number): string => (Number.isFinite(x) ? x.toFixed(3) : String(x));
 
-// Decide from the paired cases seen so far. Promote once the 95% CI lower bound is above zero, reject once the
-// upper bound is below zero (or below -niMargin), else continue. With fewer than two source goals the CI is
-// unbounded, so the answer stays 'continue' until the rounds run out.
+// Standard normal CDF (Numerical Recipes erfc approximation, relative error about 1e-7).
+function normCdf(x: number): number {
+  const z = Math.abs(x) / Math.SQRT2;
+  const t = 1 / (1 + 0.5 * z);
+  const erfc = t * Math.exp(-z * z - 1.26551223 + t * (1.00002368 + t * (0.37409196 + t * (0.09678418 + t * (-0.18628806 + t * (0.27886807 + t * (-1.13520398 + t * (1.48851587 + t * (-0.82215223 + t * 0.17087277)))))))));
+  return x >= 0 ? 1 - 0.5 * erfc : 0.5 * erfc;
+}
+
+// Upper-tail normal quantile by bisection (p in (0, 0.5]).
+function normQuantileUpper(p: number): number {
+  let lo = 0;
+  let hi = 10;
+  for (let i = 0; i < 60; i++) {
+    const mid = (lo + hi) / 2;
+    if (1 - normCdf(mid) > p) lo = mid;
+    else hi = mid;
+  }
+  return (lo + hi) / 2;
+}
+
+// Peeking at a 95% CI after every round inflates the type I error. Bonferroni-style spending: with L planned looks
+// each look uses alpha 0.05 / L, so the family-wise error stays at or below 0.05. Returns the factor that scales a
+// 95% interval half-width up to the 1 - 0.05 / L level (a normal-quantile ratio, applied to the t interval).
+export function wideningFactor(looks: number): number {
+  const l = Math.max(1, Math.floor(looks));
+  if (l === 1) return 1;
+  return normQuantileUpper(0.025 / l) / normQuantileUpper(0.025);
+}
+
+// Decide from the paired cases seen so far. Promote once the (widened) CI lower bound is above zero, reject once the
+// upper bound is below -niMargin (zero by default), else continue. The CI is widened for the planned number of
+// looks, see wideningFactor. With fewer than two source goals the CI is unbounded, so the answer stays 'continue'
+// until the rounds run out.
 export function sequentialDecision(cases: PairedCase[], opts: SequentialOptions): SequentialDecision {
   const s = pairedStats(cases);
   const total = opts.totalCases ?? cases.length;
   const exhausted = cases.length >= total;
-  const [lo, hi] = s.ci;
-  const base = { ci: s.ci, gain: s.gain, n: s.n, exhausted };
+  const looks = opts.looks ?? (opts.totalCases ? Math.ceil(opts.totalCases / Math.max(1, opts.roundSize)) : 1);
+  const factor = wideningFactor(looks);
+  const [rawLo, rawHi] = s.ci;
+  const mid = (rawLo + rawHi) / 2;
+  const lo = Number.isFinite(rawLo) ? mid - (mid - rawLo) * factor : rawLo;
+  const hi = Number.isFinite(rawHi) ? mid + (rawHi - mid) * factor : rawHi;
+  const base = { ci: [lo, hi] as [number, number], gain: s.gain, n: s.n, exhausted };
   if (!Number.isFinite(s.se) || Number.isNaN(lo) || Number.isNaN(hi)) {
     return { ...base, ci: [-Infinity, Infinity], verdict: 'continue', reason: `CI not estimable from ${s.clusters} source goal(s), need 2+` };
   }
-  const ci = `95% CI [${f3(lo)}, ${f3(hi)}]`;
+  const level = looks > 1 ? `${(100 - 5 / looks).toFixed(1)}% CI (${looks} planned looks)` : '95% CI';
+  const ci = `${level} [${f3(lo)}, ${f3(hi)}]`;
   if (lo > 0) return { ...base, verdict: 'promote', reason: `gain ${f3(s.gain)}, ${ci} is above zero` };
   const rejectBelow = -Math.abs(opts.niMargin ?? 0);
-  if (hi < 0 || hi < rejectBelow) return { ...base, verdict: 'reject', reason: `gain ${f3(s.gain)}, ${ci} is below ${hi < 0 ? 'zero' : f3(rejectBelow)}` };
+  if (hi < rejectBelow) return { ...base, verdict: 'reject', reason: `gain ${f3(s.gain)}, ${ci} is below ${rejectBelow === 0 ? 'zero' : f3(rejectBelow)}` };
   return { ...base, verdict: 'continue', reason: `gain ${f3(s.gain)}, ${ci} includes zero` };
 }
 

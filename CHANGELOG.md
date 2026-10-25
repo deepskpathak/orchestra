@@ -19,6 +19,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Sequential testing: the per-round CI is now widened for the number of planned rounds (Bonferroni-style alpha spending, `wideningFactor`), so peeking after every round no longer inflates the false promotion rate. `niMargin` is now the reject threshold (reject once the upper bound is below `-niMargin`); the old `hi < 0 || hi < -niMargin` made the margin dead logic.
 - Pareto: `selectParent` only breeds from archive entries with status `promoted` or `candidate` (the front is computed over those) and whose harness directory still exists, so a rejected, retired or deleted variant is never chosen as a parent. With no eligible entry the incumbent is used.
 - Evals harvest: the human-fix diff is read from git's stdout only (stderr no longer leaks into the stored reference) and `evals add --from-run ... --fix` now fails with a clear message when git fails or the fix commit does not descend from the run's base, instead of storing git's error text or an unrelated diff as the reference.
 - Evals audit: the solution-leakage check now compares goals and lessons with the added (`+`) lines of a reference diff only, whitespace-normalised. Quoting existing code (context or removed lines) in a goal is no longer flagged as a leak. Plain-text references still use every line.
