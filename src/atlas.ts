@@ -13,6 +13,8 @@ export const ATLAS_VERSION = 1;
 const MAX_FILE_BYTES = 256 * 1024;
 const MAX_SYMBOLS_PER_FILE = 500;
 const MAX_NEAREST_CANDIDATES = 8;
+// Extensions that are never source text; skipped before any blob is read.
+const BINARY_EXT = /\.(png|jpe?g|gif|bmp|ico|webp|pdf|zip|gz|tgz|bz2|xz|7z|jar|war|class|so|dylib|dll|exe|o|a|bin|wasm|woff2?|ttf|otf|eot|mp[34]|mov|avi|wav|ogg|sqlite|db|parquet|lock)$/i;
 
 export type SymbolKind = 'function' | 'class' | 'method' | 'type' | 'const';
 
@@ -560,7 +562,7 @@ function extractMany(root: string, sha: string, paths: string[]): Record<string,
   const out: Record<string, FileEntry> = {};
   const CHUNK = 2000;
   for (let i = 0; i < paths.length; i += CHUNK) {
-    const blobs = readBlobsAtRef(root, sha, paths.slice(i, i + CHUNK));
+    const blobs = readBlobsAtRef(root, sha, paths.slice(i, i + CHUNK).filter((p) => !BINARY_EXT.test(p)), MAX_FILE_BYTES);
     for (const [p, buf] of blobs) {
       const e = readEntry(p, buf);
       if (e) out[p] = e;

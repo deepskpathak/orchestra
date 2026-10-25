@@ -4,6 +4,7 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
 import { atlasStats, buildAtlas, extractFile, extractGo, extractJava, extractPython, extractRust, extractTsJs, isExcludedPath, loadOrBuildAtlas } from '../src/atlas.ts';
+import { readBlobsAtRef } from '../src/git.ts';
 import { EVOLVABLE_FILES } from '../src/harness.ts';
 import { DEFAULT_PROJECT_CONFIG } from '../src/store.ts';
 import { tempRepo } from './helpers.ts';
@@ -229,4 +230,20 @@ test('context.atlas config defaults and deep merge; EVOLVABLE_FILES untouched', 
   store.writeJson('config.json', { testCommand: 'x' });
   assert.equal(store.config().context.atlas.enabled, false);
   assert.ok(!JSON.stringify(EVOLVABLE_FILES).includes('atlas'));
+});
+
+test('readBlobsAtRef skips oversized blobs without loading them, and the atlas skips binary extensions', () => {
+  const store = tempRepo();
+  const dir = store.root;
+  put(dir, 'small.ts', 'export const S = 1;\n');
+  put(dir, 'big.ts', 'x'.repeat(5000));
+  put(dir, 'logo.png', 'not really a png');
+  const sha = commit(dir, 'blobs');
+  const got = readBlobsAtRef(dir, sha, ['small.ts', 'big.ts', 'missing.ts'], 1000);
+  assert.equal(got.get('small.ts')?.toString(), 'export const S = 1;\n');
+  assert.equal(got.get('big.ts'), null);
+  assert.equal(got.get('missing.ts'), null);
+  const atlas = buildAtlas(dir, sha);
+  assert.ok('small.ts' in atlas.files);
+  assert.ok(!('logo.png' in atlas.files));
 });

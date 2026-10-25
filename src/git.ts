@@ -163,24 +163,51 @@ export function commitExists(root: string, ref: string): boolean {
   return tryGit(root, 'cat-file', '-e', `${ref}^{commit}`).ok;
 }
 
-// Reads many blobs at `ref` in one `git cat-file --batch` process. Missing paths map to null.
-export function readBlobsAtRef(root: string, ref: string, paths: string[]): Map<string, Buffer | null> {
+// Reads many blobs at `ref`. Sizes come first from `git cat-file --batch-check` (headers only), so
+// only blobs within `maxBytes` are ever loaded. Missing, non-blob and oversized paths map to null. A
+// failure reading a chunk (for example ENOBUFS) degrades to per-blob reads, and a blob that still
+// fails maps to null, so one bad blob never aborts the caller.
+export function readBlobsAtRef(root: string, ref: string, paths: string[], maxBytes = Infinity): Map<string, Buffer | null> {
   const res = new Map<string, Buffer | null>();
   if (!paths.length) return res;
-  const buf = execFileSync('git', ['cat-file', '--batch'], { cwd: root, input: paths.map((p) => `${ref}:${p}\n`).join(''), maxBuffer: 1024 * 1024 * 1024 });
-  let pos = 0;
-  for (const p of paths) {
-    const nl = buf.indexOf(10, pos);
-    const header = buf.subarray(pos, nl).toString('utf8');
-    pos = nl + 1;
-    const m = /^\S+ blob (\d+)$/.exec(header);
-    if (!m) {
-      res.set(p, null);
-      continue;
+  const specs = paths.map((p) => `${ref}:${p}`);
+  let sizes: Array<number | null>;
+  try {
+    const out = execFileSync('git', ['cat-file', '--batch-check'], { cwd: root, encoding: 'utf8', input: specs.join('\n') + '\n', maxBuffer: 64 * 1024 * 1024 });
+    sizes = out.split('\n').slice(0, paths.length).map((l) => {
+      const m = /^\S+ blob (\d+)$/.exec(l);
+      return m ? Number(m[1]) : null;
+    });
+  } catch {
+    sizes = paths.map(() => null);
+  }
+  const eligible: number[] = [];
+  paths.forEach((p, i) => {
+    res.set(p, null);
+    const size = sizes[i];
+    if (size !== null && size !== undefined && size <= maxBytes) eligible.push(i);
+  });
+  if (!eligible.length) return res;
+  try {
+    const buf = execFileSync('git', ['cat-file', '--batch'], { cwd: root, input: eligible.map((i) => `${specs[i]}\n`).join(''), maxBuffer: 1024 * 1024 * 1024 });
+    let pos = 0;
+    for (const i of eligible) {
+      const nl = buf.indexOf(10, pos);
+      const m = /^\S+ blob (\d+)$/.exec(buf.subarray(pos, nl).toString('utf8'));
+      pos = nl + 1;
+      if (!m) continue;
+      const size = Number(m[1]);
+      res.set(paths[i], buf.subarray(pos, pos + size));
+      pos += size + 1;
     }
-    const size = Number(m[1]);
-    res.set(p, buf.subarray(pos, pos + size));
-    pos += size + 1;
+  } catch {
+    for (const i of eligible) {
+      try {
+        res.set(paths[i], execFileSync('git', ['cat-file', 'blob', specs[i]], { cwd: root, maxBuffer: Math.max(maxBytes, 1024) + 1024 }));
+      } catch {
+        res.set(paths[i], null);
+      }
+    }
   }
   return res;
 }
