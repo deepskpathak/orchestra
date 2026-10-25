@@ -111,6 +111,29 @@ The `single-session` baseline gives one worker-role call the whole goal in the f
 
 `orchestra bench --report` prints the table for the latest bench that has a `full` arm: mean check pass rate, paired gain versus `full` with a 95% CI clustered by goal (`src/stats.ts`, pairs are goal and repeat), pass@1, pass^3 and mean cost. With few goals or repeats the CIs are wide; treat small differences as unproven. `-evolver` equals `full` until the incumbent differs from `v1`.
 
+## Atlas ablation (H6 and H7)
+
+`bench/arms.json` ships three arms for the Repo Atlas (opt-in, off by default elsewhere). Each sets `context.atlas` in the per-case config; unset keys keep their defaults (`mapTokens` 1024, `packTokens` 1500).
+
+| Arm | `context.atlas` |
+| --- | --- |
+| `atlas-off` | `enabled: false`, `packs: false` |
+| `atlas-l0` | `enabled: true`, `packs: false` (L0 ranked map only) |
+| `atlas-l0-l1` | `enabled: true`, `packs: true` (L0 map plus L1 task packs) |
+
+```
+orchestra bench --arms atlas-off,atlas-l0,atlas-l0-l1 --repeats 3
+orchestra bench --report                       # paired table vs the first arm run (or full, if present)
+orchestra bench --arms atlas-l0,atlas-off ...   # add --reference atlas-off to pick another reference
+```
+
+The reference arm in the paired table is `full` when the bench ran it, otherwise the first arm that ran (so list `atlas-off` first), or whatever `--reference <arm>` names. The atlas arms are marked `"optional": true` in `arms.json`: a plain `orchestra bench` still runs only `default`, and these arms run only when named with `--arms`. Runs with more than one arm print the paired table at the end; `--report` prints it for the latest stored bench.
+
+- **H6 (tokens per accepted merge):** the paired report gives check pass rate (non-inferiority within 2 points, with the 95% CI clustered by goal) and mean cost per goal for each arm. Cost is the bench proxy for tokens. Bench runs live in a throwaway store, so the token columns of `orchestra stats` do not include them. For tokens per accepted merge, run the same goals through `orchestra run` with `context.atlas` set as in each arm and compare the `orchestra stats` exploration table (input and cache tokens by harness version and role) divided by merged tasks.
+- **H7 (footprint recall):** `orchestra stats` prints "Footprint accuracy" (planned files vs files changed, merged tasks) with precision and recall. Recall needs planner footprints, so it only applies to `atlas-l0-l1` style runs where the plan carries `footprint`.
+
+With few goals or repeats the CIs are wide; treat small differences as unproven. The fake runner only exercises the plumbing.
+
 ## External anchors
 
 Orchestra makes no network calls, so anchor slices are run by a human following each benchmark's official protocol, and the result is recorded by hand. Do this periodically (for example each release), never inside CI.
