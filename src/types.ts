@@ -58,6 +58,7 @@ export interface Task {
   description: string;
   acceptance: string[];
   deps: string[];
+  invariants?: string[]; // planner-written invariants for oracles (W4.3/W4.4)
   footprint?: { files: string[]; symbols?: string[] }; // planner-declared files and symbols (sanitised)
   status: TaskStatus;
   attempts: number;

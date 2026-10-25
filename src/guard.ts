@@ -71,6 +71,11 @@ export function decide(toolName: string, input: Record<string, unknown>, ctx: Gu
   if (/\.orchestra\/(harness|evals|archive\.json)/.test(blob) && toolName !== 'Read' && toolName !== 'Grep' && toolName !== 'Glob') {
     return { allow: false, reason: 'Agents may not modify the harness, evals, or archive.' };
   }
+  // W4.3: the acceptance contract is frozen. Reads are fine; Bash only when the command can write.
+  if (!READ_ONLY.has(toolName) && /\.orchestra[\\/]+runs[\\/]+[^/\\"\s]+[\\/]+contract\.json/.test(blob.replace(/\\\\/g, '/'))) {
+    const writes = toolName !== 'Bash' || SCORER_WRITE_CMD.test(String(input?.command ?? '').replace(HARMLESS_REDIRECT, ' '));
+    if (writes) return { allow: false, reason: 'Agents may not modify the acceptance contract.' };
+  }
   if (!READ_ONLY.has(toolName) && touchesScorer(toolName, input, scorerCtx)) {
     return { allow: false, reason: 'Agents may not modify the frozen scorer.' };
   }

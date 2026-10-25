@@ -28,6 +28,8 @@ const GRADING_PATTERNS: RegExp[] = [
   /(^|\/)\.github\/workflows\//,
   // Only a root-level scorer/ (a repo's own src/scorer/ is ordinary code).
   /^scorer\//,
+  // W4.3: a worker diff that touches an acceptance contract.
+  /(^|\/)\.orchestra\/runs\/[^/]+\/contract\.json$/,
 ];
 
 export function isGradingSurface(path: string): boolean {

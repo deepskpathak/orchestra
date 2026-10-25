@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Machine-readable acceptance contracts (W4.3, `verification.contracts.enabled`): the planner may return `ambiguities` and per-task `invariants`; an unresolved ambiguity fails planning before any worker starts, and `runs/<runId>/contract.json` freezes the criteria (ids like `T1.c1`, status `failing`/`passing`) with its sha256 on `Run.contract`. Workers can only flip failing to passing (`src/contracts.ts`); the guard denies writes to contract files and the integrity monitor flags diffs that touch one.
 - M4 Verification config scaffold: an opt-in `verification` block (`contracts`, `panel`, `agenticJudge`, `oracles`, `mutation`), all disabled by default and merged key by key, with optional `Verdict.panel`, `CriterionResult.evidence`, `Scenario.check`, `Run.mutation` and `Run.contract` fields. Keys are documented in `docs/configuration.md`; behaviour lands in later tasks.
 - M3 Evolution, all opt-in and off by default (config keys in `docs/configuration.md`, behaviour in `docs/self-improvement.md#cycle-controls-m3`).
 - Time-split eval sets (W3.1): `evolve.splits` orders cases by `createdAt` into feedback, validation and a locked holdout (default 30/50/20). The evolver sees feedback cases only, the holdout confirms a promotion, and below `signoffBelow` (12) cases promotion needs a human.
