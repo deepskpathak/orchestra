@@ -176,6 +176,37 @@ test('cascade: a candidate that fails the smoke test never reaches the minibatch
   assert.equal(s.planners(), 0, 'no replay of any kind was spent');
 });
 
+const CASCADE = { enabled: true, minibatch: 2, finalists: 2 };
+
+test('smoke: a case the incumbent also fails does not reject the candidate', async () => {
+  const { store, cases } = repoWith(5, { cascade: CASCADE });
+  // The first case can never pass (its check always fails), for the incumbent and the candidate alike.
+  store.writeJson(`evals/${cases[0].id}.json`, { ...cases[0], check: 'false' });
+  const logs: string[] = [];
+  const out = await evolve(store, fakeRunner(), (m) => logs.push(m));
+  assert.ok(logs.some((m) => /fails for v1 too; not counted against v2/.test(m)), logs.join('\n'));
+  const v2 = readArchive(store).find((a) => a.version === 'v2')!;
+  assert.notEqual(v2.rejectKind, 'smoke');
+  assert.doesNotMatch(out.reason, /smoke/);
+  assert.ok(out.candidateScore !== null, 'the candidate went on to full validation');
+});
+
+test('smoke: a case only the candidate fails rejects it, recorded as a smoke rejection and not fed back to the evolver', async () => {
+  const { store, cases } = repoWith(5, { cascade: CASCADE });
+  const failsCandidate = (req: Parameters<Runner>[0], res: Awaited<ReturnType<Runner>>) =>
+    req.role === 'judge' && req.prompt.startsWith('FROZEN SCORER REPLAY') && req.prompt.includes(cases[0].goal) && /edge-cases-covered/.test(req.prompt)
+      ? { ...res, structured: { pass: false, score: 0.1, summary: 'Regressed' } }
+      : res;
+  const s = spy(fakeRunner(), failsCandidate);
+  const out = await evolve(store, s.runner, quiet);
+  assert.match(out.reason, /no candidate passed the smoke test \(v2: failed smoke case case-00 that v1 passes\)/);
+  const v2 = readArchive(store).find((a) => a.version === 'v2')!;
+  assert.equal(v2.status, 'rejected');
+  assert.equal(v2.rejectKind, 'smoke');
+  await evolve(store, s.runner, quiet);
+  assert.match(s.evolverPrompts[1], /PREVIOUSLY REJECTED VARIANTS \(do not repeat\):\n\(none\)/);
+});
+
 test('harnessIntegrity flags a removed checklist line and passes an intact variant', () => {
   const { store } = repoWith(0, {});
   writeFileSync(store.path('harness', 'v1', 'checklist.md'), '- a\n- b\n');

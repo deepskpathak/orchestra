@@ -458,7 +458,8 @@ async function evolveCycle(store: Store, runner: Runner, log: (msg: string) => v
     .slice(-40);
   const files = EVOLVABLE_FILES.map((f) => `--- ${f} ---\n${existsSync(store.path('harness', parent, f)) ? readFileSync(store.path('harness', parent, f), 'utf8') : ''}`).join('\n\n');
   const rejected = readArchive(store)
-    .filter((a) => a.status === 'rejected')
+    // Smoke rejections come from a structural check or one unbaselined replay, so they say nothing about the idea.
+    .filter((a) => a.status === 'rejected' && a.rejectKind !== 'smoke')
     .slice(-5)
     .map((a) => `- ${a.version} (score ${a.evalScore}): ${a.rationale}`);
 
@@ -564,14 +565,16 @@ async function evolveCycle(store: Store, runner: Runner, log: (msg: string) => v
   const budgetStop = (where: string): EvolveOutcome => ({ candidate, incumbent, candidateScore: null, incumbentScore: null, promoted: false, reason: `budget cap $${budget.cap} reached (spent $${round(budget.spent)}) ${where}; candidate kept for later evaluation` });
 
   if (cascade) {
-    // Step 1: smoke test. Guards and checklist intact, then one replay of the first case.
+    // Step 1: smoke test. Guards and checklist intact (against the parent and the live incumbent), then one replay of
+    // the first case. A failed replay only rejects when the incumbent passes that case: the case may be hard or
+    // flaky, and a variant is not at fault for failing what the incumbent fails too.
     const smokeCase = cases[0];
     const smoked: string[] = [];
     const smokeFails: string[] = [];
     for (const c of created) {
       const broken = harnessIntegrity(store, parent, c.version) ?? (parent === incumbent ? null : harnessIntegrity(store, incumbent, c.version));
       if (broken) {
-        updateArchive(store, c.version, { status: 'rejected' });
+        updateArchive(store, c.version, { status: 'rejected', rejectKind: 'smoke' });
         smokeFails.push(`${c.version}: ${broken}`);
         log(`Smoke test failed for ${c.version}: ${broken}`);
         continue;
@@ -581,9 +584,16 @@ async function evolveCycle(store: Store, runner: Runner, log: (msg: string) => v
       spent(r, 1);
       if (r.inconclusive) return inconclusive(c.version, incumbent, r.inconclusive);
       if (!r.passed[smokeCase.id]) {
-        updateArchive(store, c.version, { status: 'rejected' });
-        smokeFails.push(`${c.version}: failed smoke case ${smokeCase.id}`);
-        continue;
+        if (wouldCross(1)) return budgetStop('during the smoke baseline');
+        const base = await evaluate(store, runner, incumbent, [smokeCase], onRun, undefined, { cache: incCache });
+        spent(base, 1);
+        if (base.inconclusive) return inconclusive(c.version, incumbent, base.inconclusive);
+        if (base.passed[smokeCase.id]) {
+          updateArchive(store, c.version, { status: 'rejected', rejectKind: 'smoke' });
+          smokeFails.push(`${c.version}: failed smoke case ${smokeCase.id} that ${incumbent} passes`);
+          continue;
+        }
+        log(`Smoke case ${smokeCase.id} fails for ${incumbent} too; not counted against ${c.version}`);
       }
       smoked.push(c.version);
     }

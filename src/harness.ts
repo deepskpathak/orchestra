@@ -39,6 +39,7 @@ export interface ArchiveEntry {
   stepping?: boolean; // kept on the Pareto front as a stepping stone, not promoted
   holdoutScore?: number | null; // locked holdout score; never shown to the evolver
   evalInfraRate?: number; // share of the last full eval's replays that failed on infrastructure
+  rejectKind?: 'smoke'; // rejected by the cheap smoke test (structural check or one replay), not by a measured comparison; not fed back to the evolver as a 'do not repeat'
   status: 'promoted' | 'candidate' | 'rejected' | 'retired';
 }
 
