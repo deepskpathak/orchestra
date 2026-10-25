@@ -13,7 +13,7 @@ import { aggregatePanel, lineageFraming, pairwiseBothOrders, type PanelJudgeVote
 import { isExcludedPath, loadOrBuildAtlas, type Atlas } from './atlas.ts';
 import { buildTaskPack, renderMap } from './atlas-context.ts';
 import { plannedFiles } from './exploration.ts';
-import { buildContract, contractSha, unresolvedAmbiguities } from './contracts.ts';
+import { applyContractUpdate, buildContract, contractSha, criteriaForTask, isContractPath, markPassing, unresolvedAmbiguities, type Contract } from './contracts.ts';
 import { analyzeDiff, MONITOR_MARK, type IntegrityFlag } from './integrity.ts';
 import { mutationScore, runMutation } from './mutation.ts';
 import { listOracleFiles, runOracles, type OracleOutcome } from './oracle-run.ts';
@@ -405,6 +405,7 @@ export class Conductor {
   private readonly onUpdate?: (run: Run) => void;
   private scenarios: Scenario[] = [];
   private mutationOpts?: ConductorOptions['mutation'];
+  private contract?: Contract; // W4.3: the conductor's own copy of the contract; the file under .orchestra is checked against it
   private atlas?: Atlas;
   private map = '';
   private ablate: Ablation;
@@ -587,6 +588,7 @@ export class Conductor {
       const rel = `runs/${run.id}/contract.json`;
       store.writeJson(rel, contract);
       run.contract = { path: rel, sha256: contractSha(contract) };
+      this.contract = contract;
     }
     // One domain per run, so at most one new domain can appear per run.
     const domain = normalizeDomain(out.domain);
@@ -750,6 +752,8 @@ export class Conductor {
   // files were tampered with, re-run the test command with the base versions restored and grade on
   // that. Returns a failing verdict (with an automatic repair note) in that case, else null.
   private integrityVerdict(task: Task, cwd: string, base: string): Verdict | null {
+    const broken = this.contractVerdict(task, cwd, base);
+    if (broken) return broken;
     const flags = analyzeDiff(g.diffSince(cwd, base, Infinity), g.changedFiles(cwd, base));
     if (!flags.length) return null;
     task.integrityFlags = [...(task.integrityFlags ?? []), ...flags];
@@ -774,6 +778,67 @@ export class Conductor {
     this.ledgerOutcome(task, 'integrity_flag');
     const issue = `${MONITOR_MARK} Your change touched grading files that must not be edited: ${list(tampered).join('; ')}. Revert them to their original content and fix the code instead. If a test change is truly required, stop and report FLAG_FOR_HUMAN with the reason.${tail}`;
     return { pass: false, score: 0, summary: `${MONITOR_MARK} grading surface modified: ${files.join(', ')}`, issues: [issue], testsPassed };
+  }
+
+  // W4.3: the contract file lives under .orchestra, outside every worktree, so a worktree diff cannot show an
+  // edit to it. Re-verify its sha256 against the value recorded at planning (and against the worker's changed
+  // paths, for repos that track .orchestra). A mismatch fails the attempt like any grading-surface edit, and the
+  // file is rewritten from the conductor's copy so later reads (judge, oracles) see the frozen contract.
+  private contractVerdict(task: Task, cwd: string, base: string): Verdict | null {
+    const ref = this.run.contract;
+    if (!ref || !this.contract) return null;
+    let actual: string;
+    try {
+      actual = contractSha(this.store.readJson<Contract>(ref.path, { criteria: [] }));
+    } catch {
+      actual = 'unreadable';
+    }
+    const touched = g.changedFiles(cwd, base).filter(isContractPath);
+    if (actual === ref.sha256 && !touched.length) return null;
+    const detail = actual === ref.sha256 ? `the worker diff touches ${touched.join(', ')}` : `sha256 ${actual.slice(0, 12)} does not match the recorded ${ref.sha256.slice(0, 12)}`;
+    this.store.writeJson(ref.path, this.contract);
+    task.integrityFlags = [...(task.integrityFlags ?? []), { kind: 'grading-surface', file: ref.path, detail: `acceptance contract modified: ${detail}` }];
+    this.emit('log', `${task.id} integrity monitor: acceptance contract ${detail}; contract restored`, undefined, task.id);
+    this.ledgerOutcome(task, 'integrity_flag');
+    const issue = `${MONITOR_MARK} The acceptance contract is frozen and was modified (${detail}). It has been restored. Do not edit anything under .orchestra; implement the task against the stated criteria instead.`;
+    return { pass: false, score: 0, summary: `${MONITOR_MARK} acceptance contract modified`, issues: [issue], testsPassed: null };
+  }
+
+  // The task's acceptance text and invariants as frozen in the verified contract file; null when contracts are
+  // off or the file does not verify, in which case callers use the in-memory plan (the tamper is flagged elsewhere).
+  private frozenCriteria(task: Task): { acceptance: string[]; invariants: string[] } | null {
+    const ref = this.run.contract;
+    if (!ref) return null;
+    try {
+      const onDisk = this.store.readJson<Contract>(ref.path, { criteria: [] });
+      if (contractSha(onDisk) !== ref.sha256) return null;
+      const own = criteriaForTask(onDisk, task.id);
+      return own.acceptance.length ? own : null;
+    } catch {
+      return null;
+    }
+  }
+
+  // Merged means every criterion of the task passed judging. Flip them failing -> passing in the contract,
+  // through the same validator that guards worker proposals, then record the new sha256.
+  private markCriteriaPassing(task: Task): void {
+    const ref = this.run.contract;
+    if (!ref || !this.contract) return;
+    try {
+      const results = task.verdict?.criteria;
+      let next = this.contract;
+      task.acceptance.forEach((_, i) => {
+        const res = results && results.length === task.acceptance.length ? results[i] : undefined;
+        if (!res || res.pass) next = markPassing(next, `${task.id}.c${i + 1}`);
+      });
+      const checked = applyContractUpdate(this.contract, next);
+      if (!checked.ok) throw new Error(checked.errors.join('; '));
+      this.contract = checked.contract;
+      this.store.writeJson(ref.path, this.contract);
+      ref.sha256 = contractSha(this.contract);
+    } catch (e) {
+      this.emit('log', `${task.id} contract update failed: ${(e as Error).message.split('\n')[0]}`, undefined, task.id);
+    }
   }
 
   // Pre-judge outcome for one attempt: a failing verdict when it never reaches the judge, else null.
@@ -954,8 +1019,9 @@ export class Conductor {
     if (tests) this.emit('log', `${task.id} tests ${tests.ok ? 'passed' : 'FAILED'}`, undefined, task.id);
     const agentic = cfg.verification.agenticJudge.enabled ? cfg.verification.agenticJudge : undefined;
     const headBefore = g.head(cwd);
+    const frozen = this.frozenCriteria(task);
     const built = judgePrompt({
-        task,
+        task: frozen ? { ...task, acceptance: frozen.acceptance } : task,
         scenarios: this.scenarios,
         workerText: work.text,
         testCommand: cfg.testCommand,
@@ -966,7 +1032,7 @@ export class Conductor {
         agentic: agentic ? runScenarioChecks({ cwd, scenarios: this.scenarios, testCommand: cfg.testCommand, testsResult: tests, timeoutMs: agentic.checkTimeoutMs, exec: (d, c, t) => g.runTests(d, c, t, scrubVerifierEnv(process.env)) }) : undefined,
       });
     const prompt = joinPrompt(built);
-    const oracle = await this.oraclePass(task, cwd, base);
+    const oracle = await this.oraclePass(task, cwd, base, frozen?.invariants);
 
     const testsOk = tests ? tests.ok : null;
     const runJudge = async (model?: string, framing = ''): Promise<{ res: AgentResult; v?: Partial<Verdict> }> => {
@@ -1051,19 +1117,20 @@ export class Conductor {
   // worker worktree, then executed against the worker's tree. Returns null when oracles do not apply.
   // Any failure here (git worktree add, mkdir, a missing base ref) is logged and degrades to no oracle
   // evidence, the same way a failed mutation pass does, so it can never abort judging.
-  private async oraclePass(task: Task, cwd: string, base: string): Promise<OracleOutcome | null> {
+  private async oraclePass(task: Task, cwd: string, base: string, frozenInvariants?: string[]): Promise<OracleOutcome | null> {
     if (!this.store.config().verification.oracles.enabled) return null;
     try {
-      return await this.runOraclePass(task, cwd, base);
+      return await this.runOraclePass(task, cwd, base, frozenInvariants);
     } catch (e) {
       this.emit('log', `${task.id} oracles failed, grading with no oracle evidence: ${(e as Error).message.split('\n')[0]}`, undefined, task.id);
       return null;
     }
   }
 
-  private async runOraclePass(task: Task, cwd: string, base: string): Promise<OracleOutcome | null> {
+  private async runOraclePass(task: Task, cwd: string, base: string, frozenInvariants?: string[]): Promise<OracleOutcome | null> {
     const cfg = this.store.config().verification.oracles;
-    const invariants = task.invariants ?? [];
+    // With contracts on the invariants come from the verified contract file, not the in-memory plan.
+    const invariants = frozenInvariants ?? task.invariants ?? [];
     if (!invariants.length) {
       this.emit('log', `${task.id} oracles skipped: the contract has no invariants for this task`, undefined, task.id);
       return null;
@@ -1141,6 +1208,7 @@ export class Conductor {
     }
     task.status = 'merged';
     task.endedAt = Date.now();
+    this.markCriteriaPassing(task);
     this.ledgerOutcome(task, 'merged', footprint);
     this.emit('task.merged', `${task.id} merged (attempt ${task.attempts})`, undefined, task.id);
     this.save();

@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { test } from 'node:test';
-import { applyContractUpdate, buildContract, contractSha, markPassing, unresolvedAmbiguities } from '../src/contracts.ts';
+import { applyContractUpdate, buildContract, contractSha, criteriaForTask, markPassing, unresolvedAmbiguities } from '../src/contracts.ts';
+import type { Runner } from '../src/agent.ts';
 import { runGoal } from '../src/conductor.ts';
 import { fakeRunner } from '../src/fake.ts';
 import { decide } from '../src/guard.ts';
@@ -112,8 +113,65 @@ test('contracts on + resolved ambiguities proceeds and writes the frozen contrac
   assert.ok(existsSync(store.path(run.contract!.path)));
   const c = store.readJson<Contract>(run.contract!.path, { criteria: [] });
   assert.deepEqual(c.criteria.map((x) => x.id), ['T1.c1', 'T2.c1', 'T3.c1', 'T4.c1']);
-  assert.ok(c.criteria.every((x) => x.status === 'failing'));
+  // Every task merged, so the conductor flipped each criterion to passing and recorded the new hash.
+  assert.ok(c.criteria.every((x) => x.status === 'passing'));
   assert.equal(run.contract!.sha256, contractSha(c));
+});
+
+test('contracts on: only the criteria of merged tasks flip to passing; the rest stay failing', async () => {
+  const store = tempRepo(on);
+  const run = await runGoal({ store, runner: fakeRunner({ failAlways: ['T1'], failFirstAttemptOf: [] }), goal: 'g' });
+  const c = store.readJson<Contract>(run.contract!.path, { criteria: [] });
+  assert.deepEqual(Object.fromEntries(c.criteria.map((x) => [x.id, x.status])), { 'T1.c1': 'failing', 'T2.c1': 'passing', 'T3.c1': 'failing', 'T4.c1': 'failing' });
+  assert.equal(run.contract!.sha256, contractSha(c));
+});
+
+test('contracts on: an edit to contract.json is caught by the sha check, restored, and sent to repair', async () => {
+  const store = tempRepo({ ...on, concurrency: 1 });
+  const base = fakeRunner({ failFirstAttemptOf: [] });
+  let tampered = false;
+  const runner: Runner = async (req) => {
+    if (req.role === 'worker' && req.meta?.task === 'T1' && !tampered) {
+      tampered = true;
+      // The worktree is <root>/.orchestra/worktrees/<runId>/T1, the contract is <root>/.orchestra/runs/<runId>/contract.json.
+      const runId = req.cwd.split('/').slice(-2)[0];
+      const file = store.path('runs', runId, 'contract.json');
+      const c = JSON.parse(readFileSync(file, 'utf8')) as Contract;
+      c.criteria[0].status = 'passing';
+      writeFileSync(file, JSON.stringify(c));
+    }
+    return base(req);
+  };
+  const run = await runGoal({ store, runner, goal: 'g' });
+  const t1 = run.tasks.find((t) => t.id === 'T1')!;
+  assert.equal(t1.attempts, 2);
+  assert.equal(t1.status, 'merged');
+  assert.ok(t1.integrityFlags?.some((f) => /acceptance contract modified/.test(f.detail)));
+  assert.ok(store.events(run.id).some((e) => /acceptance contract sha256 .* does not match/.test(e.msg)));
+  // The final file is the conductor's, consistent with the recorded hash.
+  const c = store.readJson<Contract>(run.contract!.path, { criteria: [] });
+  assert.equal(run.contract!.sha256, contractSha(c));
+});
+
+test('criteriaForTask returns one task\'s frozen text and invariants', () => {
+  const c = buildContract([{ id: 'T1', acceptance: ['a', 'b'], invariants: ['i'] }, { id: 'T2', acceptance: ['c'] }]);
+  assert.deepEqual(criteriaForTask(c, 'T1'), { acceptance: ['a', 'b'], invariants: ['i'] });
+  assert.deepEqual(criteriaForTask(c, 'T2'), { acceptance: ['c'], invariants: [] });
+  assert.deepEqual(criteriaForTask(c, 'T9'), { acceptance: [], invariants: [] });
+});
+
+test('contracts on: oracle invariants and judge criteria come from the contract file', async () => {
+  const seen: string[] = [];
+  const base = fakeRunner({ failFirstAttemptOf: [], invariants: ['stays frozen'], oracleFiles: { 'a.test.mjs': "import test from 'node:test';\ntest('ok', () => {});\n" } });
+  const runner: Runner = async (req) => {
+    if (req.role === 'judge') seen.push(req.prompt);
+    return base(req);
+  };
+  const store = tempRepo({ verification: { contracts: { enabled: true }, oracles: { enabled: true } } } as never);
+  const run = await runGoal({ store, runner, goal: 'g' });
+  assert.equal(run.status, 'done');
+  assert.ok(seen.some((p) => p.startsWith('ORACLE TESTS') && p.includes('- stays frozen')));
+  assert.ok(seen.some((p) => p.includes('ACCEPTANCE CRITERIA:\n- core.txt exists')));
 });
 
 test('contracts off ignores unresolved ambiguities', async () => {

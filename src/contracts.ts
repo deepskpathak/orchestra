@@ -51,6 +51,12 @@ export function markPassing(contract: Contract, criterionId: string): Contract {
   return { criteria: contract.criteria.map((c) => (c.id === criterionId ? { ...c, status: 'passing' as const } : c)) };
 }
 
+// One task's frozen acceptance text (in criterion order) and invariants, as the judge and the oracle author read them.
+export function criteriaForTask(contract: Contract, taskId: string): { acceptance: string[]; invariants: string[] } {
+  const own = contract.criteria.filter((c) => c.task === taskId);
+  return { acceptance: own.map((c) => c.text), invariants: own[0]?.invariants ?? [] };
+}
+
 export type ContractUpdate = { ok: true; contract: Contract } | { ok: false; errors: string[] };
 
 const sameList = (a: string[], b: string[]) => a.length === b.length && a.every((x, i) => x === b[i]);
