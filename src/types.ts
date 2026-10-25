@@ -1,6 +1,7 @@
 // Shared domain types. Everything Orchestra persists is one of these shapes, as JSON.
 
 import type { IntegrityFlag } from './integrity.ts';
+import type { RiskTierConfig } from './oversight.ts';
 
 export type Role = 'planner' | 'worker' | 'judge' | 'librarian' | 'evolver';
 
@@ -10,6 +11,7 @@ export type TaskStatus =
   | 'judging' // tests + judge session active
   | 'repair' // judge rejected, queued for another worker attempt
   | 'merging' // waiting in the merge queue
+  | 'awaiting_approval' // judged pass but high risk: waits for `orchestra approve` (W7.1)
   | 'merged' // landed on the integration branch
   | 'failed' // out of attempts
   | 'needs_human' // worker flagged a spec/test contradiction; stops repair, not a failure
@@ -70,6 +72,9 @@ export interface Task {
   integrityFlags?: IntegrityFlag[]; // grading-surface / reward-hack flags raised on this task's diffs (all attempts)
   humanReason?: string; // why the worker flagged the task for a human (status needs_human)
   contrast?: ContrastRecord; // set when a contrastive repair pair ran
+  risk?: { tier: 'low' | 'normal' | 'high'; reasons: string[] }; // W7.1, set when oversight.riskTiers.enabled
+  approval?: { requestedAt: number; by?: string; decidedAt?: number }; // W7.1
+  mergeWaitMs?: number; // W6.2: judged-pass until landed
   costUsd: number;
   startedAt?: number;
   endedAt?: number;
@@ -96,6 +101,8 @@ export interface Run {
   endedAt?: number;
   integrationBranch?: string;
   baseRef?: string;
+  requestedBy?: string; // who asked for the run: ORCHESTRA_REQUESTER or git user.name (W7.1)
+  conflictRate?: number; // W6.1: merge conflicts / merge attempts
   atlasSha?: string; // commit the Repo Atlas was built at, when context.atlas is enabled
   tasks: Task[];
   costUsd: number;
@@ -127,6 +134,7 @@ export type EventKind =
   | 'task.verdict'
   | 'task.repair'
   | 'task.merged'
+  | 'task.approval'
   | 'task.contrast'
   | 'task.failed'
   | 'task.needs_human'
@@ -247,6 +255,8 @@ export interface ProjectConfig {
       external?: 'off' | 'auto' | 'ctags' | 'graphify'; // optional external graph input (W9.5); absent means 'off'
     };
   };
+  throughput?: { footprintScheduling: boolean; batchMerge: { enabled: boolean; maxBatch: number } }; // W6.1, W6.2
+  oversight?: { riskTiers: RiskTierConfig }; // W7.1
   verification: VerificationConfig;
   learnings?: { expiryDays: number; graph?: boolean }; // expiryDays: drop lessons with evidence older than this many days (0 = off); graph: rank lessons linked to the task footprint first (L3)
   evolve: {

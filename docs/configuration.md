@@ -120,6 +120,29 @@ Off by default. The Repo Atlas is a deterministic, commit-keyed code graph (file
 
 External MCP code-graph servers such as codegraph and Serena are user opt-ins. Add them to your Claude settings (`claude mcp add ...` or `.mcp.json`); Orchestra does not install, start or configure them.
 
+### `throughput` (W6.1, W6.2)
+
+Both keys are off by default. The `throughput` object and `throughput.batchMerge` are merged key by key.
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `throughput.footprintScheduling` | boolean | `false` | Single writer per footprint: a ready task whose planner-declared footprint overlaps an in-flight task waits (a missing footprint overlaps everything). Dependents also get a short "Decisions from merged dependencies" section in the worker prompt. |
+| `throughput.batchMerge.enabled` | boolean | `false` | Queue judged-pass tasks and merge disjoint-footprint batches into the integration branch with one post-merge test run per batch. On failure the batch is bisected: bad tasks are reset out and go to repair, good ones stay merged. Per-task merge wait is stored as `Task.mergeWaitMs`. |
+| `throughput.batchMerge.maxBatch` | number | `4` | Largest batch. |
+
+The conflict rate (merge conflicts / merge attempts) is recorded for every run as `Run.conflictRate` and in the `run.end` event, with these keys on or off.
+
+### `oversight.riskTiers` (W7.1)
+
+Off by default. When enabled, each judged-pass task is classified from its diff (`src/oversight.ts`): `low` and `normal` merge as usual; `high` (auth, data, infra, secrets, workflows, migrations, or a diff over `largeDiffLines`) sets the task to `awaiting_approval` and emits a `task.approval` event. It lands only through `orchestra approve <runId> <taskId> --by <name>`. The approver must be a human who is not the requester, recorded at run start as `Run.requestedBy` (`ORCHESTRA_REQUESTER`, else `git config user.name`). Agent role names (`planner`, `worker`, `judge`, ...) are always refused. Tasks that depend on a held task are blocked in that run.
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `oversight.riskTiers.enabled` | boolean | `false` | Turn tiering on. |
+| `oversight.riskTiers.lowRiskGlobs` | string[] | docs, `*.md`, `test/**`, issue templates | Paths that make a task low risk when every changed file matches. |
+| `oversight.riskTiers.highRiskGlobs` | string[] | auth, secrets, migrations, data, infra, terraform, k8s, Dockerfile, workflows | Any match makes the task high risk. |
+| `oversight.riskTiers.largeDiffLines` | number | `400` | Added plus removed lines above which a task is high risk. |
+
 ### `contrastive`
 
 Off by default. Without a test command the judge scores a single attempt with no objective check, so scores are noisy. When enabled, a repair attempt runs two workers instead of one, in separate worktrees off the same base: A follows the repair notes as usual, B is told to take a different approach to the same failing criteria. One comparison judge call sees both diffs, the acceptance criteria and the hidden scenarios, scores each attempt per criterion, and picks a winner with reasons. The winner's branch continues to the merge queue, the loser's worktree and branch are deleted, and both attempts are recorded in run events and the task drawer.

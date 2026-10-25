@@ -66,7 +66,8 @@ export function planBatches(readyToMerge: Task[], maxBatch: number): string[][] 
   return batches.map((b) => b.map((t) => t.id));
 }
 
-// Test the full batch once; on failure split in halves and recurse.
+// Test the full batch once; on failure split in halves and recurse. When the left half passes, the
+// right half must hold the culprit, so it is not tested as a whole (saves a run per level).
 export async function bisectBatch(
   ids: string[],
   testFn: (ids: string[]) => Promise<boolean>,
@@ -74,22 +75,25 @@ export async function bisectBatch(
   let testRuns = 0;
   const good: string[] = [];
   const bad: string[] = [];
-  const walk = async (batch: string[]): Promise<void> => {
+  const walk = async (batch: string[], knownFail: boolean): Promise<void> => {
     if (batch.length === 0) return;
-    testRuns++;
-    if (await testFn(batch)) {
-      good.push(...batch);
-      return;
+    if (!knownFail) {
+      testRuns++;
+      if (await testFn(batch)) {
+        good.push(...batch);
+        return;
+      }
     }
     if (batch.length === 1) {
       bad.push(...batch);
       return;
     }
     const mid = Math.ceil(batch.length / 2);
-    await walk(batch.slice(0, mid));
-    await walk(batch.slice(mid));
+    const badBefore = bad.length;
+    await walk(batch.slice(0, mid), false);
+    await walk(batch.slice(mid), bad.length === badBefore);
   };
-  await walk(ids);
+  await walk(ids, false);
   return { good, bad, testRuns };
 }
 

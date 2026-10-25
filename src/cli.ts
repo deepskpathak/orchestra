@@ -5,6 +5,7 @@ import { existsSync, mkdtempSync, openSync, readdirSync, readFileSync, writeFile
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { claudeRunner, preflight, type Runner } from './agent.ts';
+import { approveTask } from './approve.ts';
 import { importGrades, readBenchRows, renderCalibration, renderCalibrationByMode, storeCalibration, storeCalibrationByMode, writeSample } from './calibration.ts';
 import { ABLATION_ARMS, SINGLE_SESSION_ARM, ablationTable, defaultReference, loadArms, referenceError, renderAblationTable, summarize, renderSummary, runBench, verifyOracles } from './bench.ts';
 import { atlasStats, loadOrBuildAtlas } from './atlas.ts';
@@ -51,6 +52,9 @@ Usage:
   orchestra serve --tui [runId]  Interactive terminal dashboard (no browser, opens no port); alias: orchestra tui
   orchestra watch [runId]        Full-screen live dashboard (q to quit)
   orchestra status [runId]       One-shot board of the current or given run
+  orchestra approve <runId> <taskId> --by <name>
+                                 Land a high-risk task held as awaiting_approval (oversight.riskTiers). The approver must be a
+                                 human other than the run's requester (ORCHESTRA_REQUESTER or git user.name at run start)
   orchestra stats                Factory health per harness version, plus the eval infra failure rate
   orchestra evolve               Propose, evaluate (clean-room, interleaved), and maybe promote a better harness;
                                  prints the infra failure rate of the eval replays
@@ -379,6 +383,20 @@ async function cmdServe(args: string[]): Promise<void> {
   const web = await serve({ store, port });
   console.log(`♫ orchestra dashboard: ${web.url}  (read-only, 127.0.0.1 only, ctrl-c to stop)`);
   process.on('SIGINT', () => void web.close().then(() => process.exit(0)));
+}
+
+function cmdApprove(args: string[]): void {
+  const store = storeOrDie();
+  const i = args.indexOf('--by');
+  const by = i >= 0 ? args[i + 1] : undefined;
+  const [runId, taskId] = args.filter((a, j) => !a.startsWith('--') && j !== i + 1);
+  if (!runId || !taskId || !by) die('usage: orchestra approve <runId> <taskId> --by <name>');
+  try {
+    const run = approveTask(store, runId, taskId, by);
+    console.log(`${taskId} approved by ${by} and merged into ${run.integrationBranch}.`);
+  } catch (e) {
+    die((e as Error).message);
+  }
 }
 
 function cmdStatus(args: string[]): void {
@@ -787,6 +805,9 @@ export async function main(argv: string[]): Promise<void> {
       break;
     case 'status':
       cmdStatus(args);
+      break;
+    case 'approve':
+      cmdApprove(args);
       break;
     case 'stats':
       cmdStats(args);

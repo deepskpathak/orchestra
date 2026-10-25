@@ -22,6 +22,8 @@ import { loadHarness, type Harness } from './harness.ts';
 import { applyLessonEdits, editsFromResponse, expireDomain, formatLearnings, listDomains, normalizeDomain, readAllLearnings, readLearnings, GLOBAL } from './learnings.ts';
 import { buildSandboxPolicy, preflightSandbox, scrubVerifierEnv, scrubWorkerEnv, type ProbeExec } from './sandbox.ts';
 import { newRunId, type Store } from './store.ts';
+import { bisectBatch, canStart, conflictRate, decisionLog, planBatches } from './throughput.ts';
+import { classifyRisk } from './oversight.ts';
 import { verificationModes } from './outcomes.ts';
 import { AGENTIC_INSTRUCTION, NO_EVIDENCE_NOTE, executedChecksSection, runScenarioChecks, type CheckResult } from './judge-checks.ts';
 import type { ActiveAgent, CriterionResult, OrchestraEvent, PanelRecord, Role, Run, Scenario, Task, Verdict } from './types.ts';
@@ -487,6 +489,9 @@ export class Conductor {
   private evalLearnings: boolean;
   private integration!: { path: string; branch: string; base: string };
   private mergeChain: Promise<unknown> = Promise.resolve();
+  private readonly inflightIds = new Set<string>(); // tasks with an attempt in progress (scheduler)
+  private batchQueue: { task: Task; resolve: () => void }[] = []; // W6.2: judged-pass tasks waiting for a batch
+  private readonly mergeReadyAt = new Map<string, number>();
   private readonly wtRoot: string;
 
   constructor(opts: ConductorOptions) {
@@ -514,6 +519,7 @@ export class Conductor {
       costUsd: 0,
       active: [],
       baseRef: opts.baseRef,
+      requestedBy: detectRequester(opts.store.root),
       ...(modes.length ? { verificationModes: modes } : {}),
     };
   }
@@ -552,8 +558,9 @@ export class Conductor {
       if (run.status === 'failed' && !run.error) {
         const human = run.tasks.filter((t) => t.status === 'needs_human').length;
         const blocked = run.tasks.filter((t) => t.status === 'blocked').length;
-        const failed = run.tasks.length - merged.length - human - blocked;
-        run.error = `${run.tasks.length - merged.length} of ${run.tasks.length} tasks did not land (${failed} failed, ${blocked} blocked, ${human} need a human)`;
+        const awaiting = run.tasks.filter((t) => t.status === 'awaiting_approval').length;
+        const failed = run.tasks.length - merged.length - human - blocked - awaiting;
+        run.error = `${run.tasks.length - merged.length} of ${run.tasks.length} tasks did not land (${failed} failed, ${blocked} blocked, ${human} need a human${awaiting ? `, ${awaiting} awaiting approval` : ''})`;
       }
     } catch (err) {
       run.status = 'failed';
@@ -563,8 +570,10 @@ export class Conductor {
       run.endedAt = Date.now();
       run.active = [];
       this.cleanup();
+      run.conflictRate = round(conflictRate(this.store.ledgerRows().filter((r) => r.run === run.id)));
       this.emit('run.end', `Run ${run.status}. satisfaction ${run.satisfaction ?? 0}, cost $${run.costUsd.toFixed(2)}`, {
         satisfaction: run.satisfaction,
+        conflictRate: run.conflictRate,
         branch: run.integrationBranch,
       });
       this.save();
@@ -731,10 +740,22 @@ export class Conductor {
       const ready = run.tasks.filter(
         (t) => (t.status === 'pending' || t.status === 'repair') && !inflight.has(t.id) && t.deps.every((d) => this.task(d)?.status === 'merged'),
       );
-      for (const t of ready.slice(0, Math.max(0, cfg.concurrency - inflight.size))) {
+      // W6.1 single writer: a task with an overlapping footprint waits for the in-flight one to finish.
+      const running = run.tasks.filter((t) => inflight.has(t.id));
+      let slots = Math.max(0, cfg.concurrency - inflight.size);
+      for (const t of ready) {
+        if (slots <= 0) break;
+        if (cfg.throughput?.footprintScheduling && !canStart(t, running)) continue;
+        slots--;
+        running.push(t);
+        this.inflightIds.add(t.id);
         const p = this.attempt(t)
           .catch((err) => this.fail(t, `internal error: ${(err as Error).message}`))
-          .finally(() => inflight.delete(t.id));
+          .finally(() => {
+            inflight.delete(t.id);
+            this.inflightIds.delete(t.id);
+            this.pokeBatch();
+          });
         inflight.set(t.id, p);
       }
       if (inflight.size === 0) break;
@@ -765,6 +786,7 @@ export class Conductor {
 
     const learnings = (this.run.kind === 'eval' && !this.evalLearnings) || this.ablate.learnings ? {} : readAllLearnings(store);
     const others = this.run.tasks.filter((t) => t.id !== task.id).map((t) => `- ${t.id} ${t.title} [${t.status}]`);
+    const depLog = cfg.throughput?.footprintScheduling ? decisionLog(task.deps.map((d) => this.task(d)).filter((d): d is Task => d?.status === 'merged')) : '';
     const prompt = joinPrompt(
       workerPrompt({
         goal: this.run.goal,
@@ -784,7 +806,7 @@ export class Conductor {
         pack: this.taskPack(task),
         atlasQuery: this.atlasQuery(),
       }),
-    );
+    ) + (depLog ? `\n\n## Decisions from merged dependencies\n${depLog}` : '');
 
     if (!this.ablate.contrastive && contrastApplies(cfg, task)) return this.attemptContrast(task, wt, base, prompt);
 
@@ -833,7 +855,7 @@ export class Conductor {
 
     task.status = 'merging';
     this.save();
-    await this.enqueueMerge(task);
+    await this.land(task);
   }
 
   // Integrity monitor: analyze the worker's diff and persist the flags. When tests or other grading
@@ -1081,7 +1103,7 @@ export class Conductor {
     }
     task.status = 'merging';
     this.save();
-    await this.enqueueMerge(task);
+    await this.land(task);
   }
 
   private contrastJudgeError(task: Task, wtB: g.Worktree, error: string): void {
@@ -1276,6 +1298,114 @@ export class Conductor {
     return out;
   }
 
+  // Judged-pass task: risk-tier gate (W7.1), then the merge queue (per task, or batched W6.2).
+  private land(task: Task): Promise<void> {
+    const cfg = this.store.config();
+    this.mergeReadyAt.set(task.id, Date.now());
+    const tiers = cfg.oversight?.riskTiers;
+    if (tiers?.enabled && task.worktree) {
+      const base = g.mergeBase(task.worktree, 'HEAD', this.integration.branch);
+      const diff = g.diffSince(task.worktree, base, Infinity);
+      const diffLines = diff.split('\n').filter((l) => /^[+-]/.test(l) && !/^(\+\+\+|---)/.test(l)).length;
+      const risk = classifyRisk({ changedFiles: g.changedFiles(task.worktree, base), diffLines, deterministicGreen: task.verdict?.testsPassed === true }, tiers);
+      task.risk = risk;
+      if (risk.tier === 'high') {
+        task.status = 'awaiting_approval';
+        task.approval = { requestedAt: Date.now() };
+        this.emit('task.approval', `${task.id} is high risk and waits for \`orchestra approve ${this.run.id} ${task.id} --by <name>\`: ${risk.reasons.join('; ')}`, { risk }, task.id);
+        this.save();
+        return Promise.resolve();
+      }
+    }
+    return cfg.throughput?.batchMerge.enabled ? this.enqueueBatch(task) : this.enqueueMerge(task);
+  }
+
+  private enqueueBatch(task: Task): Promise<void> {
+    return new Promise<void>((resolve) => {
+      this.batchQueue.push({ task, resolve });
+      this.pokeBatch();
+    });
+  }
+
+  // Flush once the queue is full or every in-flight attempt is already waiting in it, so disjoint
+  // tasks that finish around the same time share one post-merge test run.
+  private pokeBatch(): void {
+    const max = this.store.config().throughput?.batchMerge.maxBatch ?? 4;
+    const q = this.batchQueue.length;
+    if (!q || (q < max && q < this.inflightIds.size)) return;
+    const items = this.batchQueue;
+    this.batchQueue = [];
+    const job = this.mergeChain.then(() => this.mergeBatches(items));
+    this.mergeChain = job.catch(() => undefined);
+  }
+
+  private async mergeBatches(items: { task: Task; resolve: () => void }[]): Promise<void> {
+    const max = this.store.config().throughput?.batchMerge.maxBatch ?? 4;
+    try {
+      for (const ids of planBatches(items.map((i) => i.task), max)) {
+        const batch = ids.map((id) => items.find((i) => i.task.id === id)!.task);
+        try {
+          await this.mergeBatch(batch);
+        } catch (err) {
+          for (const t of batch) if (t.status === 'merging') this.fail(t, `internal error: ${(err as Error).message}`);
+        }
+      }
+    } finally {
+      for (const i of items) i.resolve();
+    }
+  }
+
+  // Merge a disjoint batch, run the post-merge tests once, bisect on failure. Bad tasks are reset out
+  // and go to repair; good ones stay merged.
+  private async mergeBatch(batch: Task[]): Promise<void> {
+    const cfg = this.store.config();
+    const ip = this.integration.path;
+    const before = g.head(ip);
+    const footprints = new Map(batch.map((t) => [t.id, this.footprint(t)]));
+    const mergeAll = (tasks: Task[]): Task[] => {
+      g.resetTo(ip, before);
+      const failed: Task[] = [];
+      for (const t of tasks) if (!g.merge(ip, t.branch!, `Merge ${t.id}: ${t.title}`).ok) failed.push(t);
+      return failed;
+    };
+    const conflicted = mergeAll(batch);
+    for (const t of conflicted) {
+      this.ledgerOutcome(t, 'conflict');
+      g.resetTo(t.worktree!, before);
+      this.repairOrFail(t, ['Your previous change conflicted with work merged by other tasks. Re-implement the task on top of the latest code.']);
+    }
+    let landing = batch.filter((t) => !conflicted.includes(t));
+    if (landing.length && cfg.testCommand) {
+      const byId = new Map(landing.map((t) => [t.id, t]));
+      let tail = '';
+      const res = await bisectBatch(landing.map((t) => t.id), async (ids) => {
+        if (mergeAll(ids.map((id) => byId.get(id)!)).length) return false;
+        const r = await g.runTestsAsync(ip, cfg.testCommand!);
+        tail = r.tail;
+        return r.ok;
+      });
+      this.emit('log', `batch of ${landing.length} tested in ${res.testRuns} post-merge run(s); ${res.bad.length} bad`, { batch: landing.map((t) => t.id), bad: res.bad });
+      const bad = landing.filter((t) => res.bad.includes(t.id));
+      landing = landing.filter((t) => !res.bad.includes(t.id));
+      mergeAll(landing);
+      for (const t of bad) {
+        g.resetTo(t.worktree!, before);
+        this.repairOrFail(t, [`After merging with other tasks the test suite fails. Re-implement on the latest code. Output tail:\n${tail.slice(-1200)}`]);
+      }
+    }
+    for (const t of landing) this.markMerged(t, footprints.get(t.id));
+  }
+
+  private markMerged(task: Task, footprint?: { planned: string[]; changed: string[]; declared?: string[] }): void {
+    task.status = 'merged';
+    task.endedAt = Date.now();
+    task.mergeWaitMs = Date.now() - (this.mergeReadyAt.get(task.id) ?? Date.now());
+    this.markCriteriaPassing(task);
+    this.ledgerOutcome(task, 'merged', footprint);
+    this.emit('task.merged', `${task.id} merged (attempt ${task.attempts})`, { mergeWaitMs: task.mergeWaitMs }, task.id);
+    this.save();
+  }
+
   // Refinery: merges are serialized; post-merge tests guard the integration branch.
   private enqueueMerge(task: Task): Promise<void> {
     const job = this.mergeChain.then(() => this.mergeOne(task));
@@ -1302,12 +1432,7 @@ export class Conductor {
         return this.repairOrFail(task, [`After merging with other tasks the test suite fails. Re-implement on the latest code. Output tail:\n${t.tail.slice(-1200)}`]);
       }
     }
-    task.status = 'merged';
-    task.endedAt = Date.now();
-    this.markCriteriaPassing(task);
-    this.ledgerOutcome(task, 'merged', footprint);
-    this.emit('task.merged', `${task.id} merged (attempt ${task.attempts})`, undefined, task.id);
-    this.save();
+    this.markMerged(task, footprint);
   }
 
   // Passive: planned files are repo paths named in the task text, so the metric means the same with
@@ -1635,6 +1760,14 @@ export function normalizeTasks(raw: any[]): Task[] {
   };
   for (const t of tasks) if (!state.get(t.id)) visit(t);
   return tasks;
+}
+
+// Who asked for the run: ORCHESTRA_REQUESTER, else git user.name, else "unknown" (W7.1).
+function detectRequester(root: string): string {
+  const env = process.env.ORCHESTRA_REQUESTER?.trim();
+  if (env) return env;
+  const r = spawnSync('git', ['config', 'user.name'], { cwd: root, encoding: 'utf8' });
+  return (r.status === 0 && r.stdout.trim()) || 'unknown';
 }
 
 function round(n: number, dp = 3): number {

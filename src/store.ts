@@ -3,6 +3,7 @@
 
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { DEFAULT_RISK_TIERS } from './oversight.ts';
 import type { LedgerRow, OrchestraEvent, ProjectConfig, Run } from './types.ts';
 
 export const DEFAULT_PROJECT_CONFIG: ProjectConfig = {
@@ -23,6 +24,8 @@ export const DEFAULT_PROJECT_CONFIG: ProjectConfig = {
     oracles: { enabled: false, model: null, propertyRuns: 50, seed: 1, differential: true, excludeWorkerTests: true },
     mutation: { enabled: false, floor: 0.6, maxMutants: 20, failBelowFloor: false, mutantTimeoutMs: 60000 },
   },
+  throughput: { footprintScheduling: false, batchMerge: { enabled: false, maxBatch: 4 } },
+  oversight: { riskTiers: DEFAULT_RISK_TIERS },
   fastPath: { enabled: false, maxGoalChars: 400 },
   context: { atlas: { enabled: false, mapTokens: 1024, packs: false, packTokens: 1500, query: false } },
   learnings: { expiryDays: 0, graph: false },
@@ -103,7 +106,7 @@ export class Store {
 
   config(): ProjectConfig {
     const c = this.readJson<Partial<ProjectConfig>>('config.json', {});
-    return { ...DEFAULT_PROJECT_CONFIG, ...c, judgeTiers: { ...DEFAULT_PROJECT_CONFIG.judgeTiers, ...(c.judgeTiers ?? {}) }, preJudge: { ...DEFAULT_PROJECT_CONFIG.preJudge, ...(c.preJudge ?? {}) }, contrastive: { ...DEFAULT_PROJECT_CONFIG.contrastive, ...(c.contrastive ?? {}) }, fastPath: { ...DEFAULT_PROJECT_CONFIG.fastPath, ...(c.fastPath ?? {}) }, verification: { contracts: { ...DEFAULT_PROJECT_CONFIG.verification.contracts, ...(c.verification?.contracts ?? {}) }, panel: { ...DEFAULT_PROJECT_CONFIG.verification.panel, ...(c.verification?.panel ?? {}) }, agenticJudge: { ...DEFAULT_PROJECT_CONFIG.verification.agenticJudge, ...(c.verification?.agenticJudge ?? {}) }, oracles: { ...DEFAULT_PROJECT_CONFIG.verification.oracles, ...(c.verification?.oracles ?? {}) }, mutation: { ...DEFAULT_PROJECT_CONFIG.verification.mutation, ...(c.verification?.mutation ?? {}) } }, context: { ...DEFAULT_PROJECT_CONFIG.context, ...(c.context ?? {}), atlas: { ...DEFAULT_PROJECT_CONFIG.context.atlas, ...(c.context?.atlas ?? {}) } }, learnings: { ...DEFAULT_PROJECT_CONFIG.learnings!, ...(c.learnings ?? {}) }, evolve: { ...DEFAULT_PROJECT_CONFIG.evolve, ...(c.evolve ?? {}), sequential: { ...DEFAULT_PROJECT_CONFIG.evolve.sequential!, ...(c.evolve?.sequential ?? {}) }, cost: { ...DEFAULT_PROJECT_CONFIG.evolve.cost!, ...(c.evolve?.cost ?? {}) }, cascade: { ...DEFAULT_PROJECT_CONFIG.evolve.cascade!, ...(c.evolve?.cascade ?? {}) }, splits: { ...DEFAULT_PROJECT_CONFIG.evolve.splits!, ...(c.evolve?.splits ?? {}) }, pareto: { ...DEFAULT_PROJECT_CONFIG.evolve.pareto!, ...(c.evolve?.pareto ?? {}) }, regression: { ...DEFAULT_PROJECT_CONFIG.evolve.regression!, ...(c.evolve?.regression ?? {}) } } };
+    return { ...DEFAULT_PROJECT_CONFIG, ...c, judgeTiers: { ...DEFAULT_PROJECT_CONFIG.judgeTiers, ...(c.judgeTiers ?? {}) }, preJudge: { ...DEFAULT_PROJECT_CONFIG.preJudge, ...(c.preJudge ?? {}) }, contrastive: { ...DEFAULT_PROJECT_CONFIG.contrastive, ...(c.contrastive ?? {}) }, fastPath: { ...DEFAULT_PROJECT_CONFIG.fastPath, ...(c.fastPath ?? {}) }, throughput: { ...DEFAULT_PROJECT_CONFIG.throughput!, ...(c.throughput ?? {}), batchMerge: { ...DEFAULT_PROJECT_CONFIG.throughput!.batchMerge, ...(c.throughput?.batchMerge ?? {}) } }, oversight: { ...DEFAULT_PROJECT_CONFIG.oversight!, ...(c.oversight ?? {}), riskTiers: { ...DEFAULT_RISK_TIERS, ...(c.oversight?.riskTiers ?? {}) } }, verification: { contracts: { ...DEFAULT_PROJECT_CONFIG.verification.contracts, ...(c.verification?.contracts ?? {}) }, panel: { ...DEFAULT_PROJECT_CONFIG.verification.panel, ...(c.verification?.panel ?? {}) }, agenticJudge: { ...DEFAULT_PROJECT_CONFIG.verification.agenticJudge, ...(c.verification?.agenticJudge ?? {}) }, oracles: { ...DEFAULT_PROJECT_CONFIG.verification.oracles, ...(c.verification?.oracles ?? {}) }, mutation: { ...DEFAULT_PROJECT_CONFIG.verification.mutation, ...(c.verification?.mutation ?? {}) } }, context: { ...DEFAULT_PROJECT_CONFIG.context, ...(c.context ?? {}), atlas: { ...DEFAULT_PROJECT_CONFIG.context.atlas, ...(c.context?.atlas ?? {}) } }, learnings: { ...DEFAULT_PROJECT_CONFIG.learnings!, ...(c.learnings ?? {}) }, evolve: { ...DEFAULT_PROJECT_CONFIG.evolve, ...(c.evolve ?? {}), sequential: { ...DEFAULT_PROJECT_CONFIG.evolve.sequential!, ...(c.evolve?.sequential ?? {}) }, cost: { ...DEFAULT_PROJECT_CONFIG.evolve.cost!, ...(c.evolve?.cost ?? {}) }, cascade: { ...DEFAULT_PROJECT_CONFIG.evolve.cascade!, ...(c.evolve?.cascade ?? {}) }, splits: { ...DEFAULT_PROJECT_CONFIG.evolve.splits!, ...(c.evolve?.splits ?? {}) }, pareto: { ...DEFAULT_PROJECT_CONFIG.evolve.pareto!, ...(c.evolve?.pareto ?? {}) }, regression: { ...DEFAULT_PROJECT_CONFIG.evolve.regression!, ...(c.evolve?.regression ?? {}) } } };
   }
 
   // ---- runs ----
