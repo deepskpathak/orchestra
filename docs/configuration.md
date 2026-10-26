@@ -42,7 +42,7 @@ Optional, absent by default. Read only from the repo's own `.orchestra/config.js
 | Field | Type | Default | Meaning |
 |---|---|---|---|
 | `sandbox.allowedHosts` | string[] | `[]` | Extra hosts (for example package registries) workers may reach. The model API host is always allowed. |
-| `sandbox.allowLocalBinding` | boolean | `false` | Lets sandboxed workers bind 127.0.0.1, which tests that start a local server (this repo's dashboard tests) need. Risk: on macOS it also lets sandboxed commands connect to any localhost port (local databases, dev servers) without going through the proxy, per the sandbox-runtime README. Enable only for repos you trust with that. |
+| `sandbox.allowLocalBinding` | boolean | `false` | Lets sandboxed workers bind 127.0.0.1, which tests that start a local server (this repo's dashboard tests) need. Risk: on macOS it also lets sandboxed commands connect to any localhost port (local databases, dev servers) without going through the proxy, per the sandbox-runtime README. Enable only for repos you trust with that. Applies to the `srt` and `claude` backends; `--sandbox docker` ignores it. Pre-flight logs a warning whenever it is set (widened localhost, or ignored on docker). |
 
 ### `judgeTiers`
 

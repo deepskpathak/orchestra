@@ -51,6 +51,35 @@ test('both probes blocked: ok', () => {
   }
 });
 
+test('allowLocalBinding: srt and claude warn that localhost is widened; docker warns that it is ignored', () => {
+  const local = buildSandboxPolicy({ worktree: '/wt', tmpDir: '/tmp', home: '/home/u', hiddenScenarioDir: '/r/.orchestra/hidden', gitCommonDir: '/r/.git', allowLocalBinding: true });
+  for (const backend of ['srt', 'claude'] as const) {
+    const r = preflightSandbox(local, backend, fake(BLOCKED, BLOCKED), opts);
+    assert.equal(r.ok, true);
+    assert.equal(r.warnings.length, 1);
+    assert.match(r.warnings[0], /allowLocalBinding is on.*macOS.*any localhost port.*bypassing the proxy/);
+  }
+  const d = dockerEnv();
+  try {
+    const pol = { ...d.pol, network: { ...d.pol.network, allowLocalBinding: true } };
+    const r = preflightSandbox(pol, 'docker', fake(BLOCKED, BLOCKED), d.o);
+    assert.equal(r.ok, true);
+    assert.ok(r.warnings.some((w) => /allowLocalBinding is ignored with --sandbox docker/.test(w)));
+    assert.ok(!r.warnings.some((w) => /widened/.test(w)));
+  } finally {
+    d.done();
+  }
+  // Off by default: no warning (the "both probes blocked" test pins the exact count for each backend).
+  assert.ok(!preflightSandbox(policy, 'srt', fake(BLOCKED, BLOCKED), opts).warnings.some((w) => /allowLocalBinding/.test(w)));
+});
+
+test('sandbox on with allowLocalBinding: the widened-localhost warning reaches the run log', async () => {
+  const store = tempRepo();
+  const run = await runGoal({ store, runner: fakeRunner(), goal: 'g', sandbox: { backend: 'srt', allowLocalBinding: true }, preflightExec: fake(BLOCKED, BLOCKED) });
+  assert.equal(run.status, 'done');
+  assert.ok(store.events(run.id).some((e) => /Sandbox pre-flight warning: sandbox\.allowLocalBinding is on/.test(e.msg)));
+});
+
 test('network probe succeeds: not ok, names the probe', () => {
   const r = preflightSandbox(policy, 'srt', fake(OPEN, BLOCKED), opts);
   assert.equal(r.ok, false);

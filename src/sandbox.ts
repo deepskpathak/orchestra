@@ -311,6 +311,16 @@ export function preflightSandbox(policy: SandboxPolicy, backend: 'srt' | 'claude
       else if (!out.includes(BLOCKED)) failures.push(`${name} probe inconclusive: wrapper exited ${r.status} with no result, treating the sandbox as not working`);
     };
 
+    // allowLocalBinding is opt-in and widens the sandbox, so the run log says so every time. The docker
+    // backend never reads it (container networking is set by --sandbox-network), so a user who set it
+    // there would otherwise assume local binding works or is confined when neither is guaranteed.
+    if (policy.network.allowLocalBinding) {
+      warnings.push(
+        backend === 'docker'
+          ? 'sandbox.allowLocalBinding is ignored with --sandbox docker: container networking comes from --sandbox-network'
+          : 'sandbox.allowLocalBinding is on: localhost access is widened, and on macOS sandboxed commands can connect to any localhost port (local databases, dev servers), bypassing the proxy',
+      );
+    }
     const dockerNet = backend === 'docker' ? (opts.docker?.network ?? DEFAULT_NETWORK) : null;
     if (dockerNet === 'none') {
       warnings.push(`docker network is none: the worker cannot reach ${MODEL_API_HOST}, so a claude worker will fail unless the image provides its own route. Set --sandbox-network to a network that reaches the model API (docs/isolation.md)`);
