@@ -266,7 +266,7 @@ async function cmdRun(args: string[]): Promise<void> {
     runner: r,
     goal,
     onUpdate: (u) => (latest = u),
-    sandbox: iso.backend ? { backend: iso.backend, allowedHosts: store.config().sandbox?.allowedHosts, image: iso.image, gvisor: iso.gvisor, network: iso.network } : undefined,
+    sandbox: iso.backend ? { backend: iso.backend, allowedHosts: store.config().sandbox?.allowedHosts, allowLocalBinding: store.config().sandbox?.allowLocalBinding, image: iso.image, gvisor: iso.gvisor, network: iso.network } : undefined,
     unattended: iso.unattended,
   });
   clearInterval(tick);

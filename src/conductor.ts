@@ -52,7 +52,7 @@ export interface ConductorOptions {
   evalLearnings?: boolean;
   onUpdate?: (run: Run) => void;
   // Opt-in OS sandbox for write-capable roles (worker). Unset keeps spawning exactly as before.
-  sandbox?: { backend: 'srt' | 'claude' | 'docker'; allowedHosts?: string[]; image?: string; gvisor?: boolean; network?: string };
+  sandbox?: { backend: 'srt' | 'claude' | 'docker'; allowedHosts?: string[]; allowLocalBinding?: boolean; image?: string; gvisor?: boolean; network?: string };
   // Unattended: strip push and publish credentials from every agent env, even without a sandbox object.
   unattended?: boolean;
   // Injectable exec for the sandbox pre-flight probes (tests). Defaults to spawnSync.
@@ -1734,6 +1734,7 @@ export class Conductor {
       hiddenScenarioDir: this.store.path('holdout'),
       gitCommonDir: this.gitCommonDir(),
       allowedHosts: this.sandboxOpt?.allowedHosts,
+      allowLocalBinding: this.sandboxOpt?.allowLocalBinding,
     });
   }
 

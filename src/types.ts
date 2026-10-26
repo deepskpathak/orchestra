@@ -221,7 +221,7 @@ export interface VerificationConfig {
 
 export interface ProjectConfig {
   // Opt-in OS sandbox settings, read from the repo's own .orchestra/config.json only.
-  sandbox?: { allowedHosts?: string[] };
+  sandbox?: { allowedHosts?: string[]; allowLocalBinding?: boolean };
   concurrency: number;
   testCommand: string | null;
   allowedTools: string[];
