@@ -6,8 +6,8 @@ import { makeClaudeRunner, type AgentRequest, type SpawnFn } from '../src/agent.
 
 const req: AgentRequest = { role: 'worker', prompt: 'p', system: 's', cwd: process.cwd(), model: 'm', budgetUsd: 1 };
 
-// Fake spawn: writes the given stream-json lines, then closes after delayMs.
-const spawnEmitting = (lines: object[], delayMs = 0): SpawnFn =>
+// Fake spawn: writes the given stream-json lines, then closes after delayMs with the given exit.
+const spawnEmitting = (lines: object[], delayMs = 0, exit: { code: number | null; signal: string | null } = { code: 0, signal: null }): SpawnFn =>
   ((_c: string, _a: string[], _o: any) => {
     const child: any = new EventEmitter();
     child.stdout = new PassThrough();
@@ -15,7 +15,21 @@ const spawnEmitting = (lines: object[], delayMs = 0): SpawnFn =>
     child.kill = () => true;
     setImmediate(() => {
       for (const l of lines) child.stdout.write(JSON.stringify(l) + '\n');
-      setTimeout(() => child.emit('close', 0), delayMs);
+      setTimeout(() => child.emit('close', exit.code, exit.signal), delayMs);
+    });
+    return child;
+  }) as unknown as SpawnFn;
+
+// Fake spawn for a session that emits its lines, then hangs until killed (as a resumed session does
+// while it waits on a background task). kill() closes it with that signal, like a real child.
+const spawnHanging = (lines: object[]): SpawnFn =>
+  ((_c: string, _a: string[], _o: any) => {
+    const child: any = new EventEmitter();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    child.kill = (sig: string) => (setImmediate(() => child.emit('close', null, sig)), true);
+    setImmediate(() => {
+      for (const l of lines) child.stdout.write(JSON.stringify(l) + '\n');
     });
     return child;
   }) as unknown as SpawnFn;
@@ -102,4 +116,43 @@ test('structured: an earlier segment structured_output survives a last segment w
     ]),
   )(req);
   assert.deepEqual(res.structured, flag);
+});
+
+const ok1 = { type: 'result', subtype: 'success', result: 'first', num_turns: 11, total_cost_usd: 0.2656, usage: usage(10, 20, 30, 40) };
+
+test('exit: timeout SIGTERM after a success result reports failure and keeps the accounting', async () => {
+  const res = await makeClaudeRunner(spawnHanging([ok1]))({ ...req, timeoutMs: 20 });
+  assert.equal(res.ok, false);
+  assert.match(res.error ?? '', /killed by SIGTERM after the 20ms timeout/);
+  assert.equal(res.text, 'first');
+  assert.equal(res.costUsd, 0.2656);
+  assert.equal(res.turns, 11);
+  assert.deepEqual(res.usage, { inputTokens: 10, outputTokens: 20, cacheReadTokens: 30, cacheWriteTokens: 40 });
+});
+
+test('exit: a signal not from our timeout is named without the timeout note', async () => {
+  const res = await makeClaudeRunner(spawnEmitting([ok1], 0, { code: null, signal: 'SIGKILL' }))(req);
+  assert.equal(res.ok, false);
+  assert.equal(res.error, 'claude killed by SIGKILL after a result');
+});
+
+test('exit: non-zero exit after a success result reports failure naming the code', async () => {
+  const res = await makeClaudeRunner(spawnEmitting([ok1], 0, { code: 1, signal: null }))(req);
+  assert.equal(res.ok, false);
+  assert.equal(res.error, 'claude exited 1 after a result');
+  assert.equal(res.costUsd, 0.2656);
+});
+
+test('exit: an error result keeps its own error on a non-zero exit', async () => {
+  const res = await makeClaudeRunner(
+    spawnEmitting([{ type: 'result', subtype: 'error_max_turns', is_error: true, result: 'cap', num_turns: 2 }], 0, { code: 1, signal: null }),
+  )(req);
+  assert.equal(res.ok, false);
+  assert.equal(res.error, 'cap');
+});
+
+test('exit: a single success result with exit 0 stays ok', async () => {
+  const res = await makeClaudeRunner(spawnEmitting([ok1], 0, { code: 0, signal: null }))(req);
+  assert.equal(res.ok, true);
+  assert.equal(res.error, undefined);
 });

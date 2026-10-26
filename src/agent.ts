@@ -181,8 +181,10 @@ export const makeClaudeRunner = (spawnFn: SpawnFn = spawn): Runner => (req) =>
     let result: AgentResult | null = null;
     const toolCounts: Record<string, number> = {};
 
+    let timedOut = false;
     const timer = req.timeoutMs
       ? setTimeout(() => {
+          timedOut = true;
           child.kill('SIGTERM');
         }, req.timeoutMs)
       : null;
@@ -252,10 +254,21 @@ export const makeClaudeRunner = (spawnFn: SpawnFn = spawn): Runner => (req) =>
       if (timer) clearTimeout(timer);
       resolve({ ok: false, text: '', costUsd: 0, turns: 0, durationMs: Date.now() - started, error: `spawn ${command} failed: ${err.message}` });
     });
-    child.on('close', (code) => {
+    child.on('close', (code: number | null, signal: NodeJS.Signals | null) => {
       if (timer) clearTimeout(timer);
       if (buf) handle(buf);
-      if (result) return resolve({ ...result, durationMs: Date.now() - started });
+      if (result) {
+        const final = { ...result, durationMs: Date.now() - started };
+        // A session can emit a success result and then resume (background task notification). If it is
+        // then killed (our timeout SIGTERM) or exits non-zero, the earlier success does not describe how
+        // the session ended, so report it as failed. Text, cost, turns and usage are kept for the ledger.
+        // Exit 0 keeps the result as reported, and an error result keeps its own, more specific error.
+        if (final.ok && (signal || (code !== null && code !== 0))) {
+          const how = signal ? `killed by ${signal}${timedOut ? ` after the ${req.timeoutMs}ms timeout` : ''}` : `exited ${code}`;
+          return resolve({ ...final, ok: false, error: `claude ${how} after a result` });
+        }
+        return resolve(final);
+      }
       resolve({
         ok: false,
         text: lastText,
