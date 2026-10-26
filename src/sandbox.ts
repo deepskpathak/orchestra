@@ -78,16 +78,16 @@ export function buildSandboxPolicy(i: PolicyInput): SandboxPolicy {
   };
 }
 
-// Claude Code settings. Keys from the Claude Code sandbox docs (ref [69]): sandbox.enabled,
-// sandbox.allowUnsandboxedCommands, sandbox.network.allowedDomains, permissions.deny with
-// Read(...)/Edit(...) rules. Inferred (not confirmed in docs): sandbox.failIfUnavailable as the
-// fail-closed switch, and sandbox.filesystem.{allowWrite,denyWrite,denyRead}. Unknown keys are
-// ignored by older versions, so the permissions.deny rules provide the enforced fallback.
-// Claude Code permission rules read a single leading "/" as relative to the settings file; an
-// absolute filesystem path needs "//". A directory needs "/**" to cover its contents. Unverified
-// against a live Claude Code (as recalled from its permissions docs), so absolute entries emit both
-// the bare path (a file, or the directory itself) and the "/**" form. Globs and relative entries
-// (for example "**/.env") pass through unchanged.
+// Claude Code settings. Keys checked against the Claude Code sandboxing and settings docs
+// (2026-10-26): sandbox.enabled, sandbox.failIfUnavailable (refuse to start when the sandbox
+// cannot initialise), sandbox.allowUnsandboxedCommands, sandbox.network.allowedDomains and
+// sandbox.filesystem.{allowWrite,denyWrite,denyRead}. Sandbox filesystem paths use plain
+// conventions ("/tmp/x" is absolute). The permissions.deny Read(...)/Edit(...) rules are a second
+// layer for the built-in file tools, which the OS sandbox does not cover.
+// Permission rules use a different syntax (permissions docs): a single leading "/" is relative to
+// the project root and an absolute path needs "//". A directory needs "/**" to cover its contents,
+// so absolute entries emit both the bare path (a file, or the directory itself) and the "/**"
+// form. Globs and relative entries (for example "**/.env") pass through unchanged.
 export function permissionRules(tool: 'Read' | 'Edit', paths: string[]): string[] {
   return paths.flatMap((p) => {
     if (!p.startsWith('/')) return [`${tool}(${p})`];
@@ -101,7 +101,7 @@ export function claudeSandboxSettings(policy: SandboxPolicy): Record<string, unk
     sandbox: {
       enabled: true,
       allowUnsandboxedCommands: false, // no escape hatch to run outside the sandbox
-      failIfUnavailable: true, // inferred key: refuse to run rather than fall back to unsandboxed
+      failIfUnavailable: true, // refuse to run rather than fall back to unsandboxed
       autoAllowBashIfSandboxed: true,
       network: { allowedDomains: [...policy.network.allowedHosts] },
       filesystem: {
@@ -117,10 +117,11 @@ export function claudeSandboxSettings(policy: SandboxPolicy): Record<string, unk
 }
 
 // srt (sandbox-runtime) settings file, a different shape from Claude Code's: top-level `network`
-// and `filesystem` keys, paths as plain strings (no Read()/Edit() rule syntax). As recalled from the
-// sandbox-runtime README and not verified against an installed srt: network.allowedDomains and
-// filesystem.{denyRead,allowWrite,denyWrite}. Glob entries (**/.env) may be ignored on some
-// platforms; the guard hook and the pre-flight read probe are the backstop for that.
+// and `filesystem` keys, paths as plain strings (no Read()/Edit() rule syntax). Checked against the
+// @anthropic-ai/sandbox-runtime 0.0.81 README (2026-10-26): network.{allowedDomains,deniedDomains}
+// and filesystem.{denyRead,allowWrite,denyWrite}. allowWrite/denyWrite take literal paths. denyRead
+// globs (**/.env) are expanded to the files that exist when the command starts, so a file created
+// later is not covered; the guard hook and the pre-flight read probe are the backstop for that.
 export function srtSandboxSettings(policy: SandboxPolicy): Record<string, unknown> {
   return {
     network: { allowedDomains: [...policy.network.allowedHosts], deniedDomains: [] },
@@ -132,10 +133,12 @@ export function srtSandboxSettings(policy: SandboxPolicy): Record<string, unknow
   };
 }
 
-// argv for spawning through srt: `srt --settings <file> <command> [args...]` (inferred from the
-// sandbox-runtime README; the settings file must be the srt shape from srtSandboxSettings).
+// argv for spawning through srt: `srt --settings <file> -- <command> [args...]`. srt parses its own
+// options anywhere in argv, so without "--" it takes the wrapped claude's `--settings <json>` as its
+// own settings path (the last one wins) and refuses to start. The settings file must be the srt
+// shape from srtSandboxSettings.
 export function srtArgs(_policy: SandboxPolicy, settingsPath: string, command: string, args: string[]): string[] {
-  return ['srt', '--settings', settingsPath, command, ...args];
+  return ['srt', '--settings', settingsPath, '--', command, ...args];
 }
 
 // Push and publish credentials stay with the orchestrator. Model credentials stay with the worker.
