@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import type { AgentRequest, Runner } from '../src/agent.ts';
 import { runGoal } from '../src/conductor.ts';
@@ -10,6 +11,20 @@ import { tempRepo } from './helpers.ts';
 
 const policy = buildSandboxPolicy({ worktree: '/wt', tmpDir: '/tmp', home: '/home/u', hiddenScenarioDir: '/r/.orchestra/hidden', gitCommonDir: '/r/.git' });
 const opts = { cwd: '/tmp' };
+
+// Docker pre-flight writes its read canary under a host base dir (/var/tmp or $HOME by default), which
+// is not writable inside a sandbox. Tests inject a base from a dedicated temp root instead. The policy's
+// mounted tmp dir lives in the same root but is a sibling, so the base is outside every mount even on
+// Linux where tmpdir() itself is /tmp.
+function dockerEnv() {
+  const root = mkdtempSync(join(tmpdir(), 'orchestra-preflight-test-'));
+  const mountedTmp = join(root, 'mounted-tmp');
+  const base = join(root, 'canary-base');
+  mkdirSync(mountedTmp);
+  mkdirSync(base);
+  const pol = buildSandboxPolicy({ worktree: '/wt', tmpDir: mountedTmp, home: '/home/u', hiddenScenarioDir: '/r/.orchestra/hidden', gitCommonDir: '/r/.git' });
+  return { root, mountedTmp, base, pol, o: { cwd: '/wt', canaryBases: [base] }, done: () => rmSync(root, { recursive: true, force: true }) };
+}
 
 const result = (stdout: string, extra: object = {}) => ({ status: 0, stdout, stderr: '', ...extra });
 const BLOCKED = 'ORCHESTRA_PROBE_BLOCKED\n';
@@ -23,11 +38,16 @@ const fake = (net: string, read: string): ProbeExec => (c, args) => {
 };
 
 test('both probes blocked: ok', () => {
-  for (const backend of ['srt', 'claude', 'docker'] as const) {
-    const r = preflightSandbox(policy, backend, fake(BLOCKED, BLOCKED), opts);
-    assert.deepEqual([r.ok, r.failures], [true, []]);
-    // docker defaults to network none, which always warns about the model API
-    assert.equal(r.warnings.length, backend === 'docker' ? 1 : 0);
+  const d = dockerEnv();
+  try {
+    for (const backend of ['srt', 'claude', 'docker'] as const) {
+      const r = backend === 'docker' ? preflightSandbox(d.pol, backend, fake(BLOCKED, BLOCKED), d.o) : preflightSandbox(policy, backend, fake(BLOCKED, BLOCKED), opts);
+      assert.deepEqual([r.ok, r.failures], [true, []]);
+      // docker defaults to network none, which always warns about the model API
+      assert.equal(r.warnings.length, backend === 'docker' ? 1 : 0);
+    }
+  } finally {
+    d.done();
   }
 });
 
@@ -92,35 +112,65 @@ test('srt probes get a srt-shaped settings file and claude probes the Claude sha
 });
 
 test('docker network none warns that the model API is unreachable; a chosen network skips the probe', () => {
+  const d = dockerEnv();
+  try {
   const calls: string[] = [];
   const exec: ProbeExec = (c, a) => (calls.push(c + ' ' + a.join(' ')), result(c === 'node' ? OPEN : BLOCKED));
-  const none = preflightSandbox(policy, 'docker', exec, opts);
+  const none = preflightSandbox(d.pol, 'docker', exec, d.o);
   assert.equal(none.ok, true);
   assert.ok(none.warnings.some((w) => /network is none.*api\.anthropic\.com/.test(w)));
   calls.length = 0;
-  const custom = preflightSandbox(policy, 'docker', exec, { ...opts, docker: { network: 'orch-egress' } });
+  const custom = preflightSandbox(d.pol, 'docker', exec, { ...d.o, docker: { network: 'orch-egress' } });
   assert.equal(custom.ok, true);
   assert.ok(custom.warnings.some((w) => /orch-egress.*allow-list/.test(w)));
   assert.ok(!calls.some((c) => c.includes('fetch(')), 'no network probe on a user-chosen network');
   assert.ok(calls.every((c) => !c.startsWith('node ')), 'no control either');
   assert.ok(calls.some((c) => c.includes('--network=orch-egress')));
+  } finally {
+    d.done();
+  }
 });
 
-test('docker read canary lives outside every mounted path; srt canary stays in the denied tmp dir', () => {
-  const canaryOf = (backend: 'srt' | 'docker') => {
-    let path = '';
-    preflightSandbox(policy, backend, (_c, args) => {
-      const m = args.join(' ').match(/readFileSync\("([^"]+)"\)/);
-      if (m) path = m[1];
-      return result(BLOCKED);
-    }, opts);
-    return path;
-  };
-  const d = canaryOf('docker');
-  assert.ok(d.endsWith('canary.txt'));
-  // opts.cwd and the policy tmp dir are mounted; the canary must not be under either.
-  for (const mounted of ['/tmp', '/wt', '/r/.git']) assert.ok(!d.startsWith(mounted + '/'), `${d} under ${mounted}`);
-  assert.match(canaryOf('srt'), /orchestra-preflight-/);
+test('docker read canary lives in the injected base and outside every mounted path; srt canary stays in the denied tmp dir', () => {
+  const d = dockerEnv();
+  try {
+    let written = false;
+    const canaryOf = (backend: 'srt' | 'docker') => {
+      let path = '';
+      const [pol, o] = backend === 'docker' ? [d.pol, d.o] : [policy, opts];
+      preflightSandbox(pol, backend, (_c, args) => {
+        const m = args.join(' ').match(/readFileSync\("([^"]+)"\)/);
+        if (m) path = m[1];
+        if (m && backend === 'docker') written = existsSync(m[1]); // preflight removes it afterwards
+        return result(BLOCKED);
+      }, o);
+      return path;
+    };
+    const c = canaryOf('docker');
+    assert.ok(c.endsWith('canary.txt'));
+    assert.ok(c.startsWith(d.base + '/'), `${c} not under injected base ${d.base}`);
+    assert.ok(written, 'canary was written while the probe ran');
+    // opts.cwd, the policy tmp dir and the git common dir are mounted; the canary must not be under any.
+    for (const mounted of [d.mountedTmp, '/wt', '/r/.git']) assert.ok(!c.startsWith(mounted + '/'), `${c} under ${mounted}`);
+    assert.match(canaryOf('srt'), /orchestra-preflight-/);
+  } finally {
+    d.done();
+  }
+});
+
+test('docker canary candidates: an empty list takes the no-usable-canary path; a covered base is skipped', () => {
+  const d = dockerEnv();
+  try {
+    for (const bases of [[], [d.mountedTmp]]) {
+      const calls: string[] = [];
+      const r = preflightSandbox(d.pol, 'docker', (c, args) => (calls.push(args.join(' ')), result(c === 'node' ? OPEN : BLOCKED)), { ...d.o, canaryBases: bases });
+      assert.equal(r.ok, true);
+      assert.equal(calls.length, 2, 'control + docker network probe, no read probe');
+      assert.ok(r.warnings.some((w) => /read probe skipped/.test(w)));
+    }
+  } finally {
+    d.done();
+  }
 });
 
 test('docker read probe is skipped with a warning when no unmounted dir is usable', () => {
