@@ -75,16 +75,11 @@ test('srtSandboxSettings is the srt shape, not the Claude shape', () => {
   assert.deepEqual(JSON.parse(JSON.stringify(s)), s);
 });
 
-test('srtArgs builds the argv', () => {
-  assert.deepEqual(srtArgs(policy(), '/w/s.json', 'claude', ['-p', 'hi']), ['srt', '--settings', '/w/s.json', '--', 'claude', '-p', 'hi']);
-});
-
-test('srtArgs ends srt options before the wrapped command, so its own --settings is not taken by srt', () => {
-  const argv = srtArgs(policy(), '/w/s.json', 'claude', ['-p', '--settings', '{"hooks":{}}', 'go']);
-  const sep = argv.indexOf('--');
-  assert.ok(sep > 0, 'has a -- separator');
-  assert.deepEqual(argv.slice(0, sep), ['srt', '--settings', '/w/s.json'], 'only srt options before --');
-  assert.deepEqual(argv.slice(sep + 1), ['claude', '-p', '--settings', '{"hooks":{}}', 'go']);
+// The inner --settings is the case that broke: without "--", srt took it as its own settings path.
+test('srtArgs builds the argv with srt options ended before the wrapped command', () => {
+  assert.deepEqual(srtArgs(policy(), '/w/s.json', 'claude', ['-p', '--settings', '{"hooks":{}}', 'go']), [
+    'srt', '--settings', '/w/s.json', '--', 'claude', '-p', '--settings', '{"hooks":{}}', 'go',
+  ]);
 });
 
 test('scrubWorkerEnv drops push/publish creds, keeps model creds, does not mutate', () => {
