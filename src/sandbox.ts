@@ -122,8 +122,10 @@ export function claudeSandboxSettings(policy: SandboxPolicy): Record<string, unk
 // and `filesystem` keys, paths as plain strings (no Read()/Edit() rule syntax). Checked against the
 // @anthropic-ai/sandbox-runtime 0.0.81 README (2026-10-26): network.{allowedDomains,deniedDomains}
 // and filesystem.{denyRead,allowWrite,denyWrite}. allowWrite/denyWrite take literal paths. denyRead
-// globs (**/.env) are expanded to the files that exist when the command starts, so a file created
-// later is not covered; the guard hook and the pre-flight read probe are the backstop for that.
+// globs (**/.env) differ by platform: macOS matches them as patterns, while Linux (bwrap) expands
+// them to the files that exist when the command starts, so a .env created later in the run stays
+// readable there. The guard hook covers the built-in file tools, not a shell `cat`, so on Linux
+// that gap is open for files created mid-run.
 export function srtSandboxSettings(policy: SandboxPolicy): Record<string, unknown> {
   return {
     network: { allowedDomains: [...policy.network.allowedHosts], deniedDomains: [] },
