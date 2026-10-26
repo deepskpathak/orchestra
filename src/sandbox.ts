@@ -44,7 +44,7 @@ export const MODEL_API_HOST = 'api.anthropic.com';
 export interface SandboxPolicy {
   write: { allow: string[]; deny: string[] };
   read: { deny: string[] };
-  network: { allowedHosts: string[] };
+  network: { allowedHosts: string[]; allowLocalBinding: boolean };
   gitCommonDir: string; // shared by every worktree; the docker backend mounts it and workers commit into it
 }
 
@@ -55,6 +55,9 @@ export interface PolicyInput {
   hiddenScenarioDir: string; // the judge-only scenario directory under .orchestra, supplied by the caller
   gitCommonDir: string;
   allowedHosts?: string[];
+  // Opt-in. Tests that bind 127.0.0.1 fail inside the sandbox without it. Risk: on macOS it also lets
+  // sandboxed commands connect to any localhost port (local databases, dev servers) without the proxy.
+  allowLocalBinding?: boolean;
 }
 
 // Credential locations and secret files a worker never needs. ".env*" is a glob, matched anywhere.
@@ -73,7 +76,7 @@ export function buildSandboxPolicy(i: PolicyInput): SandboxPolicy {
       deny: [join(i.gitCommonDir, 'hooks'), join(i.gitCommonDir, 'config')],
     },
     read: { deny: [...HOME_SECRETS.map((p) => join(i.home, p)), ...ENV_GLOBS, i.hiddenScenarioDir] },
-    network: { allowedHosts: [...new Set(hosts)] },
+    network: { allowedHosts: [...new Set(hosts)], allowLocalBinding: i.allowLocalBinding === true },
     gitCommonDir: i.gitCommonDir,
   };
 }
@@ -105,7 +108,8 @@ export function claudeSandboxSettings(policy: SandboxPolicy): Record<string, unk
       allowUnsandboxedCommands: false, // no escape hatch to run outside the sandbox
       failIfUnavailable: true, // refuse to run rather than fall back to unsandboxed
       autoAllowBashIfSandboxed: true,
-      network: { allowedDomains: [...policy.network.allowedHosts] },
+      // allowLocalBinding is emitted only when enabled, so the default shape is unchanged.
+      network: { allowedDomains: [...policy.network.allowedHosts], ...(policy.network.allowLocalBinding ? { allowLocalBinding: true } : {}) },
       filesystem: {
         allowWrite: [...policy.write.allow],
         denyWrite: [...policy.write.deny],
@@ -128,7 +132,11 @@ export function claudeSandboxSettings(policy: SandboxPolicy): Record<string, unk
 // that gap is open for files created mid-run.
 export function srtSandboxSettings(policy: SandboxPolicy): Record<string, unknown> {
   return {
-    network: { allowedDomains: [...policy.network.allowedHosts], deniedDomains: [] },
+    network: {
+      allowedDomains: [...policy.network.allowedHosts],
+      deniedDomains: [],
+      ...(policy.network.allowLocalBinding ? { allowLocalBinding: true } : {}),
+    },
     filesystem: {
       denyRead: [...policy.read.deny],
       allowWrite: [...policy.write.allow],

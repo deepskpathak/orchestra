@@ -99,3 +99,22 @@ test('scrubVerifierEnv drops push, publish and model credentials but keeps PATH 
   const env = scrubVerifierEnv({ PATH: '/bin', HOME: '/h', GH_TOKEN: 'a', NPM_TOKEN: 'b', ANTHROPIC_API_KEY: 'k', CLAUDE_CODE_OAUTH_TOKEN: 'o', FOO: 'bar' });
   assert.deepEqual(env, { PATH: '/bin', HOME: '/h', FOO: 'bar' });
 });
+
+test('allowLocalBinding defaults to false and is threaded into both settings shapes only when on', () => {
+  const base = { worktree: '/w/t1', tmpDir: '/tmp/o', home: '/home/u', hiddenScenarioDir: HIDDEN, gitCommonDir: '/r/.git' };
+  const off = buildSandboxPolicy(base);
+  const on = buildSandboxPolicy({ ...base, allowLocalBinding: true });
+  assert.equal(off.network.allowLocalBinding, false);
+  assert.equal(on.network.allowLocalBinding, true);
+
+  const cOff = (claudeSandboxSettings(off).sandbox as { network: Record<string, unknown> }).network;
+  const cOn = (claudeSandboxSettings(on).sandbox as { network: Record<string, unknown> }).network;
+  assert.deepEqual(cOff, { allowedDomains: ['api.anthropic.com'] });
+  assert.equal(cOn.allowLocalBinding, true);
+  assert.deepEqual(cOn.allowedDomains, ['api.anthropic.com']);
+
+  const sOff = srtSandboxSettings(off).network as Record<string, unknown>;
+  const sOn = srtSandboxSettings(on).network as Record<string, unknown>;
+  assert.deepEqual(sOff, { allowedDomains: ['api.anthropic.com'], deniedDomains: [] });
+  assert.equal(sOn.allowLocalBinding, true);
+});
