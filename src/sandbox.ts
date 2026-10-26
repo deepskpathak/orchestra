@@ -204,7 +204,7 @@ export interface PreflightOptions {
   cwd: string; // a worktree the worker could use
   docker?: { image?: string; gvisor?: boolean; network?: string };
   timeoutMs?: number;
-  // Candidate host dirs for the docker read canary, tried in order. Default ['/var/tmp', homedir()].
+  // Candidate host dirs for the docker read canary, tried in order (default: see unmountedCanaryBase).
   // Injectable because inside a sandbox neither default is writable, so tests need a controllable base.
   canaryBases?: string[];
 }
@@ -235,7 +235,7 @@ function readScript(file: string): string {
 // A host directory for the docker read canary that no container mount covers. Read isolation for
 // docker comes from not mounting a path, so the canary has to live outside every mount (tmpdir is
 // mounted rw, so the usual temp location would make the probe open for real). Null when none is usable.
-function unmountedCanaryBase(mounts: string[], bases: string[]): string | null {
+function unmountedCanaryBase(mounts: string[], bases: string[] = ['/var/tmp', homedir()]): string | null {
   const covered = (p: string) => mounts.some((m) => p === m || p.startsWith(m.endsWith(sep) ? m : m + sep));
   for (const base of bases) {
     try {
@@ -263,7 +263,7 @@ export function preflightSandbox(policy: SandboxPolicy, backend: 'srt' | 'claude
     // docker cannot: its canary must be outside every mounted path (see unmountedCanaryBase).
     let canary: string | null = join(dir, 'canary.txt');
     if (backend === 'docker') {
-      canaryDir = unmountedCanaryBase([opts.cwd, policy.write.allow[1] ?? tmpdir(), policy.gitCommonDir], opts.canaryBases ?? ['/var/tmp', homedir()]);
+      canaryDir = unmountedCanaryBase([opts.cwd, policy.write.allow[1] ?? tmpdir(), policy.gitCommonDir], opts.canaryBases);
       canary = canaryDir ? join(canaryDir, 'canary.txt') : null;
     }
     if (canary) writeFileSync(canary, 'orchestra preflight canary\n');
