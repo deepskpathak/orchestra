@@ -160,6 +160,7 @@ const realInner = (backend: 'srt' | 'docker', tweak: (inner: string[]) => string
 const argvFailures = (r: { failures: string[] }) => r.failures.filter((f) => /argv was not passed through/.test(f));
 
 test('probe args end with node -e script, a positional and worker-like trailing args with no -- (srt and docker)', () => {
+  assert.ok(Object.isFrozen(PROBE_TRAILING_ARGS));
   assert.ok(PROBE_TRAILING_ARGS.includes('--settings') && PROBE_TRAILING_ARGS.includes('-p'));
   const json = PROBE_TRAILING_ARGS[PROBE_TRAILING_ARGS.indexOf('--settings') + 1];
   assert.ok(json.includes('"') && json.includes(' ') && json.includes('$'));

@@ -226,7 +226,7 @@ function readScript(file: string): string {
 // JSON value holds double quotes, spaces and a dollar sign, plus -p and a prompt-like value. The srt and
 // docker probes carry them after `node -e <script> PROBE_ARGV_POSITIONAL` and the probe script checks it
 // received them intact.
-export const PROBE_TRAILING_ARGS: string[] = ['--settings', '{"a": "x y $HOME", "b": "it\'s"}', '-p', 'Say "hi" to $USER'];
+export const PROBE_TRAILING_ARGS: readonly string[] = Object.freeze(['--settings', '{"a": "x y $HOME", "b": "it\'s"}', '-p', 'Say "hi" to $USER']);
 
 // Why a positional and not `--`: node rejects `node -e <script> --settings ...` ("bad option"), so
 // something has to end node's option parsing. A literal `--` would also end srt's option parsing, so a
@@ -290,10 +290,13 @@ export function preflightSandbox(policy: SandboxPolicy, backend: 'srt' | 'claude
     const settings = join(dir, 'settings.json');
     writeFileSync(settings, JSON.stringify(backend === 'srt' ? srtSandboxSettings(probePolicy) : claudeSandboxSettings(probePolicy), null, 2) + '\n');
     const host = PROBE_HOSTS.find((h) => !policy.network.allowedHosts.includes(h)) ?? PROBE_HOSTS[0];
+    // srt and docker hand the worker argv to the command, so their probes check it. claude runs the
+    // probe through a Bash tool call, which never sees worker argv.
+    const checkArgv = backend !== 'claude';
 
     const wrap = (script: string): { command: string; args: string[] } => {
-      const worker = backend === 'srt' || backend === 'docker';
-      const inner = worker ? ['node', '-e', argvGuard(script), PROBE_ARGV_POSITIONAL, ...PROBE_TRAILING_ARGS] : ['node', '-e', script];
+      // Spreading copies the frozen trailing args, so nothing downstream can mutate the shared constant.
+      const inner = checkArgv ? ['node', '-e', argvGuard(script), PROBE_ARGV_POSITIONAL, ...PROBE_TRAILING_ARGS] : ['node', '-e', script];
       if (backend === 'srt') {
         const [command, ...args] = srtArgs(probePolicy, settings, inner[0], inner.slice(1));
         return { command, args };
@@ -363,7 +366,7 @@ export function preflightSandbox(policy: SandboxPolicy, backend: 'srt' | 'claude
     // The argv check rides on the probes, so with both skipped (docker on a user network or with no
     // connectivity, and no unmounted canary dir) nothing exercised the worker argv shape. Say so rather
     // than let a clean pre-flight imply it was checked.
-    if (backend !== 'claude' && probesRun === 0) {
+    if (checkArgv && probesRun === 0) {
       warnings.push(`argv pass-through was NOT verified: both probes were skipped, so pre-flight never ran a command with worker-like arguments through the ${backend} wrapper`);
     }
   } finally {
