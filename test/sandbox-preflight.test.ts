@@ -215,6 +215,51 @@ test('an altered JSON value (dollar sign stripped, or split on spaces) fails wit
   }
 });
 
+// A stand-in for srt's CLI, modelled on how it parses argv: commander with allowUnknownOption and no
+// passThroughOptions, so its own options are recognised anywhere until a literal `--`, the last
+// --settings wins, and unknown options and operands are kept in order as the command. As in commander's
+// parseOptions, once an unknown option has been seen a later `--` is kept as part of the command
+// instead of being consumed. Like srt it refuses
+// to start when the settings path is not a readable srt settings file, which is how the #74 bug showed
+// up. It enforces nothing: it runs the read probe for real through `bash -c` with shell-quoted argv (as
+// srt does on macOS and Linux) and reports the canary read as blocked, so the test isolates argv
+// handling. The network probe and the control are never executed, so no request leaves the machine.
+const shq = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
+const commanderSrt = (argvOf: (args: string[]) => string[]): ProbeExec => (c, raw) => {
+  if (c === 'node') return result(OPEN);
+  const args = argvOf(raw);
+  let settings: string | undefined;
+  const command: string[] = [];
+  let sawUnknown = false;
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--') { command.push(...(sawUnknown ? args.slice(i) : args.slice(i + 1))); break; }
+    if (args[i] === '--settings') { settings = args[++i]; continue; }
+    if (args[i].startsWith('-')) sawUnknown = true;
+    command.push(args[i]);
+  }
+  try {
+    if (!JSON.parse(readFileSync(settings ?? '', 'utf8')).filesystem) throw new Error('not an srt settings file');
+  } catch (e) {
+    return { status: 1, stdout: '', stderr: `Error: could not load settings ${settings}: ${(e as Error).message}` };
+  }
+  if (command.join(' ').includes('fetch(')) return result(BLOCKED);
+  const r = spawnSync('bash', ['-c', command.map(shq).join(' ')], { encoding: 'utf8', timeout: 15_000 });
+  return { status: r.status, stdout: (r.stdout ?? '').replaceAll('ORCHESTRA_PROBE_OPEN', 'ORCHESTRA_PROBE_BLOCKED'), stderr: r.stderr ?? '', error: r.error?.message };
+};
+
+test('#74 regression: a srtArgs without its -- fails pre-flight against a commander-style srt', () => {
+  const intact = preflightSandbox(policy, 'srt', commanderSrt((a) => a), opts);
+  assert.deepEqual([intact.ok, intact.failures, intact.warnings], [true, [], []]);
+  // Reconstructs the regressed srtArgs (['srt', '--settings', path, command, ...args]) by dropping the
+  // wrapper's own `--`, which is the first one in the argv. srt then takes the probe's trailing
+  // --settings <json> as its settings path, cannot load it, and never starts the probe.
+  const dropFirstDashDash = (a: string[]) => a.filter((x, i) => !(x === '--' && i === a.indexOf('--')));
+  const regressed = preflightSandbox(policy, 'srt', commanderSrt(dropFirstDashDash), opts);
+  assert.equal(regressed.ok, false);
+  assert.equal(regressed.failures.length, 2, regressed.failures.join('; '));
+  assert.ok(regressed.failures.every((f) => /inconclusive/.test(f)), regressed.failures.join('; '));
+});
+
 function countingRunner(inner: Runner) {
   const calls: string[] = [];
   const runner: Runner = (req: AgentRequest) => (calls.push(req.role), inner(req));
