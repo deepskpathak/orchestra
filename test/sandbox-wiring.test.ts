@@ -78,6 +78,7 @@ test('sandbox srt spawns srt with the claude args after it and a settings file o
   assert.equal(c.command, 'srt');
   const i = c.args.indexOf('claude');
   assert.ok(i > 0);
+  assert.equal(c.args[i - 1], '--', 'srt options end before the wrapped command');
   assert.deepEqual(c.args.slice(i + 1), buildArgs(req));
   const file = c.args[c.args.indexOf('--settings') + 1];
   assert.ok(file.startsWith(sdir));

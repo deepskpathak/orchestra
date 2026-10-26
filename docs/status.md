@@ -22,8 +22,7 @@ Each milestone went through its own branch, a code review with one fix commit pe
 
 All tests run against fakes and injected executors. None of the following has been exercised against the real tool:
 
-- **OS sandbox backends (M5).** srt, Claude Code's sandbox, docker and sandbox-exec. Two formats were written from memory and need checking against the real docs: the srt settings shape (top-level `network.allowedDomains` and `filesystem.allowWrite`, `denyRead`, `denyWrite`) and the Claude Code `//` absolute-path permission rule syntax. Both forms are emitted conservatively.
-- **`--max-turns` (M6 budget caps).** Passed to `claude` only when a turn cap is set. The local `claude --help` does not list the flag.
+- **OS sandbox backends (M5).** srt, Claude Code's sandbox, docker and sandbox-exec. The srt settings shape and the Claude Code sandbox keys and `//` permission-rule syntax were checked against their docs on 2026-10-26 (#74), and that check fixed an srt argv bug that made every srt worker fail closed. No backend has run a real worker yet.
 - **universal-ctags and graphify inputs (W9.5).** Optional, detect-and-degrade.
 - **The research hypotheses H1 to H8.** M2 built the machinery (`orchestra bench`, paired statistics, ablations, judge calibration). No measurement has been run yet.
 
@@ -32,13 +31,17 @@ All tests run against fakes and injected executors. None of the following has be
 - Sequential testing (M3) widens the confidence interval with a Bonferroni-style factor: a normal-quantile ratio applied to a t-based interval. Not checked against a reference.
 - The mutation scanner (M4) is a heuristic, not a TypeScript parser. Ambiguous cases are skipped, and compile failures count as invalid mutants rather than killed.
 - `orchestra approve --by` (M6) is an advisory four-eyes check against a free-text name. It is not authenticated identity.
+- srt on Linux: `denyRead` globs such as `**/.env` are expanded to the files that exist when the worker starts, so a `.env` created mid-run is readable from a shell. macOS matches the globs as patterns.
+- srt wraps the worker argv into one `bash -c` string. On Linux one argument is capped at 128 KiB, so a very large prompt or system prompt would fail to spawn (E2BIG). The harness prompt files total about 22 KB today, but task text, lessons and repair notes add to that and have not been measured.
+- The sandbox pre-flight probe wraps a small `node -e` script, not the real worker argv, so it cannot catch an argv bug like the one #74 fixed.
 - A run that ends `awaiting_approval` finishes when its last held task is approved, but the mutation pass and `learn()` are not re-run, and blocked dependents need a new run.
 
 ## Recommended next steps
 
+Done on 2026-10-26: `claude -p --max-turns` confirmed on Claude Code 2.1.310 (hidden from `--help`; a reached cap ends with `error_max_turns`), sandbox formats checked (#74), whitepaper and blog updated (#75).
+
 1. Run one real end-to-end `orchestra run` with the new flags on (sandbox, atlas, batch merge, judge panel, budgets) on a machine with a real `claude` binary and a sandbox backend.
-2. Confirm `claude -p` accepts `--max-turns`, and check the srt and Claude Code sandbox formats against their docs.
-3. Start measuring H1 to H8 with `orchestra bench`, beginning with H1 (integrity) and H2 (verification), which the plan needs before trusting further evolution.
-4. Update the whitepaper (harvested eval cases are no longer successes only) and the blog post (it still says "No containers").
+2. Start measuring H1 to H8 with `orchestra bench`, beginning with H1 (integrity) and H2 (verification), which the plan needs before trusting further evolution.
+3. Add a resume path for runs that end `awaiting_approval`.
+4. Make the sandbox pre-flight probe use the real worker argv shape.
 5. Make the M6 batch-merge interleaving test deterministic if it flakes in CI. It uses short sleeps.
-6. Add a resume path for runs that end `awaiting_approval`.
