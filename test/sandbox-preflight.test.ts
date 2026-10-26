@@ -143,18 +143,18 @@ test('srt probes get a srt-shaped settings file and claude probes the Claude sha
 test('docker network none warns that the model API is unreachable; a chosen network skips the probe', () => {
   const d = dockerEnv();
   try {
-  const calls: string[] = [];
-  const exec: ProbeExec = (c, a) => (calls.push(c + ' ' + a.join(' ')), result(c === 'node' ? OPEN : BLOCKED));
-  const none = preflightSandbox(d.pol, 'docker', exec, d.o);
-  assert.equal(none.ok, true);
-  assert.ok(none.warnings.some((w) => /network is none.*api\.anthropic\.com/.test(w)));
-  calls.length = 0;
-  const custom = preflightSandbox(d.pol, 'docker', exec, { ...d.o, docker: { network: 'orch-egress' } });
-  assert.equal(custom.ok, true);
-  assert.ok(custom.warnings.some((w) => /orch-egress.*allow-list/.test(w)));
-  assert.ok(!calls.some((c) => c.includes('fetch(')), 'no network probe on a user-chosen network');
-  assert.ok(calls.every((c) => !c.startsWith('node ')), 'no control either');
-  assert.ok(calls.some((c) => c.includes('--network=orch-egress')));
+    const calls: string[] = [];
+    const exec: ProbeExec = (c, a) => (calls.push(c + ' ' + a.join(' ')), result(c === 'node' ? OPEN : BLOCKED));
+    const none = preflightSandbox(d.pol, 'docker', exec, d.o);
+    assert.equal(none.ok, true);
+    assert.ok(none.warnings.some((w) => /network is none.*api\.anthropic\.com/.test(w)));
+    calls.length = 0;
+    const custom = preflightSandbox(d.pol, 'docker', exec, { ...d.o, docker: { network: 'orch-egress' } });
+    assert.equal(custom.ok, true);
+    assert.ok(custom.warnings.some((w) => /orch-egress.*allow-list/.test(w)));
+    assert.ok(!calls.some((c) => c.includes('fetch(')), 'no network probe on a user-chosen network');
+    assert.ok(calls.every((c) => !c.startsWith('node ')), 'no control either');
+    assert.ok(calls.some((c) => c.includes('--network=orch-egress')));
   } finally {
     d.done();
   }
