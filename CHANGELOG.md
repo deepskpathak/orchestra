@@ -31,6 +31,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Pareto archive (W3.6): `evolve.pareto` keeps variants best on at least one validation case, picks parents by Pareto wins plus descendant success, shows the evolver the scored archive history and keeps `stepping` variants in `archive.json`.
 - Lesson hygiene (W3.7): the librarian now returns item edits (add, update, remove by lesson id) applied by `applyLessonEdits`, so no code path replaces a domain's lessons from model output. Lessons carry stable ids and helpful/harmful counters (old files load with zeros). Opt-in `learnings.expiryDays` (default 0 = off) expires stale or harmful lessons. New `orchestra evals ablation` replays the holdout with and without learnings and reports the paired delta and CI.
 
+### Changed
+
+- Docs: whitepaper and blog updated for the M3 to M6 milestones (the whitepaper header now names 0.6.1 plus the unreleased M1 to M6 work; M1 and M2 were already covered). Factory Eval cases are no longer described as successes only (hand-added cases, human-fix harvests, `evolve.splits`, `orchestra evals audit`), the blog no longer says "No containers" (opt-in `--sandbox`, not yet exercised against real backends), and the opt-in M3 cycle controls, M4 verification modes, batch merge and risk tiers are mentioned where the text had gone stale.
+
 ### Fixed
 
 - srt sandbox backend (`--sandbox srt`): the wrapped command is now passed after a `--` separator (`srt --settings <file> -- claude ...`). srt parses its own options anywhere in argv, so it took the worker's `claude --settings <json>` as its settings path and refused to start; every srt-sandboxed worker failed closed. Found while checking the srt and Claude Code sandbox formats against their docs, which otherwise matched (comments in `src/sandbox.ts` updated). `claude -p --max-turns` was confirmed on Claude Code 2.1.310: the flag is accepted though not listed in `--help`, and a reached cap ends with `error_max_turns`, which the runner already reports as a failure.
