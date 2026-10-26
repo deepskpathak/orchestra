@@ -121,6 +121,7 @@ The `src/guard.ts` hook stays on as **defence in depth**. It is a deny-list that
 - [Isolation](docs/isolation.md): sandbox boundary model and the docker backend
 - [Configuration](docs/configuration.md): `.orchestra/config.json` and harness config
 - [Whitepaper](docs/whitepaper-orchestra.md): design, methodology, limitations, and threats to validity
+- [Project status](docs/status.md): what is merged, what is not yet proven, and recommended next steps
 - [Closing the gaps](docs/research/closing-the-gaps.md): research review and the ordered plan to address the whitepaper's limitations
 - [Blog post](docs/blog/orchestra-substack-post.md): a plain-language tour with an example run
 
