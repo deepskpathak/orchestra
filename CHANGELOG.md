@@ -33,7 +33,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
-- Docs: whitepaper and blog updated for the M3 to M6 milestones (the whitepaper header now names 0.6.1 plus the unreleased work). Factory Eval cases are no longer described as successes only (hand-added cases, human-fix harvests, `evolve.splits`, `orchestra evals audit`), the blog no longer says "No containers" (opt-in `--sandbox`, not yet exercised against real backends), and the opt-in M3 cycle controls, M4 verification modes, batch merge and risk tiers are mentioned where the text had gone stale.
+- Docs: whitepaper and blog updated for the M3 to M6 milestones (the whitepaper header now names 0.6.1 plus the unreleased M1 to M6 work; M1 and M2 were already covered). Factory Eval cases are no longer described as successes only (hand-added cases, human-fix harvests, `evolve.splits`, `orchestra evals audit`), the blog no longer says "No containers" (opt-in `--sandbox`, not yet exercised against real backends), and the opt-in M3 cycle controls, M4 verification modes, batch merge and risk tiers are mentioned where the text had gone stale.
 
 ### Fixed
 
