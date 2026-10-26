@@ -55,6 +55,13 @@ test('single result: fields pass through unchanged', async () => {
   assert.deepEqual(res.structured, { a: 1 });
 });
 
+test('single result: durationMs is wall clock from spawn to close, not the reported duration_ms', async () => {
+  const res = await makeClaudeRunner(
+    spawnEmitting([{ type: 'result', subtype: 'success', result: 'done', num_turns: 1, duration_ms: 999999 }], 30),
+  )(req);
+  assert.ok(res.durationMs >= 30 && res.durationMs < 999999, `durationMs ${res.durationMs}`);
+});
+
 test('two results: turns and usage sum, cost and text from the last, duration is wall clock', async () => {
   const res = await makeClaudeRunner(
     spawnEmitting(
