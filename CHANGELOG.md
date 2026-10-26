@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- Runner result accounting: a worker that starts a background Bash task resumes on the task notification, so `claude -p --output-format stream-json` emits more than one `result` message. `makeClaudeRunner` now sums `num_turns` and token usage across them (both are per segment), takes `total_cost_usd` from the last (it is cumulative), measures `durationMs` as wall clock from spawn to exit, and takes `ok`, `error`, `text` and `structured_output` from the last. Turn caps, `cacheReadShare` and durations were undercounted before. Single-result sessions are unchanged.
+
 ## [0.7.0] - 2026-10-27
 
 ### Added

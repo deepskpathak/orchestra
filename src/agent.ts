@@ -206,15 +206,28 @@ export const makeClaudeRunner = (spawnFn: SpawnFn = spawn): Runner => (req) =>
           }
         }
       } else if (msg.type === 'result') {
+        // A worker that starts a background Bash task resumes on the task notification, so one session
+        // emits several result messages. num_turns and usage are per segment (sum them); total_cost_usd is
+        // cumulative (take the last, summing would double count). Duration is wall clock, set at close.
         const isError = Boolean(msg.is_error) || msg.subtype !== 'success';
+        const seg = parseUsage(msg);
+        const usage = result?.usage && seg
+          ? {
+              inputTokens: result.usage.inputTokens + seg.inputTokens,
+              outputTokens: result.usage.outputTokens + seg.outputTokens,
+              cacheReadTokens: result.usage.cacheReadTokens + seg.cacheReadTokens,
+              cacheWriteTokens: result.usage.cacheWriteTokens + seg.cacheWriteTokens,
+            }
+          : (seg ?? result?.usage);
+        const turns = (result?.turns ?? 0) + Number(msg.num_turns ?? 0);
         result = {
           ok: !isError,
           text: typeof msg.result === 'string' ? msg.result : lastText,
           structured: msg.structured_output ?? undefined,
           costUsd: Number(msg.total_cost_usd ?? 0),
-          turns: Number(msg.num_turns ?? 0),
-          durationMs: Number(msg.duration_ms ?? Date.now() - started),
-          usage: parseUsage(msg),
+          turns,
+          durationMs: Date.now() - started,
+          usage,
           toolCounts,
           error: isError ? (msg.errors?.join('; ') || msg.result || msg.subtype) : undefined,
         };
@@ -239,7 +252,7 @@ export const makeClaudeRunner = (spawnFn: SpawnFn = spawn): Runner => (req) =>
     child.on('close', (code) => {
       if (timer) clearTimeout(timer);
       if (buf) handle(buf);
-      if (result) return resolve(result);
+      if (result) return resolve({ ...result, durationMs: Date.now() - started });
       resolve({
         ok: false,
         text: lastText,
