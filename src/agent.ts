@@ -178,7 +178,8 @@ export const makeClaudeRunner = (spawnFn: SpawnFn = spawn): Runner => (req) =>
     let buf = '';
     let stderr = '';
     let lastText = '';
-    let result: AgentResult | null = null;
+    // durationMs is wall clock and only known at close, so the accumulated result carries none until then.
+    let result: Omit<AgentResult, 'durationMs'> | null = null;
     const toolCounts: Record<string, number> = {};
 
     let timedOut = false;
@@ -237,7 +238,6 @@ export const makeClaudeRunner = (spawnFn: SpawnFn = spawn): Runner => (req) =>
           // A segment without total_cost_usd keeps the earlier cumulative figure rather than resetting spend to 0.
           costUsd: Number(msg.total_cost_usd ?? result?.costUsd ?? 0),
           turns,
-          durationMs: Date.now() - started,
           usage,
           toolCounts,
           error: isError ? (msg.errors?.join('; ') || msg.result || msg.subtype) : undefined,
