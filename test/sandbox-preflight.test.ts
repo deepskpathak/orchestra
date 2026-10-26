@@ -263,6 +263,26 @@ test('#74 regression: a srtArgs without its -- fails pre-flight against a comman
   assert.ok(regressed.failures.every((f) => /inconclusive/.test(f)), regressed.failures.join('; '));
 });
 
+test('both probes skipped: warns that argv pass-through was not verified', () => {
+  // /var/tmp and the home dir are both mounted here, so docker has nowhere to put the read canary.
+  const mounted = buildSandboxPolicy({ worktree: '/wt', tmpDir: '/var/tmp', home: '/home/u', hiddenScenarioDir: '/h', gitCommonDir: homedir() });
+  const calls: string[] = [];
+  const exec: ProbeExec = (c) => (calls.push(c), result(BLOCKED));
+  // A user network skips the network probe; no connectivity (control BLOCKED) skips it under none.
+  for (const docker of [{ network: 'orch-egress' }, {}]) {
+    calls.length = 0;
+    const r = preflightSandbox(mounted, 'docker', exec, { ...opts, docker });
+    assert.equal(r.ok, true);
+    assert.ok(!calls.includes('docker'), 'no probe ran through the wrapper');
+    assert.ok(r.warnings.some((w) => /argv pass-through was NOT verified/.test(w)), r.warnings.join('; '));
+  }
+  // Any probe that ran checked argv, so no such warning.
+  const ran = preflightSandbox(policy, 'docker', fake(BLOCKED, BLOCKED), opts);
+  assert.ok(!ran.warnings.some((w) => /argv pass-through/.test(w)));
+  const srt = preflightSandbox(policy, 'srt', exec, opts);
+  assert.ok(!srt.warnings.some((w) => /argv pass-through/.test(w)), 'srt always runs the read probe');
+});
+
 function countingRunner(inner: Runner) {
   const calls: string[] = [];
   const runner: Runner = (req: AgentRequest) => (calls.push(req.role), inner(req));

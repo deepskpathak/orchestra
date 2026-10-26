@@ -316,7 +316,9 @@ export function preflightSandbox(policy: SandboxPolicy, backend: 'srt' | 'claude
       return { command: 'claude', args: ['-p', prompt, '--settings', settings, '--allowedTools', 'Bash', '--output-format', 'text'] };
     };
 
+    let probesRun = 0;
     const probe = (name: string, script: string) => {
+      probesRun++;
       const { command, args } = wrap(script);
       let r: ProbeExecResult;
       try {
@@ -355,6 +357,12 @@ export function preflightSandbox(policy: SandboxPolicy, backend: 'srt' | 'claude
     }
     if (canary) probe('read', readScript(canary));
     else warnings.push('read probe skipped: no host directory outside the docker mounts is writable; docker read isolation rests on not mounting secrets');
+    // The argv check rides on the probes, so with both skipped (docker on a user network or with no
+    // connectivity, and no unmounted canary dir) nothing exercised the worker argv shape. Say so rather
+    // than let a clean pre-flight imply it was checked.
+    if (backend !== 'claude' && probesRun === 0) {
+      warnings.push(`argv pass-through was NOT verified: both probes were skipped, so pre-flight never ran a command with worker-like arguments through the ${backend} wrapper`);
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
     if (canaryDir) rmSync(canaryDir, { recursive: true, force: true });
