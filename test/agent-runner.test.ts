@@ -82,3 +82,13 @@ test('usage on only one of two results is kept', async () => {
   )(req);
   assert.deepEqual(res.usage, { inputTokens: 5, outputTokens: 5, cacheReadTokens: 5, cacheWriteTokens: 5 });
 });
+
+test('cost: a last result without total_cost_usd keeps the earlier cumulative cost', async () => {
+  const res = await makeClaudeRunner(
+    spawnEmitting([
+      { type: 'result', subtype: 'success', result: 'a', num_turns: 1, total_cost_usd: 0.2656 },
+      { type: 'result', subtype: 'success', result: 'b', num_turns: 1 },
+    ]),
+  )(req);
+  assert.equal(res.costUsd, 0.2656);
+});

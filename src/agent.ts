@@ -224,7 +224,8 @@ export const makeClaudeRunner = (spawnFn: SpawnFn = spawn): Runner => (req) =>
           ok: !isError,
           text: typeof msg.result === 'string' ? msg.result : lastText,
           structured: msg.structured_output ?? undefined,
-          costUsd: Number(msg.total_cost_usd ?? 0),
+          // A segment without total_cost_usd keeps the earlier cumulative figure rather than resetting spend to 0.
+          costUsd: Number(msg.total_cost_usd ?? result?.costUsd ?? 0),
           turns,
           durationMs: Date.now() - started,
           usage,
