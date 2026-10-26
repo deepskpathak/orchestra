@@ -146,9 +146,12 @@ test('probes run through the srt wrapper and scripts never contain a literal mar
 });
 
 // Strips the wrapper prefix and really runs the inner argv (no shell), like srt or docker would hand it
-// to node. `tweak` lets a test drop or alter trailing args the way a mangling wrapper would.
+// to node. `tweak` lets a test drop or alter trailing args the way a mangling wrapper would. The
+// unsandboxed control reports no connectivity, so pre-flight skips the network probe and only the read
+// probe runs for real: no test makes an outbound request.
 const realInner = (backend: 'srt' | 'docker', tweak: (inner: string[]) => string[] = (a) => a): ProbeExec => (c, args) => {
-  if (c === 'node') return result(OPEN);
+  if (c === 'node') return result(BLOCKED);
+  assert.ok(!args.join(' ').includes('fetch('), 'the network probe must never be executed for real');
   const inner = backend === 'srt' ? args.slice(args.indexOf('--') + 1) : args.slice(args.indexOf(DEFAULT_IMAGE) + 1);
   const [cmd, ...rest] = tweak(inner);
   const r = spawnSync(cmd, rest, { encoding: 'utf8', timeout: 15_000 });
