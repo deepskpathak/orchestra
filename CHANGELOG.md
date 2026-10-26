@@ -31,6 +31,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Pareto archive (W3.6): `evolve.pareto` keeps variants best on at least one validation case, picks parents by Pareto wins plus descendant success, shows the evolver the scored archive history and keeps `stepping` variants in `archive.json`.
 - Lesson hygiene (W3.7): the librarian now returns item edits (add, update, remove by lesson id) applied by `applyLessonEdits`, so no code path replaces a domain's lessons from model output. Lessons carry stable ids and helpful/harmful counters (old files load with zeros). Opt-in `learnings.expiryDays` (default 0 = off) expires stale or harmful lessons. New `orchestra evals ablation` replays the holdout with and without learnings and reports the paired delta and CI.
 
+### Changed
+
+- Docs: whitepaper and blog updated for the M3 to M6 milestones (the whitepaper header now names 0.6.1 plus the unreleased work). Factory Eval cases are no longer described as successes only (hand-added cases, human-fix harvests, `evolve.splits`, `orchestra evals audit`), the blog no longer says "No containers" (opt-in `--sandbox`, not yet exercised against real backends), and the opt-in M3 cycle controls, M4 verification modes, batch merge and risk tiers are mentioned where the text had gone stale.
+
 ### Fixed
 
 - Conductor state cleanup: the scheduler's in-flight set is now the single `inflight` map (the mirrored `inflightIds` set is gone); the dependency decision log has its own optional `throughput.decisionLog` key (unset follows `footprintScheduling`, so default prompts are byte-identical); and the per-call hot paths (worker caps, budget state, batch flush, atlas hint) use one config snapshot taken at run start instead of re-reading `config.json` on every agent call.

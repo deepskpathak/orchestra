@@ -44,6 +44,8 @@ A task passes only if the judge says pass, the score meets the pass threshold (0
 
 **Contrastive repair (opt-in).** In a repo without a `testCommand`, the judge is the only signal, so a repair attempt can be a coin flip. With the `contrastive` setting on, two workers try the task in separate worktrees, one following the repair notes and one taking a different approach. One comparison judge call picks a winner, the loser is deleted, and the judge's reasons go to the librarian as evidence. It is off by default.
 
+**Stronger verification (opt-in).** A `verification` block adds a judge panel, an agentic judge that runs scenario checks itself, frozen acceptance contracts, oracle tests written by a separate session, and a mutation score per run. All are off by default and none has been measured on real runs yet.
+
 **Merge.** Passing tasks queue up and merge one at a time onto `orchestra/<run>/integration`, with tests after each merge. A failing merge is reset.
 
 **Learn.** The librarian turns repairs and failures into lessons. The planner tags each run with a short domain slug such as `cli` or `docs`, and lessons are stored per domain plus a global set. Every lesson must cite evidence (the run or task behind it), or it is dropped. Each domain keeps at most 25 lessons, and prompts get at most 15, domain first and then global.
@@ -55,10 +57,12 @@ Orchestra records every agent session in a ledger. `orchestra stats` reports hea
 The harness is the evolvable part: role prompts, `config.json`, and three small optional files (`tools.md`, `style.md`, `checklist.md`). `orchestra evolve` runs one cycle:
 
 1. The evolver studies the metrics, recent repair notes, rejected variants and learnings, then proposes a variant.
-2. A Factory Eval replays past successful goals, harvested automatically from runs that finished well, against the incumbent and then the candidate.
+2. A Factory Eval replays past goals against the incumbent and then the candidate. Runs that finished well are harvested automatically. You can also add cases by hand (`orchestra evals add`) or turn a failed run plus your fix commit into a case (`evals add --from-run <runId> --fix <commit>`), where the fix diff becomes the reference.
 3. The candidate is promoted only if it beats the incumbent by at least `evolve.minGain` and regresses no case the incumbent passed.
 
 With `evolve.candidates` above 1, the evolver proposes several variants, screens each on a small sample, composes the survivors, and runs the usual decision on the result. Versions are append-only, so rollback is just `orchestra promote v1`.
+
+More controls are opt-in and off by default: time-split eval sets with a locked holdout the evolver never sees (`evolve.splits`), a leakage audit for eval cases that CI runs (`orchestra evals audit`), cascade screening, sequential testing with a per-cycle budget cap, cost in the objective, and a Pareto archive for picking parents.
 
 Some rails are not negotiable. The evolver cannot edit its own prompt. It cannot lower `passThreshold`. It cannot remove lines from the review checklist. The design borrows the archive idea from the Darwin Godel Machine, as noted in `docs/self-improvement.md`.
 
@@ -107,7 +111,7 @@ Results land on `orchestra/<run>/integration`. You review with `git log main..or
 We would rather be upfront:
 
 - **No published benchmarks.** We have not run a controlled comparison against a single agent, and we are not going to quote numbers we do not have. The whitepaper describes how we would measure it.
-- **No containers.** Workers share one machine. The guard hook helps, but it is not a sandbox.
+- **Sandboxing is opt-in and untested against real backends.** By default workers share one machine, and the guard hook is a backstop, not a sandbox. `--sandbox` confines workers with srt, Claude Code's sandbox (`bwrap` or `sandbox-exec`) or docker, scrubs credentials from their environment and runs pre-flight probes before the first agent call. Our tests use fakes, so none of these backends has been exercised against the real tool yet.
 - **Evolution is expensive.** It reruns past goals, so one cycle costs roughly `sample x 2` runs plus the evolver call. Tune `evolve.sample`, `evolve.every` and `evolve.candidates`.
 - **Early days.** The test suite runs against the simulator, so it exercises the pipeline but says nothing about real-model quality.
 - **Judges can be wrong.** Hidden scenarios and tests raise the bar. They do not make the verdict ground truth.
