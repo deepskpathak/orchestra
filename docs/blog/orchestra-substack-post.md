@@ -44,7 +44,7 @@ A task passes only if the judge says pass, the score meets the pass threshold (0
 
 **Contrastive repair (opt-in).** In a repo without a `testCommand`, the judge is the only signal, so a repair attempt can be a coin flip. With the `contrastive` setting on, two workers try the task in separate worktrees, one following the repair notes and one taking a different approach. One comparison judge call picks a winner, the loser is deleted, and the judge's reasons go to the librarian as evidence. It is off by default.
 
-**Stronger verification (opt-in).** A `verification` block adds a judge panel, an agentic judge that runs scenario checks itself, frozen acceptance contracts, oracle tests written by a separate session, and a mutation score per run. All are off by default and none has been measured on real runs yet.
+**Stronger verification (opt-in).** A `verification` block adds a judge panel, an agentic judge mode where the conductor runs the scenario check commands and the tests before judging and hands the results to the judge, frozen acceptance contracts, oracle tests written by a separate session, and a mutation score per run. All are off by default and none has been measured on real runs yet.
 
 **Merge.** By default, passing tasks queue up and merge one at a time onto `orchestra/<run>/integration`, with tests after each merge. A failing merge is reset. An opt-in batch merge (`throughput.batchMerge`) lands tasks with disjoint footprints together with one test run per batch, and bisects a failing batch.
 
