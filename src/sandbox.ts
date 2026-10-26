@@ -329,7 +329,10 @@ export function preflightSandbox(policy: SandboxPolicy, backend: 'srt' | 'claude
       }
       if (r.error) return void failures.push(`${name} probe: sandbox wrapper could not start (${r.error})`);
       const out = `${r.stdout}\n${r.stderr}`;
-      if (out.includes(ARGV_MISMATCH)) failures.push(`${name} probe: worker argv was not passed through the sandbox wrapper intact (${backend} mangled or dropped arguments)`);
+      // For docker the image's ENTRYPOINT sits between the wrapper and node and can rewrite argv too,
+      // so the message names it rather than blaming docker alone.
+      const culprit = backend === 'docker' ? 'the docker wrapper or the image entrypoint' : `the ${backend} wrapper`;
+      if (out.includes(ARGV_MISMATCH)) failures.push(`${name} probe: worker argv was not passed through the sandbox wrapper intact (${culprit} altered or dropped arguments)`);
       else if (out.includes(OPEN)) failures.push(`${name} probe succeeded inside the sandbox (expected it to be blocked)`);
       else if (!out.includes(BLOCKED)) failures.push(`${name} probe inconclusive: wrapper exited ${r.status} with no result, treating the sandbox as not working`);
     };

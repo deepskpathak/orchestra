@@ -204,7 +204,8 @@ test('a dropped trailing arg fails pre-flight with the argv reason', () => {
     const r = preflightSandbox(policy, backend, realInner(backend, (a) => a.filter((x) => x !== '-p')), opts);
     assert.equal(r.ok, false);
     assert.ok(argvFailures(r).length >= 1, r.failures.join('; '));
-    assert.match(argvFailures(r)[0], new RegExp(`${backend} mangled or dropped arguments`));
+    const culprit = backend === 'docker' ? 'the docker wrapper or the image entrypoint' : 'the srt wrapper';
+    assert.ok(argvFailures(r)[0].includes(`(${culprit} altered or dropped arguments)`), argvFailures(r)[0]);
   }
 });
 
