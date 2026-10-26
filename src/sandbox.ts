@@ -83,7 +83,9 @@ export function buildSandboxPolicy(i: PolicyInput): SandboxPolicy {
 // cannot initialise), sandbox.allowUnsandboxedCommands, sandbox.network.allowedDomains and
 // sandbox.filesystem.{allowWrite,denyWrite,denyRead}. Sandbox filesystem paths use plain
 // conventions ("/tmp/x" is absolute). The permissions.deny Read(...)/Edit(...) rules are a second
-// layer for the built-in file tools, which the OS sandbox does not cover.
+// layer for the built-in file tools, which the OS sandbox does not cover. They are also the fallback
+// on an older Claude Code that ignores sandbox keys it does not know; the pre-flight probe is what
+// catches a sandbox that silently did not engage.
 // Permission rules use a different syntax (permissions docs): a single leading "/" is relative to
 // the project root and an absolute path needs "//". A directory needs "/**" to cover its contents,
 // so absolute entries emit both the bare path (a file, or the directory itself) and the "/**"
