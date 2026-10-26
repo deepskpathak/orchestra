@@ -62,7 +62,7 @@ The harness is the evolvable part: role prompts, `config.json`, and three small 
 
 With `evolve.candidates` above 1, the evolver proposes several variants, screens each on a small sample, composes the survivors, and runs the usual decision on the result. Versions are append-only, so rollback is just `orchestra promote v1`.
 
-More controls are opt-in and off by default: time-split eval sets with a locked holdout the evolver never sees (`evolve.splits`), a leakage audit for repos that keep an eval set (`orchestra evals audit`; `evals add` already refuses leaky cases), cascade screening, sequential testing with a per-cycle budget cap, cost in the objective, and a Pareto archive for picking parents.
+More controls are opt-in and off by default: time-split eval sets with a locked holdout the evolver never sees (`evolve.splits`), cascade screening, sequential testing with a per-cycle budget cap, cost in the objective, and a Pareto archive for picking parents. Separately, `orchestra evals audit` is a command (no config switch) that checks an eval set for solution leakage, and `evals add` already refuses leaky cases.
 
 Some rails are not negotiable. The evolver cannot edit its own prompt. It cannot lower `passThreshold`. It cannot remove lines from the review checklist. The design borrows the archive idea from the Darwin Godel Machine, as noted in `docs/self-improvement.md`.
 
