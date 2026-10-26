@@ -92,3 +92,14 @@ test('cost: a last result without total_cost_usd keeps the earlier cumulative co
   )(req);
   assert.equal(res.costUsd, 0.2656);
 });
+
+test('structured: an earlier segment structured_output survives a last segment without one', async () => {
+  const flag = { decision: 'flag_for_human', reason: 'needs a human' };
+  const res = await makeClaudeRunner(
+    spawnEmitting([
+      { type: 'result', subtype: 'success', result: 'a', num_turns: 3, structured_output: flag },
+      { type: 'result', subtype: 'success', result: 'b', num_turns: 1 },
+    ]),
+  )(req);
+  assert.deepEqual(res.structured, flag);
+});
