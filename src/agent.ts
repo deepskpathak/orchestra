@@ -211,6 +211,12 @@ export const makeClaudeRunner = (spawnFn: SpawnFn = spawn): Runner => (req) =>
         // A worker that starts a background Bash task resumes on the task notification, so one session
         // emits several result messages. num_turns and usage are per segment (sum them); total_cost_usd is
         // cumulative (take the last, summing would double count). Duration is wall clock, set at close.
+        // Evidence, not inference: a real two-segment worker session on Claude Code 2.1.310 reported
+        //   result 1: num_turns 11, duration_ms 176517, total_cost_usd 0.2656, output_tokens 6690, cache_read 438038
+        //   result 2: num_turns 2,  duration_ms 6439,   total_cost_usd 0.2992, output_tokens 674,  cache_read 111157
+        // Cost rose while turns, duration and both token counts shown dropped. A cumulative counter cannot
+        // decrease, so those are per segment and cost is cumulative. Recheck if a Claude Code upgrade
+        // changes the stream-json result shape.
         const isError = Boolean(msg.is_error) || msg.subtype !== 'success';
         const seg = parseUsage(msg);
         const usage = result?.usage && seg
