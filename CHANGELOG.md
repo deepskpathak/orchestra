@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- Sandbox pre-flight now exercises the worker argv shape for the srt and docker backends: the probe passes `--settings <json>` (quotes, spaces, `$`) and `-p` after the node script and fails pre-flight if they do not arrive byte for byte, so an argv bug like the one fixed in #74 is caught before any worker runs. The claude backend probe is unchanged.
+
 ## [0.7.0] - 2026-10-27
 
 ### Added
