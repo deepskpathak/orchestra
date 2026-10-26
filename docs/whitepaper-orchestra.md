@@ -1,6 +1,6 @@
 # Orchestra: A Self-Improving Multi-Agent Software Factory with Hidden Verification
 
-**Whitepaper, describing Orchestra version 0.6.1 plus the unreleased M1 to M6 work** (`package.json`, `CHANGELOG.md` [Unreleased]). Written 2026-10-22, updated 2026-10-26 for the milestones in `docs/status.md`.
+**Whitepaper, describing Orchestra version 0.7.0, which includes the M1 to M6 work** (`package.json`, `CHANGELOG.md` [0.7.0]). Written 2026-10-22, updated 2026-10-26 for the milestones in `docs/status.md`.
 
 Every statement about Orchestra below points to a file in this repository. Statements about outside work are marked `(unverified)` when they could not be confirmed while writing. **This paper reports no empirical results.** The repo contains no benchmark of Orchestra against other systems, and none is claimed here (see [section 7](#7-methodology) and [section 8](#8-limitations)).
 
