@@ -227,7 +227,7 @@ A research review and an ordered plan that addresses the limitations in section 
 Drawn from `README.md`, `CHANGELOG.md`, `PLAN.md` and `docs/research/cost-accuracy-speed.md`:
 
 - **Make isolation the default.** The sandbox and docker backend exist but are opt-in (`docs/isolation.md`).
-- **Cheaper evolution.** Evolution costs about `sample x 2` runs per cycle. Screening in 0.6.0 is a step. Further options are tuning `evolve.sample`, `evolve.every` and `evolve.candidates`, as `README.md` suggests.
+- **Cheaper evolution.** Evolution costs about `sample x 2` runs per cycle. Built and opt-in today: screening (0.6.0), cascade screening (`evolve.cascade`), sequential testing that stops early (`evolve.sequential`) and a hard per-cycle cap (`evolve.budgetUsd`, `0` means no cap), plus tuning `evolve.sample`, `evolve.every` and `evolve.candidates`. What remains is measuring how much these save on real runs.
 - **Run the evaluation protocol** in [section 7.2](#72-proposed-evaluation-protocol-for-real-runs) and publish results, including negative ones.
 - **Evolvable surface.** Skills and executable scripts are out of scope today (`docs/self-improvement.md`).
 - **Backlog items** in `docs/research/cost-accuracy-speed.md`, such as model-agnostic roles beyond Anthropic.

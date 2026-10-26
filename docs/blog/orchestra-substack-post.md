@@ -112,7 +112,7 @@ We would rather be upfront:
 
 - **No published benchmarks.** We have not run a controlled comparison against a single agent, and we are not going to quote numbers we do not have. The whitepaper describes how we would measure it.
 - **Sandboxing is opt-in and untested against real backends.** By default workers share one machine, and the guard hook is a backstop, not a sandbox. `--sandbox` confines workers with srt, Claude Code's sandbox (`bwrap` or `sandbox-exec`) or docker, scrubs credentials from their environment and runs pre-flight probes before the first agent call. Our tests use fakes, so none of these backends has been exercised against the real tool yet.
-- **Evolution is expensive.** It reruns past goals, so one cycle costs roughly `sample x 2` runs plus the evolver call. Tune `evolve.sample`, `evolve.every` and `evolve.candidates`.
+- **Evolution is expensive.** It reruns past goals, so one cycle costs roughly `sample x 2` runs plus the evolver call. Tune `evolve.sample`, `evolve.every` and `evolve.candidates`, or turn on cascade screening (`evolve.cascade`), early-stopping sequential testing (`evolve.sequential`) and a hard per-cycle cap (`evolve.budgetUsd`).
 - **Early days.** The test suite runs against the simulator, so it exercises the pipeline but says nothing about real-model quality.
 - **Judges can be wrong.** Hidden scenarios and tests raise the bar. They do not make the verdict ground truth.
 
