@@ -206,6 +206,7 @@ export interface PreflightResult {
 
 const OPEN = 'ORCHESTRA_PROBE_OPEN';
 const BLOCKED = 'ORCHESTRA_PROBE_BLOCKED';
+const ARGV_MISMATCH = 'ORCHESTRA_PROBE_ARGV_MISMATCH';
 // Markers are split inside the script so a model that echoes the command cannot produce a false match.
 const marker = (m: string): string => `${JSON.stringify(m.slice(0, 16))}+${JSON.stringify(m.slice(16))}`;
 // Not on the allow-list unless the user listed it, in which case the fallback host is used.
@@ -219,6 +220,18 @@ function networkScript(host: string): string {
 
 function readScript(file: string): string {
   return `try{require('fs').readFileSync(${JSON.stringify(file)});console.log(${marker(OPEN)})}catch(e){console.log(${marker(BLOCKED)})}`;
+}
+
+// Trailing arguments shaped like the ones real workers pass after the command: a --settings flag whose
+// JSON value holds double quotes, spaces and a dollar sign, plus -p and a prompt-like value. The srt and
+// docker probes carry them after `node -e <script> --` and the probe script checks it received them intact.
+export const PROBE_TRAILING_ARGS: string[] = ['--settings', '{"a": "x y $HOME", "b": "it\'s"}', '-p', 'Say "hi" to $USER'];
+
+// With `node -e <script> -- a b`, node consumes the `--` and process.argv is [node, a, b], so the
+// worker-style arguments are process.argv.slice(1). The check is exact: same length, strict equality.
+function argvGuard(body: string): string {
+  const expected = JSON.stringify(PROBE_TRAILING_ARGS);
+  return `const a=process.argv.slice(1),e=${expected};if(a.length!==e.length||e.some((x,i)=>a[i]!==x)){console.log(${marker(ARGV_MISMATCH)})}else{${body}}`;
 }
 
 // A host directory for the docker read canary that no container mount covers. Read isolation for
@@ -241,6 +254,12 @@ function unmountedCanaryBase(mounts: string[]): string | null {
 
 // Runs both probes inside the same wrapper workers get. Each must FAIL (be blocked) for ok. A probe
 // that succeeds, a wrapper that cannot start, or output with no marker (inconclusive) all fail closed.
+// The srt and docker probes also use the worker argv shape: the node command is followed by
+// `-- <PROBE_TRAILING_ARGS>` (a --settings JSON value with quotes, spaces and a dollar sign, plus -p), and
+// the probe script verifies it received them byte for byte. This catches the class of bug fixed in PR #74,
+// where srt consumed the worker's own --settings as its settings path, which a bare `node -e` probe never
+// exercised. A mismatch fails pre-flight. The claude backend goes through a Bash tool call, so it is out
+// of scope and keeps its existing command with no trailing arguments and no argv check.
 export function preflightSandbox(policy: SandboxPolicy, backend: 'srt' | 'claude' | 'docker', exec: ProbeExec, opts: PreflightOptions): PreflightResult {
   const timeoutMs = opts.timeoutMs ?? 60_000;
   const dir = mkdtempSync(join(tmpdir(), 'orchestra-preflight-'));
@@ -262,7 +281,8 @@ export function preflightSandbox(policy: SandboxPolicy, backend: 'srt' | 'claude
     const host = PROBE_HOSTS.find((h) => !policy.network.allowedHosts.includes(h)) ?? PROBE_HOSTS[0];
 
     const wrap = (script: string): { command: string; args: string[] } => {
-      const inner = ['node', '-e', script];
+      const worker = backend === 'srt' || backend === 'docker';
+      const inner = worker ? ['node', '-e', argvGuard(script), '--', ...PROBE_TRAILING_ARGS] : ['node', '-e', script];
       if (backend === 'srt') {
         const [command, ...args] = srtArgs(probePolicy, settings, inner[0], inner.slice(1));
         return { command, args };
@@ -296,7 +316,8 @@ export function preflightSandbox(policy: SandboxPolicy, backend: 'srt' | 'claude
       }
       if (r.error) return void failures.push(`${name} probe: sandbox wrapper could not start (${r.error})`);
       const out = `${r.stdout}\n${r.stderr}`;
-      if (out.includes(OPEN)) failures.push(`${name} probe succeeded inside the sandbox (expected it to be blocked)`);
+      if (out.includes(ARGV_MISMATCH)) failures.push(`${name} probe: worker argv was not passed through the sandbox wrapper intact (${backend} mangled or dropped arguments)`);
+      else if (out.includes(OPEN)) failures.push(`${name} probe succeeded inside the sandbox (expected it to be blocked)`);
       else if (!out.includes(BLOCKED)) failures.push(`${name} probe inconclusive: wrapper exited ${r.status} with no result, treating the sandbox as not working`);
     };
 

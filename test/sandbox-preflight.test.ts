@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { test } from 'node:test';
 import type { AgentRequest, Runner } from '../src/agent.ts';
 import { runGoal } from '../src/conductor.ts';
 import { fakeRunner } from '../src/fake.ts';
-import { buildSandboxPolicy, preflightSandbox, type ProbeExec } from '../src/sandbox.ts';
+import { DEFAULT_IMAGE } from '../src/container.ts';
+import { buildSandboxPolicy, preflightSandbox, PROBE_TRAILING_ARGS, type ProbeExec } from '../src/sandbox.ts';
 import { tempRepo } from './helpers.ts';
 
 const policy = buildSandboxPolicy({ worktree: '/wt', tmpDir: '/tmp', home: '/home/u', hiddenScenarioDir: '/r/.orchestra/hidden', gitCommonDir: '/r/.git' });
@@ -141,6 +143,72 @@ test('probes run through the srt wrapper and scripts never contain a literal mar
   assert.ok(wrapped.every((s) => s.args[0] === '--settings'));
   assert.match(wrapped[1].args.join(' '), /readFileSync/);
   assert.ok(!seen.some((s) => s.args.join(' ').includes('ORCHESTRA_PROBE_OPEN')));
+});
+
+// Strips the wrapper prefix and really runs the inner argv (no shell), like srt or docker would hand it
+// to node. `tweak` lets a test drop or alter trailing args the way a mangling wrapper would.
+const realInner = (backend: 'srt' | 'docker', tweak: (inner: string[]) => string[] = (a) => a): ProbeExec => (c, args) => {
+  if (c === 'node') return result(OPEN);
+  const inner = backend === 'srt' ? args.slice(args.indexOf('--') + 1) : args.slice(args.indexOf(DEFAULT_IMAGE) + 1);
+  const [cmd, ...rest] = tweak(inner);
+  const r = spawnSync(cmd, rest, { encoding: 'utf8', timeout: 15_000 });
+  return { status: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '', error: r.error?.message };
+};
+const argvFailures = (r: { failures: string[] }) => r.failures.filter((f) => /argv was not passed through/.test(f));
+
+test('probe args end with node -e script -- and worker-like trailing args (srt and docker)', () => {
+  assert.ok(PROBE_TRAILING_ARGS.includes('--settings') && PROBE_TRAILING_ARGS.includes('-p'));
+  const json = PROBE_TRAILING_ARGS[PROBE_TRAILING_ARGS.indexOf('--settings') + 1];
+  assert.ok(json.includes('"') && json.includes(' ') && json.includes('$'));
+  for (const backend of ['srt', 'docker'] as const) {
+    const seen: string[][] = [];
+    preflightSandbox(policy, backend, (c, args) => (c !== 'node' && seen.push(args), result(c === 'node' ? OPEN : BLOCKED)), opts);
+    assert.ok(seen.length >= 1);
+    for (const args of seen) {
+      const n = args.length - PROBE_TRAILING_ARGS.length;
+      assert.deepEqual(args.slice(n), PROBE_TRAILING_ARGS);
+      assert.deepEqual([args[n - 4], args[n - 3], args[n - 1]], ['node', '-e', '--']);
+    }
+  }
+});
+
+test('claude probe args carry no trailing probe args', () => {
+  const seen: string[][] = [];
+  preflightSandbox(policy, 'claude', (c, args) => (c !== 'node' && seen.push(args), result(c === 'node' ? OPEN : BLOCKED)), opts);
+  assert.ok(seen.length >= 1);
+  for (const args of seen) {
+    assert.equal(args[0], '-p');
+    assert.ok(!args.includes('--'));
+    assert.equal(args.filter((a) => a === '--settings').length, 1);
+    assert.ok(!args.some((a) => PROBE_TRAILING_ARGS.slice(1).includes(a) && a !== '--settings' && a !== '-p'));
+    assert.deepEqual(args.slice(-2), ['--output-format', 'text']);
+  }
+});
+
+test('intact argv really executed via spawnSync: no argv failure', () => {
+  for (const backend of ['srt', 'docker'] as const) {
+    const r = preflightSandbox(policy, backend, realInner(backend), opts);
+    assert.deepEqual(argvFailures(r), [], `${backend}: ${r.failures.join('; ')}`);
+  }
+});
+
+test('a dropped trailing arg fails pre-flight with the argv reason', () => {
+  for (const backend of ['srt', 'docker'] as const) {
+    const r = preflightSandbox(policy, backend, realInner(backend, (a) => a.filter((x) => x !== '-p')), opts);
+    assert.equal(r.ok, false);
+    assert.ok(argvFailures(r).length >= 1, r.failures.join('; '));
+    assert.match(argvFailures(r)[0], new RegExp(`${backend} mangled or dropped arguments`));
+  }
+});
+
+test('an altered JSON value (dollar sign stripped, or split on spaces) fails with the argv reason', () => {
+  const strip = (a: string[]) => a.map((x, i) => (i > 2 ? x.replace(/\$/g, '') : x)); // leave node, -e and the script alone
+  const split = (a: string[]) => a.flatMap((x, i) => (x.startsWith('{') && a[i - 1] === '--settings' ? x.split(' ') : [x]));
+  for (const tweak of [strip, split]) {
+    const r = preflightSandbox(policy, 'srt', realInner('srt', tweak), opts);
+    assert.equal(r.ok, false);
+    assert.ok(argvFailures(r).length >= 1, r.failures.join('; '));
+  }
 });
 
 function countingRunner(inner: Runner) {
