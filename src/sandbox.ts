@@ -224,13 +224,23 @@ function readScript(file: string): string {
 
 // Trailing arguments shaped like the ones real workers pass after the command: a --settings flag whose
 // JSON value holds double quotes, spaces and a dollar sign, plus -p and a prompt-like value. The srt and
-// docker probes carry them after `node -e <script> --` and the probe script checks it received them intact.
+// docker probes carry them after `node -e <script> PROBE_ARGV_POSITIONAL` and the probe script checks it
+// received them intact.
 export const PROBE_TRAILING_ARGS: string[] = ['--settings', '{"a": "x y $HOME", "b": "it\'s"}', '-p', 'Say "hi" to $USER'];
 
-// With `node -e <script> -- a b`, node consumes the `--` and process.argv is [node, a, b], so the
-// worker-style arguments are process.argv.slice(1). The check is exact: same length, strict equality.
+// Why a positional and not `--`: node rejects `node -e <script> --settings ...` ("bad option"), so
+// something has to end node's option parsing. A literal `--` would also end srt's option parsing, so a
+// srtArgs that lost its own `--` (the #74 bug) would still stop at the probe's `--` and never see the
+// trailing --settings, and pre-flight would pass. A plain positional ends node's parsing (node treats
+// everything after the first non-option as script args) but not srt's (commander keeps parsing known
+// options after operands), so the outer argv carries `--settings <json>` with no terminator before it,
+// exactly like a worker's `claude ... --settings <json>`. It also needs no shell in the docker image.
+export const PROBE_ARGV_POSITIONAL = 'orchestra-probe';
+
+// With `node -e <script> orchestra-probe a b`, process.argv is [node, orchestra-probe, a, b]. The check
+// is exact: same length, strict equality, so a dropped, split or re-quoted argument is a mismatch.
 function argvGuard(body: string): string {
-  const expected = JSON.stringify(PROBE_TRAILING_ARGS);
+  const expected = JSON.stringify([PROBE_ARGV_POSITIONAL, ...PROBE_TRAILING_ARGS]);
   return `const a=process.argv.slice(1),e=${expected};if(a.length!==e.length||e.some((x,i)=>a[i]!==x)){console.log(${marker(ARGV_MISMATCH)})}else{${body}}`;
 }
 
@@ -255,7 +265,8 @@ function unmountedCanaryBase(mounts: string[]): string | null {
 // Runs both probes inside the same wrapper workers get. Each must FAIL (be blocked) for ok. A probe
 // that succeeds, a wrapper that cannot start, or output with no marker (inconclusive) all fail closed.
 // The srt and docker probes also use the worker argv shape: the node command is followed by
-// `-- <PROBE_TRAILING_ARGS>` (a --settings JSON value with quotes, spaces and a dollar sign, plus -p), and
+// `orchestra-probe <PROBE_TRAILING_ARGS>` (a --settings JSON value with quotes, spaces and a dollar sign,
+// plus -p, with no `--` in front of it, see PROBE_ARGV_POSITIONAL), and
 // the probe script verifies it received them byte for byte. This catches the class of bug fixed in PR #74,
 // where srt consumed the worker's own --settings as its settings path, which a bare `node -e` probe never
 // exercised. A mismatch fails pre-flight. The claude backend goes through a Bash tool call, so it is out
@@ -282,7 +293,7 @@ export function preflightSandbox(policy: SandboxPolicy, backend: 'srt' | 'claude
 
     const wrap = (script: string): { command: string; args: string[] } => {
       const worker = backend === 'srt' || backend === 'docker';
-      const inner = worker ? ['node', '-e', argvGuard(script), '--', ...PROBE_TRAILING_ARGS] : ['node', '-e', script];
+      const inner = worker ? ['node', '-e', argvGuard(script), PROBE_ARGV_POSITIONAL, ...PROBE_TRAILING_ARGS] : ['node', '-e', script];
       if (backend === 'srt') {
         const [command, ...args] = srtArgs(probePolicy, settings, inner[0], inner.slice(1));
         return { command, args };

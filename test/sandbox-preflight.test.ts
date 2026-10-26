@@ -7,7 +7,7 @@ import type { AgentRequest, Runner } from '../src/agent.ts';
 import { runGoal } from '../src/conductor.ts';
 import { fakeRunner } from '../src/fake.ts';
 import { DEFAULT_IMAGE } from '../src/container.ts';
-import { buildSandboxPolicy, preflightSandbox, PROBE_TRAILING_ARGS, type ProbeExec } from '../src/sandbox.ts';
+import { buildSandboxPolicy, preflightSandbox, PROBE_ARGV_POSITIONAL, PROBE_TRAILING_ARGS, type ProbeExec } from '../src/sandbox.ts';
 import { tempRepo } from './helpers.ts';
 
 const policy = buildSandboxPolicy({ worktree: '/wt', tmpDir: '/tmp', home: '/home/u', hiddenScenarioDir: '/r/.orchestra/hidden', gitCommonDir: '/r/.git' });
@@ -156,7 +156,7 @@ const realInner = (backend: 'srt' | 'docker', tweak: (inner: string[]) => string
 };
 const argvFailures = (r: { failures: string[] }) => r.failures.filter((f) => /argv was not passed through/.test(f));
 
-test('probe args end with node -e script -- and worker-like trailing args (srt and docker)', () => {
+test('probe args end with node -e script, a positional and worker-like trailing args with no -- (srt and docker)', () => {
   assert.ok(PROBE_TRAILING_ARGS.includes('--settings') && PROBE_TRAILING_ARGS.includes('-p'));
   const json = PROBE_TRAILING_ARGS[PROBE_TRAILING_ARGS.indexOf('--settings') + 1];
   assert.ok(json.includes('"') && json.includes(' ') && json.includes('$'));
@@ -167,7 +167,11 @@ test('probe args end with node -e script -- and worker-like trailing args (srt a
     for (const args of seen) {
       const n = args.length - PROBE_TRAILING_ARGS.length;
       assert.deepEqual(args.slice(n), PROBE_TRAILING_ARGS);
-      assert.deepEqual([args[n - 4], args[n - 3], args[n - 1]], ['node', '-e', '--']);
+      assert.deepEqual([args[n - 4], args[n - 3], args[n - 1]], ['node', '-e', PROBE_ARGV_POSITIONAL]);
+      // The only `--` is srt's own, before node: nothing ends srt's option parsing ahead of the trailing
+      // --settings, so a srtArgs that lost its `--` would see it, like with a real worker (#74).
+      const inner = args.slice(args.indexOf('node'));
+      assert.ok(!inner.includes('--'), inner.join(' '));
     }
   }
 });
