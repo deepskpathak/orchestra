@@ -24,7 +24,7 @@ Orchestra is a factory built on Claude Code. You give it a goal. It:
 2. builds tasks in parallel git worktrees,
 3. verifies each one with tests plus an independent judge working from hidden scenarios,
 4. repairs what fails,
-5. merges through a serialized queue,
+5. merges through a queue, one at a time by default,
 6. records what it learned,
 7. and periodically evolves its own prompts and config.
 
@@ -46,7 +46,7 @@ A task passes only if the judge says pass, the score meets the pass threshold (0
 
 **Stronger verification (opt-in).** A `verification` block adds a judge panel, an agentic judge that runs scenario checks itself, frozen acceptance contracts, oracle tests written by a separate session, and a mutation score per run. All are off by default and none has been measured on real runs yet.
 
-**Merge.** Passing tasks queue up and merge one at a time onto `orchestra/<run>/integration`, with tests after each merge. A failing merge is reset.
+**Merge.** By default, passing tasks queue up and merge one at a time onto `orchestra/<run>/integration`, with tests after each merge. A failing merge is reset. An opt-in batch merge (`throughput.batchMerge`) lands tasks with disjoint footprints together with one test run per batch, and bisects a failing batch.
 
 **Learn.** The librarian turns repairs and failures into lessons. The planner tags each run with a short domain slug such as `cli` or `docs`, and lessons are stored per domain plus a global set. Every lesson must cite evidence (the run or task behind it), or it is dropped. Each domain keeps at most 25 lessons, and prompts get at most 15, domain first and then global.
 
@@ -93,7 +93,7 @@ the stages go like this:
 2. **Build.** Independent tasks start together in their own worktrees. Dependent ones wait.
 3. **Verify.** Tests run, then the judge scores each diff against criteria and the scenarios it alone can see.
 4. **Repair.** If a task is rejected, a new worker gets the judge's notes and tries again.
-5. **Merge.** Passing tasks land one at a time on the integration branch.
+5. **Merge.** Passing tasks land on the integration branch, one at a time by default.
 6. **Learn.** The librarian records lessons for next time.
 
 The dashboard looks roughly like this (illustrative output, not from a measured run):
