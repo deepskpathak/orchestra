@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { test } from 'node:test';
 import type { AgentRequest, Runner } from '../src/agent.ts';
 import { runGoal } from '../src/conductor.ts';
 import { fakeRunner } from '../src/fake.ts';
-import { buildSandboxPolicy, preflightSandbox, type ProbeExec } from '../src/sandbox.ts';
+import { DEFAULT_IMAGE } from '../src/container.ts';
+import { buildSandboxPolicy, preflightSandbox, PROBE_ARGV_POSITIONAL, PROBE_TRAILING_ARGS, type ProbeExec } from '../src/sandbox.ts';
 import { tempRepo } from './helpers.ts';
 
 const policy = buildSandboxPolicy({ worktree: '/wt', tmpDir: '/tmp', home: '/home/u', hiddenScenarioDir: '/r/.orchestra/hidden', gitCommonDir: '/r/.git' });
@@ -141,6 +143,146 @@ test('probes run through the srt wrapper and scripts never contain a literal mar
   assert.ok(wrapped.every((s) => s.args[0] === '--settings'));
   assert.match(wrapped[1].args.join(' '), /readFileSync/);
   assert.ok(!seen.some((s) => s.args.join(' ').includes('ORCHESTRA_PROBE_OPEN')));
+});
+
+// Strips the wrapper prefix and really runs the inner argv (no shell), like srt or docker would hand it
+// to node. `tweak` lets a test drop or alter trailing args the way a mangling wrapper would. The
+// unsandboxed control reports no connectivity, so pre-flight skips the network probe and only the read
+// probe runs for real: no test makes an outbound request.
+const realInner = (backend: 'srt' | 'docker', tweak: (inner: string[]) => string[] = (a) => a): ProbeExec => (c, args) => {
+  if (c === 'node') return result(BLOCKED);
+  assert.ok(!args.join(' ').includes('fetch('), 'the network probe must never be executed for real');
+  const inner = backend === 'srt' ? args.slice(args.indexOf('--') + 1) : args.slice(args.indexOf(DEFAULT_IMAGE) + 1);
+  const [cmd, ...rest] = tweak(inner);
+  const r = spawnSync(cmd, rest, { encoding: 'utf8', timeout: 15_000 });
+  return { status: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '', error: r.error?.message };
+};
+const argvFailures = (r: { failures: string[] }) => r.failures.filter((f) => /argv was not passed through/.test(f));
+
+test('probe args end with node -e script, a positional and worker-like trailing args with no -- (srt and docker)', () => {
+  assert.ok(Object.isFrozen(PROBE_TRAILING_ARGS));
+  assert.ok(PROBE_TRAILING_ARGS.includes('--settings') && PROBE_TRAILING_ARGS.includes('-p'));
+  const json = PROBE_TRAILING_ARGS[PROBE_TRAILING_ARGS.indexOf('--settings') + 1];
+  assert.ok(json.includes('"') && json.includes(' ') && json.includes('$'));
+  for (const backend of ['srt', 'docker'] as const) {
+    const seen: string[][] = [];
+    preflightSandbox(policy, backend, (c, args) => (c !== 'node' && seen.push(args), result(c === 'node' ? OPEN : BLOCKED)), opts);
+    assert.ok(seen.length >= 1);
+    for (const args of seen) {
+      const n = args.length - PROBE_TRAILING_ARGS.length;
+      assert.deepEqual(args.slice(n), PROBE_TRAILING_ARGS);
+      assert.deepEqual([args[n - 4], args[n - 3], args[n - 1]], ['node', '-e', PROBE_ARGV_POSITIONAL]);
+      // The only `--` is srt's own, before node: nothing ends srt's option parsing ahead of the trailing
+      // --settings, so a srtArgs that lost its `--` would see it, like with a real worker (#74).
+      const inner = args.slice(args.indexOf('node'));
+      assert.ok(!inner.includes('--'), inner.join(' '));
+    }
+  }
+});
+
+test('claude probe args carry no trailing probe args', () => {
+  const seen: string[][] = [];
+  preflightSandbox(policy, 'claude', (c, args) => (c !== 'node' && seen.push(args), result(c === 'node' ? OPEN : BLOCKED)), opts);
+  assert.ok(seen.length >= 1);
+  for (const args of seen) {
+    assert.equal(args[0], '-p');
+    assert.ok(!args.includes('--'));
+    assert.equal(args.filter((a) => a === '--settings').length, 1);
+    assert.ok(!args.some((a) => PROBE_TRAILING_ARGS.slice(1).includes(a) && a !== '--settings' && a !== '-p'));
+    assert.deepEqual(args.slice(-2), ['--output-format', 'text']);
+  }
+});
+
+test('intact argv really executed via spawnSync: no argv failure', () => {
+  for (const backend of ['srt', 'docker'] as const) {
+    const r = preflightSandbox(policy, backend, realInner(backend), opts);
+    assert.deepEqual(argvFailures(r), [], `${backend}: ${r.failures.join('; ')}`);
+  }
+});
+
+test('a dropped trailing arg fails pre-flight with the argv reason', () => {
+  for (const backend of ['srt', 'docker'] as const) {
+    const r = preflightSandbox(policy, backend, realInner(backend, (a) => a.filter((x) => x !== '-p')), opts);
+    assert.equal(r.ok, false);
+    assert.ok(argvFailures(r).length >= 1, r.failures.join('; '));
+    const culprit = backend === 'docker' ? 'the docker wrapper or the image entrypoint' : 'the srt wrapper';
+    assert.ok(argvFailures(r)[0].includes(`(${culprit} altered or dropped arguments)`), argvFailures(r)[0]);
+  }
+});
+
+test('an altered JSON value (dollar sign stripped, or split on spaces) fails with the argv reason', () => {
+  const strip = (a: string[]) => a.map((x, i) => (i > 2 ? x.replace(/\$/g, '') : x)); // leave node, -e and the script alone
+  const split = (a: string[]) => a.flatMap((x, i) => (x.startsWith('{') && a[i - 1] === '--settings' ? x.split(' ') : [x]));
+  for (const tweak of [strip, split]) {
+    const r = preflightSandbox(policy, 'srt', realInner('srt', tweak), opts);
+    assert.equal(r.ok, false);
+    assert.ok(argvFailures(r).length >= 1, r.failures.join('; '));
+  }
+});
+
+// A stand-in for srt's CLI, modelled on how it parses argv: commander with allowUnknownOption and no
+// passThroughOptions, so its own options are recognised anywhere until a literal `--`, the last
+// --settings wins, and unknown options and operands are kept in order as the command. As in commander's
+// parseOptions, once an unknown option has been seen a later `--` is kept as part of the command
+// instead of being consumed. Like srt it refuses
+// to start when the settings path is not a readable srt settings file, which is how the #74 bug showed
+// up. It enforces nothing: it runs the read probe for real through `bash -c` with shell-quoted argv (as
+// srt does on macOS and Linux) and reports the canary read as blocked, so the test isolates argv
+// handling. The network probe and the control are never executed, so no request leaves the machine.
+const shq = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
+const commanderSrt = (argvOf: (args: string[]) => string[]): ProbeExec => (c, raw) => {
+  if (c === 'node') return result(OPEN);
+  const args = argvOf(raw);
+  let settings: string | undefined;
+  const command: string[] = [];
+  let sawUnknown = false;
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--') { command.push(...(sawUnknown ? args.slice(i) : args.slice(i + 1))); break; }
+    if (args[i] === '--settings') { settings = args[++i]; continue; }
+    if (args[i].startsWith('-')) sawUnknown = true;
+    command.push(args[i]);
+  }
+  try {
+    if (!JSON.parse(readFileSync(settings ?? '', 'utf8')).filesystem) throw new Error('not an srt settings file');
+  } catch (e) {
+    return { status: 1, stdout: '', stderr: `Error: could not load settings ${settings}: ${(e as Error).message}` };
+  }
+  if (command.join(' ').includes('fetch(')) return result(BLOCKED);
+  const r = spawnSync('bash', ['-c', command.map(shq).join(' ')], { encoding: 'utf8', timeout: 15_000 });
+  return { status: r.status, stdout: (r.stdout ?? '').replaceAll('ORCHESTRA_PROBE_OPEN', 'ORCHESTRA_PROBE_BLOCKED'), stderr: r.stderr ?? '', error: r.error?.message };
+};
+
+test('#74 regression: a srtArgs without its -- fails pre-flight against a commander-style srt', () => {
+  const intact = preflightSandbox(policy, 'srt', commanderSrt((a) => a), opts);
+  assert.deepEqual([intact.ok, intact.failures, intact.warnings], [true, [], []]);
+  // Reconstructs the regressed srtArgs (['srt', '--settings', path, command, ...args]) by dropping the
+  // wrapper's own `--`, which is the first one in the argv. srt then takes the probe's trailing
+  // --settings <json> as its settings path, cannot load it, and never starts the probe.
+  const dropFirstDashDash = (a: string[]) => a.filter((x, i) => !(x === '--' && i === a.indexOf('--')));
+  const regressed = preflightSandbox(policy, 'srt', commanderSrt(dropFirstDashDash), opts);
+  assert.equal(regressed.ok, false);
+  assert.equal(regressed.failures.length, 2, regressed.failures.join('; '));
+  assert.ok(regressed.failures.every((f) => /inconclusive/.test(f)), regressed.failures.join('; '));
+});
+
+test('both probes skipped: warns that argv pass-through was not verified', () => {
+  // /var/tmp and the home dir are both mounted here, so docker has nowhere to put the read canary.
+  const mounted = buildSandboxPolicy({ worktree: '/wt', tmpDir: '/var/tmp', home: '/home/u', hiddenScenarioDir: '/h', gitCommonDir: homedir() });
+  const calls: string[] = [];
+  const exec: ProbeExec = (c) => (calls.push(c), result(BLOCKED));
+  // A user network skips the network probe; no connectivity (control BLOCKED) skips it under none.
+  for (const docker of [{ network: 'orch-egress' }, {}]) {
+    calls.length = 0;
+    const r = preflightSandbox(mounted, 'docker', exec, { ...opts, docker });
+    assert.equal(r.ok, true);
+    assert.ok(!calls.includes('docker'), 'no probe ran through the wrapper');
+    assert.ok(r.warnings.some((w) => /argv pass-through was NOT verified/.test(w)), r.warnings.join('; '));
+  }
+  // Any probe that ran checked argv, so no such warning.
+  const ran = preflightSandbox(policy, 'docker', fake(BLOCKED, BLOCKED), opts);
+  assert.ok(!ran.warnings.some((w) => /argv pass-through/.test(w)));
+  const srt = preflightSandbox(policy, 'srt', exec, opts);
+  assert.ok(!srt.warnings.some((w) => /argv pass-through/.test(w)), 'srt always runs the read probe');
 });
 
 function countingRunner(inner: Runner) {

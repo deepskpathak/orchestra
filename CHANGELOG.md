@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- Sandbox pre-flight for the srt and docker backends now checks argv pass-through: the probe runs `node -e <script> orchestra-probe --settings <json> -p <prompt>` (JSON with quotes, spaces and `$`, and no `--` of its own, like a worker) and fails pre-flight if the arguments do not arrive byte for byte. A srt wrapper that loses its `--`, the bug fixed in #74, now fails pre-flight. When both probes are skipped, pre-flight warns that argv was not verified. The probe argv is hand-written rather than built by the worker code path, and the claude backend probe does not check argv.
+
 ## [0.7.0] - 2026-10-27
 
 ### Added
