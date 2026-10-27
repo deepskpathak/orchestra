@@ -38,21 +38,24 @@ export interface Worktree {
   branch: string;
 }
 
+// Every run's integration worktree lives at <wtRoot>/<runId>/_integration.
+function integrationPath(wtRoot: string, runId: string): string {
+  mkdirSync(join(wtRoot, runId), { recursive: true });
+  return join(wtRoot, runId, '_integration');
+}
+
 export function createIntegration(root: string, wtRoot: string, runId: string, baseRef?: string): Worktree & { base: string } {
   const base = git(root, 'rev-parse', baseRef ?? 'HEAD');
   const branch = `orchestra/${runId}/integration`;
-  const path = join(wtRoot, runId, '_integration');
-  mkdirSync(join(wtRoot, runId), { recursive: true });
+  const path = integrationPath(wtRoot, runId);
   git(root, 'worktree', 'add', '-q', '-b', branch, path, base);
   return { path, branch, base };
 }
 
 // Resume: check out an existing integration branch at its tip in the usual integration path.
 export function reopenIntegration(root: string, wtRoot: string, runId: string, branch: string, base: string): Worktree & { base: string } {
-  const path = join(wtRoot, runId, '_integration');
-  if (existsSync(path)) removeWorktree(root, path);
-  tryGit(root, 'worktree', 'prune');
-  mkdirSync(join(wtRoot, runId), { recursive: true });
+  const path = integrationPath(wtRoot, runId);
+  removeWorktree(root, path); // a leftover from a crashed resume; also prunes stale worktree entries
   git(root, 'worktree', 'add', '-q', path, branch);
   return { path, branch, base };
 }
