@@ -2087,9 +2087,48 @@ export function assertResumable(store: Store, runId: string): Run {
   return run;
 }
 
-// Finish a run held for approval once its held tasks are approved: same run id, same integration branch.
-export async function resumeRun(opts: ResumeOptions): Promise<Run> {
-  const run = assertResumable(opts.store, opts.runId);
-  return new Conductor({ ...opts, goal: run.goal, kind: run.kind, harnessVersion: run.harness, baseRef: run.baseRef }, run).resume();
+// One resume per run at a time: an O_EXCL lock file holding the resumer's pid. A lock whose pid is gone (a crashed
+// or killed resume) is stale and is taken over, so a run that died mid-resume stays resumable.
+function acquireResumeLock(store: Store, runId: string): () => void {
+  const path = store.path('runs', runId, 'resume.lock');
+  for (let tries = 0; tries < 2; tries++) {
+    try {
+      writeFileSync(path, String(process.pid), { flag: 'wx' });
+      return () => rmSync(path, { force: true });
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
+      let pid = NaN;
+      try {
+        pid = Number(readFileSync(path, 'utf8').trim());
+      } catch {
+        // removed between our write and read; the next try takes it
+      }
+      if (pidAlive(pid)) throw new Error(`run ${runId} is already being resumed (pid ${pid}). Wait for it to finish, or delete ${path} if that process is not an orchestra resume`);
+      rmSync(path, { force: true });
+    }
+  }
+  throw new Error(`could not take the resume lock ${path}`);
 }
 
+function pidAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+// Finish a run held for approval once its held tasks are approved: same run id, same integration branch.
+export async function resumeRun(opts: ResumeOptions): Promise<Run> {
+  if (!opts.store.loadRun(opts.runId)) throw new Error(`unknown run "${opts.runId}"`);
+  const release = acquireResumeLock(opts.store, opts.runId);
+  try {
+    // Checked under the lock, so a resume that just finished (marker cleared) is not run twice.
+    const run = assertResumable(opts.store, opts.runId);
+    return await new Conductor({ ...opts, goal: run.goal, kind: run.kind, harnessVersion: run.harness, baseRef: run.baseRef }, run).resume();
+  } finally {
+    release();
+  }
+}

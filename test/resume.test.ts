@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import type { AgentRequest, AgentResult, Runner } from '../src/agent.ts';
@@ -300,4 +300,22 @@ test('a resume killed mid-run is recoverable: in-flight tasks restart, a landed 
   assert.equal(again.status, 'done', again.error);
   assert.equal(again.tasks[1].status, 'merged');
   assert.ok(!calls.includes('worker:T2'), 'a landed merge is not redone');
+}));
+
+test('a second concurrent resume of the same run is refused; a stale lock from a dead resume is taken over', () => asRequester(async () => {
+  const store = repo();
+  const runner = planned([t('T1'), t('T2', ['T1'])], ['T1']);
+  const run = await runGoal({ store, runner, goal: 'g' });
+  await approveTask(store, run.id, 'T1', 'bob');
+  const lock = store.path('runs', run.id, 'resume.lock');
+
+  // A lock left by a process that no longer exists.
+  const dead = spawnSync(process.execPath, ['-e', '']).pid!;
+  writeFileSync(lock, String(dead));
+  const [a, b] = await Promise.allSettled([resumeRun({ store, runner, runId: run.id }), resumeRun({ store, runner, runId: run.id })]);
+  assert.equal(a.status, 'fulfilled');
+  assert.equal((a as PromiseFulfilledResult<any>).value.status, 'done');
+  assert.equal(b.status, 'rejected');
+  assert.match(String((b as PromiseRejectedResult).reason), /already being resumed/);
+  assert.equal(existsSync(lock), false, 'the lock is released');
 }));
