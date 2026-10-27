@@ -36,6 +36,63 @@ test('footprint scheduling: overlapping tasks never run together, disjoint ones 
   assert.equal(typeof run.conflictRate, 'number');
 });
 
+// Each worker appends one line to a committed CHANGELOG.md, so two parallel tasks touch the same hunk.
+async function changelogRun(throughput: Record<string, unknown>) {
+  const store = tempRepo({ concurrency: 2, throughput: { footprintScheduling: true, batchMerge: { enabled: false, maxBatch: 4 }, ...throughput } as never });
+  const { appendFileSync, writeFileSync } = await import('node:fs');
+  writeFileSync(`${store.root}/CHANGELOG.md`, '# Changelog\n\n## Unreleased\n');
+  execFileSync('git', ['add', 'CHANGELOG.md'], { cwd: store.root });
+  execFileSync('git', ['commit', '-qm', 'changelog'], { cwd: store.root });
+  const iv: Record<string, [number, number]> = {};
+  const inner = planned([t('T1', ['a.txt', 'CHANGELOG.md']), t('T2', ['b.txt', 'CHANGELOG.md'])], iv);
+  const runner: Runner = async (req) => {
+    if (req.role === 'worker') appendFileSync(`${req.cwd}/CHANGELOG.md`, `- ${req.meta?.task}\n`);
+    return inner(req);
+  };
+  const run = await runGoal({ store, runner, goal: 'g' });
+  const changelog = execFileSync('git', ['show', `${run.integrationBranch}:CHANGELOG.md`], { cwd: store.root, encoding: 'utf8' });
+  const overlap = iv.T1[0] < iv.T2[1] && iv.T2[0] < iv.T1[1];
+  return { run, changelog, overlap };
+}
+
+test('shared files: tasks that share only CHANGELOG.md run in parallel and both appends merge', async () => {
+  const { run, changelog, overlap } = await changelogRun({});
+  assert.equal(run.status, 'done');
+  assert.equal(overlap, true, 'CHANGELOG.md alone must not serialize the tasks');
+  assert.match(changelog, /^- T1$/m);
+  assert.match(changelog, /^- T2$/m);
+  assert.equal(run.conflictRate, 0, 'the union driver merges both appends without a conflict');
+});
+
+test('git merge: two appends to CHANGELOG.md conflict by default and merge with the union driver', async () => {
+  const g = await import('../src/git.ts');
+  const { appendFileSync, writeFileSync, readFileSync } = await import('node:fs');
+  const store = tempRepo();
+  const sh = (...a: string[]) => execFileSync('git', a, { cwd: store.root, encoding: 'utf8' });
+  writeFileSync(`${store.root}/CHANGELOG.md`, '# Changelog\n');
+  sh('add', '-A');
+  sh('commit', '-qm', 'base');
+  for (const b of ['x', 'y']) {
+    sh('checkout', '-qb', b, 'main');
+    appendFileSync(`${store.root}/CHANGELOG.md`, `- ${b}\n`);
+    sh('commit', '-qam', b);
+  }
+  sh('checkout', '-q', 'x');
+  assert.equal(g.merge(store.root, 'y', 'm').ok, false, 'plain merge conflicts');
+  assert.equal(sh('status', '--porcelain').trim(), '', 'a failed merge is aborted');
+  assert.equal(g.merge(store.root, 'y', 'm', ['CHANGELOG.md']).ok, true);
+  assert.match(readFileSync(`${store.root}/CHANGELOG.md`, 'utf8'), /- x\n- y\n|- y\n- x\n/);
+  assert.equal(sh('check-attr', 'merge', 'CHANGELOG.md').trim(), 'CHANGELOG.md: merge: unspecified', 'the repo attributes are not edited');
+});
+
+test('shared files: an empty sharedFiles list keeps CHANGELOG.md as overlap', async () => {
+  const { run, changelog, overlap } = await changelogRun({ sharedFiles: [] });
+  assert.equal(run.status, 'done');
+  assert.equal(overlap, false);
+  assert.match(changelog, /^- T1$/m);
+  assert.match(changelog, /^- T2$/m);
+});
+
 test('conflict rate is recorded with all features off, and the run.end event carries it', async () => {
   const store = tempRepo();
   const run = await runGoal({ store, runner: fakeRunner(), goal: 'g' });

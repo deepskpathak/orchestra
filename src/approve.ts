@@ -3,6 +3,7 @@
 import { rmSync } from 'node:fs';
 import { canApprove, runSatisfaction } from './oversight.ts';
 import * as g from './git.ts';
+import { sharedFilesFor } from './throughput.ts';
 import type { Store } from './store.ts';
 import type { DeferredWork, Run } from './types.ts';
 
@@ -25,7 +26,7 @@ export async function approveTask(store: Store, runId: string, taskId: string, b
   g.git(store.root, 'worktree', 'add', '-q', path, run.integrationBranch);
   const before = g.head(path);
   try {
-    const m = g.merge(path, task.branch, `Merge ${task.id}: ${task.title} (approved by ${by})`);
+    const m = g.merge(path, task.branch, `Merge ${task.id}: ${task.title} (approved by ${by})`, sharedFilesFor(store.config()));
     if (!m.ok) throw new Error(`${taskId} conflicts with the integration branch: ${m.detail.slice(0, 300)}`);
     const cmd = store.config().testCommand;
     if (cmd) {

@@ -23,7 +23,7 @@ import { loadHarness, type Harness } from './harness.ts';
 import { applyLessonEdits, editsFromResponse, expireDomain, formatLearnings, listDomains, normalizeDomain, readAllLearnings, readLearnings, GLOBAL } from './learnings.ts';
 import { buildSandboxPolicy, preflightSandbox, scrubVerifierEnv, scrubWorkerEnv, type ProbeExec } from './sandbox.ts';
 import { newRunId, type Store } from './store.ts';
-import { bisectBatch, canStart, conflictRate, decisionLog, planBatches } from './throughput.ts';
+import { bisectBatch, canStart, conflictRate, decisionLog, planBatches, sharedFilesFor } from './throughput.ts';
 import { UNKNOWN_REQUESTER, classifyRisk, onlyHeldForApproval, runSatisfaction } from './oversight.ts';
 import { bestOfNAllowed, budgetExhausted, budgetLine, cacheReadShare, planChecks, selectBestByTests, shouldEscalatePlan, type BudgetState, type TestCandidate } from './cost.ts';
 import { DEFAULT_PROVIDER, resolveModel } from './models.ts';
@@ -908,7 +908,7 @@ export class Conductor {
       else if (warming) slots = Math.min(slots, 1);
       for (const t of ready) {
         if (slots <= 0) break;
-        if (cfg.throughput?.footprintScheduling && !canStart(t, running)) continue;
+        if (cfg.throughput?.footprintScheduling && !canStart(t, running, sharedFilesFor(cfg))) continue;
         slots--;
         running.push(t);
         const p = this.attempt(t)
@@ -1584,7 +1584,7 @@ export class Conductor {
   private async mergeBatches(items: { task: Task; resolve: () => void }[]): Promise<void> {
     const max = this.cfg.throughput?.batchMerge.maxBatch ?? 4;
     try {
-      for (const ids of planBatches(items.map((i) => i.task), max)) {
+      for (const ids of planBatches(items.map((i) => i.task), max, sharedFilesFor(this.cfg))) {
         const batch = ids.map((id) => items.find((i) => i.task.id === id)!.task);
         try {
           await this.mergeBatch(batch);
@@ -1608,7 +1608,7 @@ export class Conductor {
     const mergeAll = (tasks: Task[]): Task[] => {
       g.resetTo(ip, before);
       const failed: Task[] = [];
-      for (const t of tasks) if (!g.merge(ip, t.branch!, `Merge ${t.id}: ${t.title}`).ok) failed.push(t);
+      for (const t of tasks) if (!g.merge(ip, t.branch!, `Merge ${t.id}: ${t.title}`, sharedFilesFor(cfg)).ok) failed.push(t);
       return failed;
     };
     const conflicted = mergeAll(batch);
@@ -1700,7 +1700,7 @@ export class Conductor {
     const ip = this.integration.path;
     const before = g.head(ip);
     const footprint = this.footprint(task);
-    const m = g.merge(ip, task.branch!, `Merge ${task.id}: ${task.title}`);
+    const m = g.merge(ip, task.branch!, `Merge ${task.id}: ${task.title}`, sharedFilesFor(cfg));
     if (!m.ok) {
       this.ledgerOutcome(task, 'conflict');
       g.resetTo(task.worktree!, before);
