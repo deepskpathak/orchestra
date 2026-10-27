@@ -589,14 +589,16 @@ export class Conductor {
       throw e;
     }
     return this.guarded(async () => {
+      const recovered = this.recoverInFlight();
       const reset = this.unblockResumable();
       const deferred = run.deferred ?? [];
       run.status = 'running';
       delete run.error;
-      delete run.deferred;
-      this.emit('log', `Run resumed after approval (deferred: ${deferred.join(', ') || 'none'})${reset.length ? `; running ${reset.join(', ')}` : '; no tasks to run'}`, { deferred, reset });
+      this.emit('log', `Run resumed after approval (deferred: ${deferred.join(', ') || 'none'})${reset.length ? `; running ${reset.join(', ')}` : '; no tasks to run'}${recovered.length ? `; recovered ${recovered.join(', ')} from an interrupted resume` : ''}`, { deferred, reset, recovered });
       this.save();
       await this.complete();
+      // Cleared only once the tail finished: a resume that throws or is killed keeps the marker and can be retried.
+      delete run.deferred;
     });
   }
 
@@ -610,6 +612,28 @@ export class Conductor {
       this.contract = contract;
     }
     this.loadAtlas();
+  }
+
+  // A resume that died mid-run (crash, Ctrl-C) leaves tasks in flight. A merge that reached the integration branch
+  // counts as merged; any other in-flight task restarts on a clean worktree from the integration tip.
+  private recoverInFlight(): string[] {
+    const { store } = this;
+    const recovered: string[] = [];
+    for (const t of this.run.tasks) {
+      if (t.status !== 'running' && t.status !== 'judging' && t.status !== 'merging') continue;
+      recovered.push(t.id);
+      if (t.status === 'merging' && t.branch && g.tryGit(store.root, 'merge-base', '--is-ancestor', t.branch, this.integration.branch).ok) {
+        t.status = 'merged';
+        t.endedAt ??= Date.now();
+        continue;
+      }
+      if (t.worktree) g.removeWorktree(store.root, t.worktree);
+      if (t.branch) g.deleteBranch(store.root, t.branch);
+      delete t.worktree;
+      delete t.branch;
+      t.status = 'pending';
+    }
+    return recovered;
   }
 
   // Blocked tasks whose dependency chain ends only in merged tasks go back to pending. A task behind a failed or

@@ -11,6 +11,7 @@ import { PACKAGE_ROOT } from '../src/harness.ts';
 import { runSatisfaction } from '../src/oversight.ts';
 import { DEFAULT_PROJECT_CONFIG } from '../src/store.ts';
 import type { ProjectConfig } from '../src/types.ts';
+import type { ProbeExec } from '../src/sandbox.ts';
 import { tempRepo } from './helpers.ts';
 
 // W7.1 resume: finish a run that approval finalised with deferred work, on the same run and integration branch.
@@ -242,4 +243,61 @@ test('a resume that fails before any work runs leaves the stored run untouched',
   execFileSync('git', ['worktree', 'remove', '--force', other], { cwd: store.root });
   const done = await resumeRun({ store, runner, runId: run.id });
   assert.equal(done.status, 'done', done.error);
+}));
+
+test('the marker survives a failed pre-flight and a throw inside the tail; a retry finishes the run', () => asRequester(async () => {
+  const store = repo();
+  let librarianThrows = 1;
+  const inner = planned([t('T1'), t('T2', ['T1'])], ['T1']);
+  const runner: Runner = async (req) => {
+    if (req.role === 'librarian' && librarianThrows-- > 0) throw new Error('librarian crashed');
+    return inner(req);
+  };
+  const run = await runGoal({ store, runner: inner, goal: 'g' });
+  await approveTask(store, run.id, 'T1', 'bob');
+  const before = JSON.stringify(store.loadRun(run.id));
+
+  // Pre-flight: the probe reaches a blocked host, so workers must not be dispatched.
+  const open: ProbeExec = () => ({ status: 0, stdout: 'ORCHESTRA_PROBE_OPEN\n', stderr: '' });
+  await assert.rejects(() => resumeRun({ store, runner, runId: run.id, sandbox: { backend: 'srt' }, preflightExec: open }), /pre-flight failed/);
+  assert.equal(JSON.stringify(store.loadRun(run.id)), before);
+
+  // A throw inside the tail (the librarian): the run fails but keeps its marker.
+  const failed = await resumeRun({ store, runner, runId: run.id });
+  assert.equal(failed.status, 'failed');
+  assert.match(failed.error!, /librarian crashed/);
+  assert.deepEqual(store.loadRun(run.id)!.deferred, ['tasks', 'learning']);
+  assert.equal(failed.tasks[1].status, 'merged');
+
+  const done = await resumeRun({ store, runner, runId: run.id });
+  assert.equal(done.status, 'done', done.error);
+  assert.equal(done.deferred, undefined);
+}));
+
+test('a resume killed mid-run is recoverable: in-flight tasks restart, a landed merge counts as merged', () => asRequester(async () => {
+  const store = repo();
+  const calls: string[] = [];
+  const runner = planned([t('T1'), t('T2', ['T1'])], ['T1'], calls);
+  const run = await runGoal({ store, runner, goal: 'g' });
+  await approveTask(store, run.id, 'T1', 'bob');
+  // What a Ctrl-C during the worker leaves behind: status running, T2 running, marker still set.
+  const crashed = store.loadRun(run.id)!;
+  crashed.status = 'running';
+  crashed.tasks[1].status = 'running';
+  store.saveRun(crashed);
+  const done = await resumeRun({ store, runner, runId: run.id });
+  assert.equal(done.status, 'done', done.error);
+  assert.equal(done.tasks[1].status, 'merged');
+
+  // Killed after T2's merge landed but before the run file said so.
+  const landed = store.loadRun(run.id)!;
+  landed.status = 'running';
+  landed.tasks[1].status = 'merging';
+  landed.deferred = ['learning'];
+  store.saveRun(landed);
+  calls.length = 0;
+  const again = await resumeRun({ store, runner, runId: run.id });
+  assert.equal(again.status, 'done', again.error);
+  assert.equal(again.tasks[1].status, 'merged');
+  assert.ok(!calls.includes('worker:T2'), 'a landed merge is not redone');
 }));
