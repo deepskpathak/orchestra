@@ -547,7 +547,7 @@ export class Conductor {
 
   async execute(): Promise<Run> {
     const { run, store } = this;
-    try {
+    return this.guarded(async () => {
       g.assertRepo(store.root);
       g.excludeOrchestra(store.root);
       this.integration = g.createIntegration(store.root, this.wtRoot, run.id, run.baseRef);
@@ -561,34 +561,15 @@ export class Conductor {
       await this.plan();
       run.status = 'running';
       this.save();
-      await this.schedule();
-      if (onlyHeldForApproval(run.tasks)) {
-        // W7.1: the run is waiting on a human, not failed. Satisfaction, mutation and learning describe the whole
-        // run, so they wait for `orchestra approve` (which finalises satisfaction and status; see src/approve.ts).
-        run.status = 'awaiting_approval';
-        const held = run.tasks.filter((t) => t.status === 'awaiting_approval').map((t) => t.id);
-        this.emit('log', `Run waits for approval of ${held.join(', ')}; satisfaction, mutation score and learning are deferred`, { held });
-        return run;
-      }
-      const mutationFailure = await this.mutationPass();
+      await this.complete();
+    });
+  }
 
-      const merged = run.tasks.filter((t) => t.status === 'merged');
-      run.satisfaction = runSatisfaction(run.tasks);
-
-      if (run.kind === 'goal') {
-        run.status = 'compounding';
-        this.save();
-        await this.learn();
-      }
-      run.status = merged.length === run.tasks.length && !mutationFailure ? 'done' : 'failed';
-      if (mutationFailure && !run.error) run.error = mutationFailure;
-      if (run.status === 'failed' && !run.error) {
-        const human = run.tasks.filter((t) => t.status === 'needs_human').length;
-        const blocked = run.tasks.filter((t) => t.status === 'blocked').length;
-        const awaiting = run.tasks.filter((t) => t.status === 'awaiting_approval').length;
-        const failed = run.tasks.length - merged.length - human - blocked - awaiting;
-        run.error = `${run.tasks.length - merged.length} of ${run.tasks.length} tasks did not land (${failed} failed, ${blocked} blocked, ${human} need a human${awaiting ? `, ${awaiting} awaiting approval` : ''})`;
-      }
+  // Runs `body`, records any error as a failed run, and always finalises (cleanup, run metrics, run.end).
+  private async guarded(body: () => Promise<void>): Promise<Run> {
+    const { run } = this;
+    try {
+      await body();
     } catch (err) {
       run.status = 'failed';
       run.error = (err as Error).message;
@@ -610,6 +591,40 @@ export class Conductor {
       this.save();
     }
     return run;
+  }
+
+  // The post-plan tail shared by execute() and resume(): schedule, approval hold, mutation, satisfaction,
+  // learning and the final status.
+  private async complete(): Promise<void> {
+    const { run } = this;
+    await this.schedule();
+    if (onlyHeldForApproval(run.tasks)) {
+      // W7.1: the run is waiting on a human, not failed. Satisfaction, mutation and learning describe the whole
+      // run, so they wait for `orchestra approve` (which finalises satisfaction and status; see src/approve.ts).
+      run.status = 'awaiting_approval';
+      const held = run.tasks.filter((t) => t.status === 'awaiting_approval').map((t) => t.id);
+      this.emit('log', `Run waits for approval of ${held.join(', ')}; satisfaction, mutation score and learning are deferred`, { held });
+      return;
+    }
+    const mutationFailure = await this.mutationPass();
+
+    const merged = run.tasks.filter((t) => t.status === 'merged');
+    run.satisfaction = runSatisfaction(run.tasks);
+
+    if (run.kind === 'goal') {
+      run.status = 'compounding';
+      this.save();
+      await this.learn();
+    }
+    run.status = merged.length === run.tasks.length && !mutationFailure ? 'done' : 'failed';
+    if (mutationFailure && !run.error) run.error = mutationFailure;
+    if (run.status === 'failed' && !run.error) {
+      const human = run.tasks.filter((t) => t.status === 'needs_human').length;
+      const blocked = run.tasks.filter((t) => t.status === 'blocked').length;
+      const awaiting = run.tasks.filter((t) => t.status === 'awaiting_approval').length;
+      const failed = run.tasks.length - merged.length - human - blocked - awaiting;
+      run.error = `${run.tasks.length - merged.length} of ${run.tasks.length} tasks did not land (${failed} failed, ${blocked} blocked, ${human} need a human${awaiting ? `, ${awaiting} awaiting approval` : ''})`;
+    }
   }
 
   // ---------- phases ----------
