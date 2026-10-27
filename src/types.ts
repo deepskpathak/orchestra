@@ -176,6 +176,7 @@ export interface LedgerRow {
   cacheReadTokens?: number;
   cacheWriteTokens?: number;
   toolCounts?: Record<string, number>; // tool_use blocks by tool name; absent on legacy rows
+  cap?: { turns: number; usd: number }; // worker rows with budgets.workerPrompt on: the session caps passed (--max-turns, --max-budget-usd)
   footprint?: { planned: string[]; changed: string[]; declared?: string[] }; // on merged outcome rows: planned (named in the task text) vs changed files; declared = planner footprint files that exist
   outcome?: string; // e.g. "pass", "fail", "merged", "conflict"
   score?: number;

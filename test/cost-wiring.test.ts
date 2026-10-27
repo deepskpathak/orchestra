@@ -130,6 +130,32 @@ test('budget: a passing task at the cap still lands, and the second attempt carr
   assert.equal(run.tasks[0].status, 'merged');
 });
 
+test('budget: each worker attempt logs the exact prompt budget line, and worker ledger rows record the session caps', async () => {
+  const store = tempRepo({ budgets: { workerPrompt: { enabled: true, maxTurns: 4 } } });
+  const reqs: AgentRequest[] = [];
+  const run = await runGoal({ store, runner: planned([task('T1')], { onReq: (r) => reqs.push(r), fake: { failFirstAttemptOf: ['T1'] } }), goal: 'g' });
+  const logged = store.events(run.id).filter((e) => e.data?.budget);
+  assert.equal(logged.length, 2, 'one budget event per worker attempt');
+  for (const [i, e] of logged.entries()) {
+    const b = e.data!.budget as { attempt: number; line: string; turnsUsed: number; maxTurns: number; usdSpent: number; usdCap: number };
+    assert.equal(e.task, 'T1');
+    assert.equal(b.attempt, i + 1);
+    assert.equal(b.maxTurns, 4);
+    assert.ok(workers(reqs)[i].prompt.includes(`## Budget\n${b.line}`), 'the logged line is the one the worker saw');
+    assert.ok(e.msg.includes(b.line));
+  }
+  assert.equal((logged[0].data!.budget as any).turnsUsed, 0);
+  assert.equal((logged[1].data!.budget as any).turnsUsed, 3);
+  const rows = store.ledgerRows().filter((r) => r.role === 'worker' && r.turns > 0);
+  assert.deepEqual(rows.map((r) => r.cap?.turns), [4, 1]);
+  assert.ok(rows.every((r) => typeof r.cap?.usd === 'number'));
+
+  const off = tempRepo({ budgets: { workerPrompt: { enabled: false, maxTurns: 4 } } });
+  const run2 = await runGoal({ store: off, runner: planned([task('T1')]), goal: 'g' });
+  assert.equal(off.events(run2.id).some((e) => e.data?.budget), false);
+  assert.equal(off.ledgerRows().some((r) => 'cap' in r), false);
+});
+
 test('best-of-n: no verifier means exactly one sample; with a test command n samples run and tests select', async () => {
   const none = tempRepo({ bestOfN: { enabled: true, n: 3 }, testCommand: null });
   const r1: AgentRequest[] = [];

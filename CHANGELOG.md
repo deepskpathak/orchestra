@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Added
 
 - Opt-in `sandbox.allowLocalBinding` (boolean, default false) in `.orchestra/config.json`. When true it sets `network.allowLocalBinding: true` in the srt settings and `sandbox.network.allowLocalBinding: true` in the Claude Code sandbox settings, so tests that bind 127.0.0.1 can run inside the sandbox. On macOS it also lets sandboxed commands reach any localhost port without the proxy. Documented in `docs/configuration.md`.
+- With `budgets.workerPrompt` on, every worker attempt logs a run event with the exact `## Budget` line its prompt carried, as `${task} attempt ${n} Budget: ...`, with `data.budget` holding `attempt`, `turnsUsed`, `maxTurns`, `usdSpent`, `usdCap` and `line`. Worker ledger rows gain `cap: {turns, usd}`, the `--max-turns` and `--max-budget-usd` the session was started with, so caps can be compared with `turns` and `costUsd` after a run. Nothing is logged with the feature off.
 
 ### Fixed
 
