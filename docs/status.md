@@ -25,7 +25,7 @@ The test suite runs against fakes and injected executors. Two real runs on 2026-
 - **OS sandbox backends (M5) other than Claude Code's.** srt, docker and sandbox-exec have not run a real worker. The srt settings shape and the Claude Code sandbox keys and `//` permission-rule syntax were checked against their docs on 2026-10-26 (#74), and that check fixed an srt argv bug that made every srt worker fail closed.
 - **Budget caps (M6).** The cap was never reached in the real runs, and the budget lines added to worker prompts are not logged, so they could not be observed.
 - **universal-ctags and graphify inputs (W9.5).** Optional, detect-and-degrade.
-- **The research hypotheses H1 to H8.** M2 built the machinery (`orchestra bench`, paired statistics, ablations, judge calibration). No measurement has been run yet.
+- **The research hypotheses H1 to H8.** M2 built the machinery (`orchestra bench`, paired statistics, ablations, judge calibration). H1 and H2 have a first look (below); H3 to H8 are unmeasured.
 
 ## Real end-to-end runs (2026-10-27)
 
@@ -44,6 +44,21 @@ What the runs showed:
 - Footprint scheduling serialized every task, because every footprint included `CHANGELOG.md`, so batch merge only ever saw batches of one. Open, see next steps.
 - The integrity monitor flagged a test fake (`if (c === 'node')`) as special-casing. This was a false positive. Open, see next steps.
 
+## H1 and H2, first look (2026-10-27)
+
+**H1 (integrity) is not measurable from the existing record.** Every evolution cycle so far ran under the globally installed `orchestra` command, which links to an older clone at 0.6.1 that has no frozen scorer. The archived eval score of every case equals the candidate's own judge satisfaction to three decimals. No variant was promoted (v3 and v4 were rejected, v2 was never scored), so there is no promoted gain that could disappear under the frozen scorer. Re-scoring is not possible either, because eval-run branches are deleted after scoring, so the diffs are gone. H1 needs new evolution cycles run from this repository's code. Pointing the global install and the plugin at this checkout is a prerequisite.
+
+**H2 (verification) pilot: no support at n = 3.** Preregistered bars, then `orchestra bench --arms h2-none,h2-agentic --goals args-usage,text-wrap,rec-pivot` (bench `b20261027013645`). The two arms differ only in `verification.agenticJudge.enabled`. Bench config has no test command, so the agentic judge only had planner-written scenario checks to run.
+
+| Arm | Hidden check pass | Judge pass | Judge agrees with check | Merged but wrong | Mean cost per run |
+|---|---|---|---|---|---|
+| `h2-none` | 3 of 3 | 3 of 3 | 3 of 3 | 0 of 3 | $1.38 |
+| `h2-agentic` | 2 of 3 | 3 of 3 | 2 of 3 | 1 of 3 (`args-usage`) | $1.40 |
+
+Both preregistered H2 bars were missed, so the pilot stopped there as planned. Total spend $8.35. Three goals with one repeat cannot separate the arms (the paired 95% CI on check pass is -177 to +110 points). The one failure is more likely worker variance than an agentic judge effect. The clearer finding is that the judge passed all six runs, so judge agreement only tracked worker success. A useful H2 measurement needs goals where workers fail often, several repeats, and a test command in the bench config so the agentic judge has something to execute. At about $1.40 per run, 3 goals x 3 repeats x 2 arms costs about $25.
+
+Two tooling gaps surfaced. Bench runs live in throwaway stores, so `orchestra stats` cannot split bench rows by verification mode (missing run files count as `none`); per-arm numbers above were computed from `results.jsonl`. And bench rows do not record the hidden check's output, so a failed check cannot be diagnosed after the run.
+
 ## Known approximations
 
 - Sequential testing (M3) widens the confidence interval with a Bonferroni-style factor: a normal-quantile ratio applied to a t-based interval. Not checked against a reference.
@@ -58,9 +73,9 @@ What the runs showed:
 
 Done on 2026-10-26: `claude -p --max-turns` confirmed on Claude Code 2.1.310 (hidden from `--help`; a reached cap ends with `error_max_turns`), sandbox formats checked (#74), whitepaper and blog updated (#75). Released as 0.7.0.
 
-Done on 2026-10-27: real end-to-end runs with the Claude Code sandbox (above), and their fixes merged (#77, #78).
+Done on 2026-10-27: real end-to-end runs with the Claude Code sandbox (above), and their fixes merged (#77, #78). H2 pilot (#80). `orchestra resume` for runs that end `awaiting_approval` (#81).
 
-1. Start measuring H1 to H8 with `orchestra bench`, beginning with H1 (integrity) and H2 (verification), which the plan needs before trusting further evolution.
+1. Point the global `orchestra` install and the plugin at this repository (they run 0.6.1 today), then gather H1 from new evolution cycles. Rerun H2 with harder goals, three repeats and a bench test command (about $25), and record check output and verification modes in bench rows.
 2. Stop shared append-only files such as `CHANGELOG.md` from counting as footprint overlap, so independent tasks can run and merge in parallel.
 3. Log the budget lines given to workers (or record them in the run events), so budget behaviour can be checked after a run.
 4. Reduce integrity-monitor false positives on test fakes, such as branching on a command name in a fake executor.
