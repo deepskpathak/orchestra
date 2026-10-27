@@ -217,6 +217,7 @@ export interface PreflightResult {
 
 const OPEN = 'ORCHESTRA_PROBE_OPEN';
 const BLOCKED = 'ORCHESTRA_PROBE_BLOCKED';
+const ARGV_MISMATCH = 'ORCHESTRA_PROBE_ARGV_MISMATCH';
 // Markers are split inside the script so a model that echoes the command cannot produce a false match.
 const marker = (m: string): string => `${JSON.stringify(m.slice(0, 16))}+${JSON.stringify(m.slice(16))}`;
 // Not on the allow-list unless the user listed it, in which case the fallback host is used.
@@ -230,6 +231,28 @@ function networkScript(host: string): string {
 
 function readScript(file: string): string {
   return `try{require('fs').readFileSync(${JSON.stringify(file)});console.log(${marker(OPEN)})}catch(e){console.log(${marker(BLOCKED)})}`;
+}
+
+// Trailing arguments shaped like the ones real workers pass after the command: a --settings flag whose
+// JSON value holds double quotes, spaces and a dollar sign, plus -p and a prompt-like value. The srt and
+// docker probes carry them after `node -e <script> PROBE_ARGV_POSITIONAL` and the probe script checks it
+// received them intact.
+export const PROBE_TRAILING_ARGS: readonly string[] = Object.freeze(['--settings', '{"a": "x y $HOME", "b": "it\'s"}', '-p', 'Say "hi" to $USER']);
+
+// Why a positional and not `--`: node rejects `node -e <script> --settings ...` ("bad option"), so
+// something has to end node's option parsing. A literal `--` would also end srt's option parsing, so a
+// srtArgs that lost its own `--` (the #74 bug) would still stop at the probe's `--` and never see the
+// trailing --settings, and pre-flight would pass. A plain positional ends node's parsing (node treats
+// everything after the first non-option as script args) but not srt's (commander keeps parsing known
+// options after operands), so the outer argv carries `--settings <json>` with no terminator before it,
+// exactly like a worker's `claude ... --settings <json>`. It also needs no shell in the docker image.
+export const PROBE_ARGV_POSITIONAL = 'orchestra-probe';
+
+// With `node -e <script> orchestra-probe a b`, process.argv is [node, orchestra-probe, a, b]. The check
+// is exact: same length, strict equality, so a dropped, split or re-quoted argument is a mismatch.
+function argvGuard(body: string): string {
+  const expected = JSON.stringify([PROBE_ARGV_POSITIONAL, ...PROBE_TRAILING_ARGS]);
+  return `const a=process.argv.slice(1),e=${expected};if(a.length!==e.length||e.some((x,i)=>a[i]!==x)){console.log(${marker(ARGV_MISMATCH)})}else{${body}}`;
 }
 
 // A host directory for the docker read canary that no container mount covers. Read isolation for
@@ -252,6 +275,13 @@ function unmountedCanaryBase(mounts: string[], bases: string[] = ['/var/tmp', ho
 
 // Runs both probes inside the same wrapper workers get. Each must FAIL (be blocked) for ok. A probe
 // that succeeds, a wrapper that cannot start, or output with no marker (inconclusive) all fail closed.
+// The srt and docker probes also use the worker argv shape: the node command is followed by
+// `orchestra-probe <PROBE_TRAILING_ARGS>` (a --settings JSON value with quotes, spaces and a dollar sign,
+// plus -p, with no `--` in front of it, see PROBE_ARGV_POSITIONAL), and
+// the probe script verifies it received them byte for byte. This catches the class of bug fixed in PR #74,
+// where srt consumed the worker's own --settings as its settings path, which a bare `node -e` probe never
+// exercised. A mismatch fails pre-flight. The claude backend goes through a Bash tool call, so it is out
+// of scope and keeps its existing command with no trailing arguments and no argv check.
 export function preflightSandbox(policy: SandboxPolicy, backend: 'srt' | 'claude' | 'docker', exec: ProbeExec, opts: PreflightOptions): PreflightResult {
   const timeoutMs = opts.timeoutMs ?? 60_000;
   const dir = mkdtempSync(join(tmpdir(), 'orchestra-preflight-'));
@@ -271,9 +301,13 @@ export function preflightSandbox(policy: SandboxPolicy, backend: 'srt' | 'claude
     const settings = join(dir, 'settings.json');
     writeFileSync(settings, JSON.stringify(backend === 'srt' ? srtSandboxSettings(probePolicy) : claudeSandboxSettings(probePolicy), null, 2) + '\n');
     const host = PROBE_HOSTS.find((h) => !policy.network.allowedHosts.includes(h)) ?? PROBE_HOSTS[0];
+    // srt and docker hand the worker argv to the command, so their probes check it. claude runs the
+    // probe through a Bash tool call, which never sees worker argv.
+    const checkArgv = backend !== 'claude';
 
     const wrap = (script: string): { command: string; args: string[] } => {
-      const inner = ['node', '-e', script];
+      // Spreading copies the frozen trailing args, so nothing downstream can mutate the shared constant.
+      const inner = checkArgv ? ['node', '-e', argvGuard(script), PROBE_ARGV_POSITIONAL, ...PROBE_TRAILING_ARGS] : ['node', '-e', script];
       if (backend === 'srt') {
         const [command, ...args] = srtArgs(probePolicy, settings, inner[0], inner.slice(1));
         return { command, args };
@@ -296,7 +330,9 @@ export function preflightSandbox(policy: SandboxPolicy, backend: 'srt' | 'claude
       return { command: 'claude', args: ['-p', prompt, '--settings', settings, '--allowedTools', 'Bash', '--output-format', 'text'] };
     };
 
+    let probesRun = 0;
     const probe = (name: string, script: string) => {
+      probesRun++;
       const { command, args } = wrap(script);
       let r: ProbeExecResult;
       try {
@@ -307,7 +343,11 @@ export function preflightSandbox(policy: SandboxPolicy, backend: 'srt' | 'claude
       }
       if (r.error) return void failures.push(`${name} probe: sandbox wrapper could not start (${r.error})`);
       const out = `${r.stdout}\n${r.stderr}`;
-      if (out.includes(OPEN)) failures.push(`${name} probe succeeded inside the sandbox (expected it to be blocked)`);
+      // For docker the image's ENTRYPOINT sits between the wrapper and node and can rewrite argv too,
+      // so the message names it rather than blaming docker alone.
+      const culprit = backend === 'docker' ? 'the docker wrapper or the image entrypoint' : `the ${backend} wrapper`;
+      if (out.includes(ARGV_MISMATCH)) failures.push(`${name} probe: worker argv was not passed through the sandbox wrapper intact (${culprit} altered or dropped arguments)`);
+      else if (out.includes(OPEN)) failures.push(`${name} probe succeeded inside the sandbox (expected it to be blocked)`);
       else if (!out.includes(BLOCKED)) failures.push(`${name} probe inconclusive: wrapper exited ${r.status} with no result, treating the sandbox as not working`);
     };
 
@@ -344,6 +384,12 @@ export function preflightSandbox(policy: SandboxPolicy, backend: 'srt' | 'claude
     }
     if (canary) probe('read', readScript(canary));
     else warnings.push('read probe skipped: no host directory outside the docker mounts is writable; docker read isolation rests on not mounting secrets');
+    // The argv check rides on the probes, so with both skipped (docker on a user network or with no
+    // connectivity, and no unmounted canary dir) nothing exercised the worker argv shape. Say so rather
+    // than let a clean pre-flight imply it was checked.
+    if (checkArgv && probesRun === 0) {
+      warnings.push(`argv pass-through was NOT verified: both probes were skipped, so pre-flight never ran a command with worker-like arguments through the ${backend} wrapper`);
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
     if (canaryDir) rmSync(canaryDir, { recursive: true, force: true });

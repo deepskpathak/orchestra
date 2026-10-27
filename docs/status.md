@@ -33,7 +33,7 @@ All tests run against fakes and injected executors. None of the following has be
 - `orchestra approve --by` (M6) is an advisory four-eyes check against a free-text name. It is not authenticated identity.
 - srt on Linux: `denyRead` globs such as `**/.env` are expanded to the files that exist when the worker starts, so a `.env` created mid-run is readable from a shell. macOS matches the globs as patterns.
 - srt wraps the worker argv into one `bash -c` string. On Linux one argument is capped at 128 KiB, so a very large prompt or system prompt would fail to spawn (E2BIG). The harness prompt files total about 22 KB today, but task text, lessons and repair notes add to that and have not been measured.
-- The sandbox pre-flight probe wraps a small `node -e` script, not the real worker argv, so it cannot catch an argv bug like the one #74 fixed.
+- The sandbox pre-flight probe checks argv pass-through for srt and docker with a hand-written, worker-like argv (`node -e <script> orchestra-probe --settings <json> -p <prompt>`, no `--` of its own), so a srt wrapper that drops its `--` (the #74 bug) or a wrapper that mangles quoting fails pre-flight. It does not build the probe through the worker code path (`buildCommand` in `src/agent.ts`), so it cannot catch a bug in how workers assemble their own argv, and the claude backend probe (a Bash tool call) does not check argv. Checked against fakes only. If both probes are skipped, pre-flight warns that argv was not verified.
 - A run that ends `awaiting_approval` finishes when its last held task is approved, but the mutation pass and `learn()` are not re-run, and blocked dependents need a new run.
 
 ## Recommended next steps
@@ -43,5 +43,5 @@ Done on 2026-10-26: `claude -p --max-turns` confirmed on Claude Code 2.1.310 (hi
 1. Run one real end-to-end `orchestra run` with the new flags on (sandbox, atlas, batch merge, judge panel, budgets) on a machine with a real `claude` binary and a sandbox backend.
 2. Start measuring H1 to H8 with `orchestra bench`, beginning with H1 (integrity) and H2 (verification), which the plan needs before trusting further evolution.
 3. Add a resume path for runs that end `awaiting_approval`.
-4. Make the sandbox pre-flight probe use the real worker argv shape.
+4. Build the pre-flight probe through the same wrapper code path as workers (buildCommand in src/agent.ts) instead of a hand-written argv, and cover the claude backend.
 5. Make the M6 batch-merge interleaving test deterministic if it flakes in CI. It uses short sleeps.
