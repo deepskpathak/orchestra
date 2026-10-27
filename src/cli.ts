@@ -318,14 +318,23 @@ async function cmdResume(args: string[]): Promise<void> {
     if (live) live.draw(latest, store);
     else printed = printNewEvents(store, latest, printed);
   }, live ? 120 : 400);
-  const run = await resumeRun({
-    store,
-    runner: runner(),
-    runId,
-    onUpdate: (u) => (latest = u),
-    sandbox: sandboxOption(store, iso),
-    unattended: iso.unattended,
-  });
+  let run: Run;
+  try {
+    run = await resumeRun({
+      store,
+      runner: runner(),
+      runId,
+      onUpdate: (u) => (latest = u),
+      sandbox: sandboxOption(store, iso),
+      unattended: iso.unattended,
+    });
+  } catch (e) {
+    // Setup failed before any work ran; the stored run is unchanged.
+    clearInterval(tick);
+    if (live) live.close(store.loadRun(runId)!, store);
+    await web?.close();
+    die(`resume refused: ${(e as Error).message}`);
+  }
   clearInterval(tick);
   if (live) live.close(run, store);
   else printNewEvents(store, run, printed);

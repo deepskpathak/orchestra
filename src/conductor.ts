@@ -576,11 +576,19 @@ export class Conductor {
   // assertResumable() first; resumeRun() does.
   async resume(): Promise<Run> {
     const { run, store } = this;
-    return this.guarded(async () => {
+    // Setup touches nothing in the stored run: a failure here (branch checked out elsewhere, contract mismatch,
+    // pre-flight) throws to the caller and leaves the run file as it was.
+    try {
       g.assertRepo(store.root);
       this.integration = g.reopenIntegration(store.root, this.wtRoot, run.id, run.integrationBranch!, run.baseRef!);
       this.knownGood = g.head(this.integration.path);
       this.reloadPlan();
+      this.sandboxPreflight();
+    } catch (e) {
+      if (this.integration) g.removeWorktree(store.root, this.integration.path);
+      throw e;
+    }
+    return this.guarded(async () => {
       const reset = this.unblockResumable();
       const deferred = run.deferred ?? [];
       run.status = 'running';
@@ -588,7 +596,6 @@ export class Conductor {
       delete run.deferred;
       this.emit('log', `Run resumed after approval (deferred: ${deferred.join(', ') || 'none'})${reset.length ? `; running ${reset.join(', ')}` : '; no tasks to run'}`, { deferred, reset });
       this.save();
-      this.sandboxPreflight();
       await this.complete();
     });
   }

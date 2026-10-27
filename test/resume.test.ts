@@ -191,10 +191,9 @@ test('resume reloads the frozen contract and refuses when it was modified', () =
   const path = run.contract!.path;
   const original = store.readJson<any>(path, null);
   store.writeJson(path, { ...original, criteria: [] });
-  const refused = await resumeRun({ store, runner, runId: run.id });
-  assert.equal(refused.status, 'failed');
-  assert.match(refused.error!, /does not match its recorded sha256/);
-  assert.ok(refused.deferred?.includes('tasks'), 'the marker survives a failed resume');
+  const before = JSON.stringify(store.loadRun(run.id));
+  await assert.rejects(() => resumeRun({ store, runner, runId: run.id }), /does not match its recorded sha256/);
+  assert.equal(JSON.stringify(store.loadRun(run.id)), before, 'a refused resume leaves the run untouched');
 
   store.writeJson(path, original);
   const done = await resumeRun({ store, runner, runId: run.id });
@@ -224,4 +223,23 @@ test('orchestra resume (CLI): usage, refusal and a finished run', () => asReques
   const again = resume(run.id);
   assert.equal(again.status, 1);
   assert.match(again.stderr, /nothing to resume/);
+}));
+
+test('a resume that fails before any work runs leaves the stored run untouched', () => asRequester(async () => {
+  const store = repo();
+  const runner = planned([t('T1'), t('T2', ['T1'])], ['T1']);
+  const run = await runGoal({ store, runner, goal: 'g' });
+  await approveTask(store, run.id, 'T1', 'bob');
+  // The integration branch is checked out elsewhere, so the resume cannot reopen it.
+  const other = join(store.root, '..', `other-${run.id}`);
+  execFileSync('git', ['worktree', 'add', '-q', other, run.integrationBranch!], { cwd: store.root });
+  const before = JSON.stringify(store.loadRun(run.id));
+  const ends = store.events(run.id).filter((e) => e.kind === 'run.end').length;
+  await assert.rejects(() => resumeRun({ store, runner, runId: run.id }), /already (checked out|used by worktree)/);
+  assert.equal(JSON.stringify(store.loadRun(run.id)), before);
+  assert.equal(store.events(run.id).filter((e) => e.kind === 'run.end').length, ends, 'no extra run.end');
+
+  execFileSync('git', ['worktree', 'remove', '--force', other], { cwd: store.root });
+  const done = await resumeRun({ store, runner, runId: run.id });
+  assert.equal(done.status, 'done', done.error);
 }));
