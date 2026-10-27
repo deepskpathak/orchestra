@@ -1,6 +1,6 @@
 # Project status
 
-Last updated 2026-10-26.
+Last updated 2026-10-27.
 
 ## Where things stand
 
@@ -20,11 +20,29 @@ Each milestone went through its own branch, a code review with one fix commit pe
 
 ## What is built but not yet proven
 
-All tests run against fakes and injected executors. None of the following has been exercised against the real tool:
+The test suite runs against fakes and injected executors. Two real runs on 2026-10-27 (see below) exercised the Claude Code sandbox backend, the atlas, batch merge, the judge panel and budgets. The following are still unproven against the real tool:
 
-- **OS sandbox backends (M5).** srt, Claude Code's sandbox, docker and sandbox-exec. The srt settings shape and the Claude Code sandbox keys and `//` permission-rule syntax were checked against their docs on 2026-10-26 (#74), and that check fixed an srt argv bug that made every srt worker fail closed. No backend has run a real worker yet.
+- **OS sandbox backends (M5) other than Claude Code's.** srt, docker and sandbox-exec have not run a real worker. The srt settings shape and the Claude Code sandbox keys and `//` permission-rule syntax were checked against their docs on 2026-10-26 (#74), and that check fixed an srt argv bug that made every srt worker fail closed.
+- **Budget caps (M6).** The cap was never reached in the real runs, and the budget lines added to worker prompts are not logged, so they could not be observed.
 - **universal-ctags and graphify inputs (W9.5).** Optional, detect-and-degrade.
 - **The research hypotheses H1 to H8.** M2 built the machinery (`orchestra bench`, paired statistics, ablations, judge calibration). No measurement has been run yet.
+
+## Real end-to-end runs (2026-10-27)
+
+Two runs on this repo with the real `claude` binary and `--sandbox claude`, plus atlas, batch merge, judge panel and budgets. Each produced a PR, which then went through review.
+
+| Run | Tasks merged | Cost | Satisfaction | Result |
+|---|---|---|---|---|
+| `r20261027-0009-v5jt` | 2 of 2 | $3.04 | 0.94 | #77, pre-flight argv probe |
+| `r20261027-0031-41bt` | 3 of 3 | $4.52 | 0.94 | #78, runner accounting and `sandbox.allowLocalBinding` |
+
+What the runs showed:
+
+- Claude Code sandbox pre-flight passed, and the atlas built 253 files. The judge panel (one opus and two sonnet judges, about $0.06 each) agreed fully (disagreement 0.00). The cache-read share was 0.71.
+- Inside the sandbox, the worker's own `npm test` failed on the dashboard tests, which bind 127.0.0.1, and on three docker pre-flight tests that wrote to `/var/tmp` or `$HOME`. The conductor's gate, which runs outside the sandbox, passed. Fixed by #78: the opt-in `sandbox.allowLocalBinding` setting and the injectable `canaryBases`.
+- Workers that start a background task emit more than one `result` message, so turns, usage and durations were undercounted (logged durations of 6 to 7 s). Fixed by #78.
+- Footprint scheduling serialized every task, because every footprint included `CHANGELOG.md`, so batch merge only ever saw batches of one. Open, see next steps.
+- The integrity monitor flagged a test fake (`if (c === 'node')`) as special-casing. This was a false positive. Open, see next steps.
 
 ## Known approximations
 
@@ -38,10 +56,14 @@ All tests run against fakes and injected executors. None of the following has be
 
 ## Recommended next steps
 
-Done on 2026-10-26: `claude -p --max-turns` confirmed on Claude Code 2.1.310 (hidden from `--help`; a reached cap ends with `error_max_turns`), sandbox formats checked (#74), whitepaper and blog updated (#75).
+Done on 2026-10-26: `claude -p --max-turns` confirmed on Claude Code 2.1.310 (hidden from `--help`; a reached cap ends with `error_max_turns`), sandbox formats checked (#74), whitepaper and blog updated (#75). Released as 0.7.0.
 
-1. Run one real end-to-end `orchestra run` with the new flags on (sandbox, atlas, batch merge, judge panel, budgets) on a machine with a real `claude` binary and a sandbox backend.
-2. Start measuring H1 to H8 with `orchestra bench`, beginning with H1 (integrity) and H2 (verification), which the plan needs before trusting further evolution.
-3. Add a resume path for runs that end `awaiting_approval`.
-4. Build the pre-flight probe through the same wrapper code path as workers (buildCommand in src/agent.ts) instead of a hand-written argv, and cover the claude backend.
-5. Make the M6 batch-merge interleaving test deterministic if it flakes in CI. It uses short sleeps.
+Done on 2026-10-27: real end-to-end runs with the Claude Code sandbox (above), and their fixes merged (#77, #78).
+
+1. Start measuring H1 to H8 with `orchestra bench`, beginning with H1 (integrity) and H2 (verification), which the plan needs before trusting further evolution.
+2. Add a resume path for runs that end `awaiting_approval`.
+3. Stop shared append-only files such as `CHANGELOG.md` from counting as footprint overlap, so independent tasks can run and merge in parallel.
+4. Log the budget lines given to workers (or record them in the run events), so budget behaviour can be checked after a run.
+5. Reduce integrity-monitor false positives on test fakes, such as branching on a command name in a fake executor.
+6. Build the pre-flight probe through the same wrapper code path as workers (buildCommand in src/agent.ts) instead of a hand-written argv, and cover the claude backend.
+7. Make the M6 batch-merge interleaving test deterministic if it flakes in CI. It uses short sleeps.
