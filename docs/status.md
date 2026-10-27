@@ -46,7 +46,7 @@ What the runs showed:
 
 ## H1 and H2, first look (2026-10-27)
 
-**H1 (integrity) is not measurable from the existing record.** Every evolution cycle so far ran under the globally installed `orchestra` command, which links to an older clone at 0.6.1 that has no frozen scorer. The archived eval score of every case equals the candidate's own judge satisfaction to three decimals. No variant was promoted (v3 and v4 were rejected, v2 was never scored), so there is no promoted gain that could disappear under the frozen scorer. Re-scoring is not possible either, because eval-run branches are deleted after scoring, so the diffs are gone. H1 needs new evolution cycles run from this repository's code. Pointing the global install and the plugin at this checkout is a prerequisite.
+**H1 (integrity) is not measurable from the existing record.** Every evolution cycle so far ran under the globally installed `orchestra` command, which links to an older clone at 0.6.1 that has no frozen scorer. The archived eval score of every case equals the candidate's own judge satisfaction to three decimals. No variant was promoted (v3 and v4 were rejected, v2 was never scored), so there is no promoted gain that could disappear under the frozen scorer. Re-scoring is not possible either, because eval-run branches are deleted after scoring, so the diffs are gone. H1 needs new evolution cycles run from this repository's code. The global install and the plugin were pointed at this checkout on 2026-10-27.
 
 **H2 (verification) pilot: no support at n = 3.** Preregistered bars, then `orchestra bench --arms h2-none,h2-agentic --goals args-usage,text-wrap,rec-pivot` (bench `b20261027013645`). The two arms differ only in `verification.agenticJudge.enabled`. Bench config has no test command, so the agentic judge only had planner-written scenario checks to run.
 
@@ -73,8 +73,8 @@ Two tooling gaps surfaced. Bench runs live in throwaway stores, so `orchestra st
 
 Done on 2026-10-26: `claude -p --max-turns` confirmed on Claude Code 2.1.310 (hidden from `--help`; a reached cap ends with `error_max_turns`), sandbox formats checked (#74), whitepaper and blog updated (#75). Released as 0.7.0.
 
-Done on 2026-10-27: real end-to-end runs with the Claude Code sandbox (above), and their fixes merged (#77, #78). H2 pilot (#80). `orchestra resume` for runs that end `awaiting_approval` (#81). Integrity false positive on test fakes (#82). Shared append-only files out of footprint overlap (#83). Budget lines logged (#84).
+Done on 2026-10-27: real end-to-end runs with the Claude Code sandbox (above), and their fixes merged (#77, #78). H2 pilot (#80). `orchestra resume` for runs that end `awaiting_approval` (#81). Integrity false positive on test fakes (#82). Shared append-only files out of footprint overlap (#83). Budget lines logged (#84). Released as 0.8.0.
 
-1. Point the global `orchestra` install and the plugin at this repository (they run 0.6.1 today), then gather H1 from new evolution cycles. Rerun H2 with harder goals, three repeats and a bench test command (about $25), and record check output and verification modes in bench rows.
+1. Gather H1 from new evolution cycles. The global `orchestra` install and the Claude Code plugin now point at this repository (done 2026-10-27), so new cycles use the frozen scorer. Rerun H2 with harder goals, three repeats and a bench test command (about $25), and record check output and verification modes in bench rows.
 2. Build the pre-flight probe through the same wrapper code path as workers (buildCommand in src/agent.ts) instead of a hand-written argv, and cover the claude backend.
 3. Make the M6 batch-merge interleaving test deterministic if it flakes in CI. It uses short sleeps.
