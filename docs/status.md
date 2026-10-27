@@ -75,6 +75,13 @@ Done on 2026-10-26: `claude -p --max-turns` confirmed on Claude Code 2.1.310 (hi
 
 Done on 2026-10-27: real end-to-end runs with the Claude Code sandbox (above), and their fixes merged (#77, #78). H2 pilot (#80). `orchestra resume` for runs that end `awaiting_approval` (#81). Integrity false positive on test fakes (#82). Shared append-only files out of footprint overlap (#83). Budget lines logged (#84). Released as 0.8.0.
 
-1. Gather H1 from new evolution cycles. The global `orchestra` install and the Claude Code plugin now point at this repository (done 2026-10-27), so new cycles use the frozen scorer. Rerun H2 with harder goals, three repeats and a bench test command (about $25), and record check output and verification modes in bench rows.
-2. Build the pre-flight probe through the same wrapper code path as workers (buildCommand in src/agent.ts) instead of a hand-written argv, and cover the claude backend.
-3. Make the M6 batch-merge interleaving test deterministic if it flakes in CI. It uses short sleeps.
+Recommendations, in priority order. Items 1 to 3 are free (no paid model spend). Items 4 and 6 need a budget OK.
+
+1. **Record check output and verification modes in bench rows.** Do this before any paid bench. Without it, a failed hidden check cannot be diagnosed, and `orchestra stats` cannot split bench rows by verification mode (see the H2 section). Small code change in the bench engine, covered by the existing fakes.
+2. **Build the pre-flight probe through the worker code path.** Assemble the probe argv with `buildCommand` in `src/agent.ts` instead of a hand-written argv, and add an argv check for the claude backend. This closes the gap described under Known approximations.
+3. **Update the whitepaper and blog for 0.8.0.** They still describe 0.7.0. Add `orchestra resume`, `throughput.sharedFiles`, budget line logging and the first H1/H2 findings.
+4. **Rerun H2 properly (about $25).** Harder goals where workers fail often, three repeats, two arms, and a test command in the bench config so the agentic judge has something to execute. Needs item 1 first, and a new budget OK.
+5. **Gather H1 from new evolution cycles.** The global `orchestra` install and the Claude Code plugin now point at this repository (done 2026-10-27), so new cycles use the frozen scorer. This happens as a side effect of normal goal runs; check the archive after a few cycles and compare frozen-scorer scores with judge satisfaction.
+6. **Prove the other sandbox backends and the budget cap.** One small real run each with `--sandbox srt` and `--sandbox docker` (sandbox-exec on macOS if still supported), plus one run with a deliberately low `runBudgetUsd` so the cap is reached. Each is a few dollars.
+7. **Make the M6 batch-merge interleaving test deterministic** if it flakes in CI. It uses short sleeps. Low priority until it fails.
+8. **Plan H3 to H8.** Preregister each with bars and a cost estimate before running, the way the H2 pilot was.
