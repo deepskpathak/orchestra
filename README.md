@@ -115,6 +115,7 @@ The `src/guard.ts` hook stays on as **defence in depth**. It is a deny-list that
 
 ## Documentation
 
+- [Website](https://deepskpathak.github.io/orchestra/): overview, animated explainer and quick start (source in `site/`)
 - [Getting started](docs/getting-started.md): install, init, first run, and the demo
 - [Architecture](docs/architecture.md): roles, worktrees, holdout scenarios, merge queue, event log
 - [Self-improvement](docs/self-improvement.md): ledger, Factory Eval, evolve, promote and rollback

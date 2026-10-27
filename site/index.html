@@ -1,0 +1,551 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Orchestra · A self-improving software factory</title>
+  <meta name="description" content="Orchestra is a self-improving multi-agent software factory built on Claude Code. Give it a goal: it plans, builds in parallel git worktrees, verifies against hidden scenarios, merges, learns and evolves.">
+  <meta name="theme-color" content="#0c0a12">
+  <meta property="og:title" content="Orchestra · A self-improving software factory">
+  <meta property="og:description" content="Plan, build in parallel, judge against hidden scenarios, merge, learn, evolve. Built on Claude Code.">
+  <meta property="og:type" content="website">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300..800;1,9..144,300..800&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+
+  <header class="nav" id="top">
+    <a class="brand" href="#top" aria-label="Orchestra home">
+      <span class="brand-mark" aria-hidden="true">♫</span>
+      <span class="brand-name">Orchestra</span>
+    </a>
+    <button class="nav-toggle" aria-expanded="false" aria-controls="nav-links" aria-label="Open menu">
+      <span></span><span></span>
+    </button>
+    <nav id="nav-links" class="nav-links" aria-label="Sections">
+      <a href="#film">The film</a>
+      <a href="#ensemble">Ensemble</a>
+      <a href="#features">Features</a>
+      <a href="#docs">Docs</a>
+      <a href="#howto">How-tos</a>
+      <a class="nav-cta" href="https://github.com/deepskpathak/orchestra">GitHub ↗</a>
+    </nav>
+  </header>
+
+  <main id="main">
+
+    <!-- I. OVERTURE -->
+    <section class="hero" aria-labelledby="hero-title">
+      <canvas id="staff" class="hero-staff" aria-hidden="true"></canvas>
+      <div class="hero-inner">
+        <p class="movement"><span>I.</span> Overture</p>
+        <h1 id="hero-title" class="hero-title">
+          You bring the goal.<br>
+          <em>The factory</em> plays it.
+        </h1>
+        <p class="hero-sub">
+          Orchestra is a <strong>self-improving multi-agent software factory</strong> built on Claude Code.
+          It plans a task graph, builds in parallel git worktrees, judges every change against
+          <strong>hidden scenarios</strong>, merges through a queue, learns from the run,
+          and evolves its own harness only when a measured eval shows a gain.
+        </p>
+        <div class="hero-actions">
+          <a class="btn btn-primary" href="#quickstart">Start in 60 seconds</a>
+          <a class="btn btn-ghost" href="#film"><span class="play-dot" aria-hidden="true">▶</span> Watch the film</a>
+        </div>
+        <div class="hero-try">
+          <span class="hero-try-label">Zero tokens, full pipeline:</span>
+          <code class="inline-copy" data-copy="node bin/orchestra.ts demo">node bin/orchestra.ts demo <span class="copy-hint" aria-hidden="true">copy</span></code>
+        </div>
+      </div>
+
+      <figure class="term" aria-label="Orchestra live terminal dashboard example">
+        <div class="term-bar"><i></i><i></i><i></i><span>orchestra run</span></div>
+        <pre class="term-body" id="term-body" aria-live="off"></pre>
+      </figure>
+    </section>
+
+    <!-- Marquee -->
+    <div class="marquee" aria-hidden="true">
+      <div class="marquee-track">
+        <span>PLAN</span><b>♩</b><span>BUILD</span><b>♪</b><span>VERIFY</span><b>♫</b><span>REPAIR</span><b>♬</b><span>MERGE</span><b>♩</b><span>LEARN</span><b>♪</b><span>EVOLVE</span><b>♫</b>
+        <span>PLAN</span><b>♩</b><span>BUILD</span><b>♪</b><span>VERIFY</span><b>♫</b><span>REPAIR</span><b>♬</b><span>MERGE</span><b>♩</b><span>LEARN</span><b>♪</b><span>EVOLVE</span><b>♫</b>
+      </div>
+    </div>
+
+    <!-- II. THE FILM -->
+    <section class="section film" id="film" aria-labelledby="film-title">
+      <div class="section-head">
+        <p class="movement"><span>II.</span> The film</p>
+        <h2 id="film-title">One goal, start to finish, in 60 seconds.</h2>
+        <p class="lede">An animated walkthrough of a single Orchestra run. Scrub, pause, or jump to a chapter.</p>
+      </div>
+
+      <div class="player" id="player">
+        <div class="stage-wrap">
+          <svg id="stage" class="stage" viewBox="0 0 960 540" role="img" aria-labelledby="stage-title stage-desc">
+            <title id="stage-title">Animated explainer of an Orchestra run</title>
+            <desc id="stage-desc">A goal becomes a task graph, workers build in parallel worktrees, a judge checks hidden scenarios, a rejected task is repaired, tasks merge one by one, a librarian records lessons and the evolver promotes a better harness only after a measured gain.</desc>
+          </svg>
+          <button class="big-play" id="big-play" aria-label="Play the film">
+            <svg viewBox="0 0 80 80" aria-hidden="true"><circle cx="40" cy="40" r="38"/><path d="M32 25 L58 40 L32 55 Z"/></svg>
+          </button>
+          <p class="caption" id="caption" aria-live="polite"></p>
+        </div>
+        <div class="controls">
+          <button class="ctl" id="ctl-play" aria-label="Play">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path class="i-play" d="M7 5 L19 12 L7 19 Z"/><g class="i-pause"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></g></svg>
+          </button>
+          <div class="scrub" id="scrub" role="slider" tabindex="0" aria-label="Film position" aria-valuemin="0" aria-valuemax="60" aria-valuenow="0">
+            <div class="scrub-fill" id="scrub-fill"></div>
+            <div class="scrub-marks" id="scrub-marks"></div>
+            <div class="scrub-knob" id="scrub-knob"></div>
+          </div>
+          <span class="time" id="time">0:00 / 1:00</span>
+          <button class="ctl" id="ctl-cc" aria-pressed="true" aria-label="Toggle captions">CC</button>
+        </div>
+        <ol class="chapters" id="chapters"></ol>
+      </div>
+    </section>
+
+    <!-- III. THE ENSEMBLE -->
+    <section class="section ensemble" id="ensemble" aria-labelledby="ensemble-title">
+      <div class="section-head">
+        <p class="movement"><span>III.</span> The ensemble</p>
+        <h2 id="ensemble-title">Five players. Strict parts. Fresh context every take.</h2>
+        <p class="lede">Each role is a versioned system prompt. Planners never code. Judges never edit. Durable state lives in git and <code>.orchestra/</code>, never in one long conversation.</p>
+      </div>
+
+      <div class="roles">
+        <article class="role" style="--hue: 42">
+          <div class="role-icon" aria-hidden="true">𝄞</div>
+          <h3>Planner</h3>
+          <p class="role-model">default: opus · read-only</p>
+          <p>Reads the goal, file list, test command and past lessons. Writes the score: a task graph with dependencies and acceptance criteria, plus <strong>hidden given/when/then scenarios</strong>.</p>
+        </article>
+        <article class="role" style="--hue: 200">
+          <div class="role-icon" aria-hidden="true">♪</div>
+          <h3>Worker</h3>
+          <p class="role-model">default: sonnet · own worktree</p>
+          <p>Implements exactly one task in its own git worktree. Sees the goal, its task, the criteria, learnings and any repair notes. <strong>Never</strong> sees the hidden scenarios.</p>
+        </article>
+        <article class="role" style="--hue: 352">
+          <div class="role-icon" aria-hidden="true">⚖</div>
+          <h3>Judge</h3>
+          <p class="role-model">default: opus · edits discarded</p>
+          <p>Scores the diff 0 to 1 against acceptance criteria and the hidden scenarios. Returns pass, a summary and issues. A reject becomes repair notes for the next attempt.</p>
+        </article>
+        <article class="role" style="--hue: 160">
+          <div class="role-icon" aria-hidden="true">✎</div>
+          <h3>Librarian</h3>
+          <p class="role-model">default: sonnet · no tools</p>
+          <p>After the run, distills repairs and failures into lessons with cited evidence, scoped by domain. The next run starts smarter.</p>
+        </article>
+        <article class="role" style="--hue: 275">
+          <div class="role-icon" aria-hidden="true">∞</div>
+          <h3>Evolver</h3>
+          <p class="role-model">default: opus · outside the run loop</p>
+          <p>Proposes a better harness. A Factory Eval replays past goals against the incumbent. <strong>No measured gain, no promotion.</strong> It cannot see or edit the frozen scorer.</p>
+        </article>
+      </div>
+    </section>
+
+    <!-- IV. FEATURES -->
+    <section class="section features" id="features" aria-labelledby="features-title">
+      <div class="section-head">
+        <p class="movement"><span>IV.</span> Features</p>
+        <h2 id="features-title">Built for unattended work you can still trust.</h2>
+      </div>
+
+      <div class="bento">
+        <article class="tile tile-wide">
+          <div class="tile-art art-lanes" aria-hidden="true">
+            <div class="lane"><span style="--w: 92%; --d: 0s"></span></div>
+            <div class="lane"><span style="--w: 64%; --d: .6s"></span></div>
+            <div class="lane"><span style="--w: 78%; --d: 1.2s"></span></div>
+          </div>
+          <h3>Parallel git worktrees</h3>
+          <p>Every task builds in its own worktree on <code>orchestra/&lt;run&gt;/&lt;task&gt;</code>. Your checkout is never touched. Results land on an integration branch you review and merge yourself.</p>
+        </article>
+        <article class="tile">
+          <div class="tile-art art-lock" aria-hidden="true">🔒</div>
+          <h3>Hidden holdout scenarios</h3>
+          <p>The judge checks work against scenarios workers cannot read. Enforced by the OS sandbox and a guard hook, not just a prompt.</p>
+        </article>
+        <article class="tile">
+          <div class="tile-art art-loop" aria-hidden="true">⟳</div>
+          <h3>Self-correcting</h3>
+          <p>Judge rejections, merge conflicts and red post-merge tests all trigger a repair attempt with notes.</p>
+        </article>
+        <article class="tile">
+          <div class="tile-art art-queue" aria-hidden="true"><i></i><i></i><i></i></div>
+          <h3>Serialized merge queue</h3>
+          <p>Tasks merge one at a time onto <code>orchestra/&lt;run&gt;/integration</code>, with tests after each merge.</p>
+        </article>
+        <article class="tile">
+          <div class="tile-art art-chart" aria-hidden="true"><i style="--h:40%"></i><i style="--h:58%"></i><i style="--h:52%"></i><i style="--h:80%"></i></div>
+          <h3>Self-evaluating</h3>
+          <p>Every session is recorded in a cost ledger. <code>orchestra stats</code> reports first-pass yield, cost per merge and more, per harness version.</p>
+        </article>
+        <article class="tile tile-wide tile-accent">
+          <div class="tile-art art-evolve" aria-hidden="true">
+            <span>v1</span><b>→</b><span>v2?</span><b>→</b><span class="ok">eval ✓</span><b>→</b><span>promote</span>
+          </div>
+          <h3>Self-improving, with a seatbelt</h3>
+          <p>The evolver proposes a harness change. A Factory Eval compares it with the incumbent, scored by a frozen scorer it cannot touch. Promotion needs a measured gain, and rollback is one command: <code>orchestra promote &lt;vN&gt;</code>.</p>
+        </article>
+        <article class="tile">
+          <div class="tile-art art-dash" aria-hidden="true">▤</div>
+          <h3>Live dashboards</h3>
+          <p>A full-screen terminal board, a read-only web task board with dependency arrows, and a Claude Code statusline.</p>
+        </article>
+        <article class="tile">
+          <div class="tile-art art-shield" aria-hidden="true">⛨</div>
+          <h3>Real isolation, opt-in</h3>
+          <p>OS sandbox (<code>srt</code>, Claude Code sandbox) or Docker with optional gVisor. Pre-flight self-test aborts if a blocked host is reachable.</p>
+        </article>
+        <article class="tile tile-wide">
+          <div class="tile-art art-budget" aria-hidden="true">$</div>
+          <h3>Budgets in code</h3>
+          <p>Each run has a spend cap (<code>runBudgetUsd</code>, default $20). Tasks stop when it is reached.</p>
+        </article>
+      </div>
+    </section>
+
+    <!-- Pipeline / numbers strip -->
+    <section class="section strip" aria-label="Key facts">
+      <div class="facts">
+        <div class="fact"><span class="fact-num">5</span><span class="fact-label">agent roles with separate context</span></div>
+        <div class="fact"><span class="fact-num">0</span><span class="fact-label">build steps (Node runs TypeScript directly)</span></div>
+        <div class="fact"><span class="fact-num">0</span><span class="fact-label">runtime dependencies</span></div>
+        <div class="fact"><span class="fact-num">MIT</span><span class="fact-label">licensed and open source</span></div>
+      </div>
+    </section>
+
+    <!-- V. QUICK START -->
+    <section class="section quick" id="quickstart" aria-labelledby="quick-title">
+      <div class="section-head">
+        <p class="movement"><span>V.</span> Quick start</p>
+        <h2 id="quick-title">From clone to first merge in four steps.</h2>
+        <p class="lede">Needs <strong>Node 23.6+</strong>, <strong>git</strong>, and <strong>Claude Code</strong> with headless auth (<code>orchestra doctor</code> checks it). The demo needs none of the auth.</p>
+      </div>
+
+      <ol class="steps">
+        <li class="step">
+          <div class="step-num">1</div>
+          <div class="step-body">
+            <h3>Try the demo. No tokens spent.</h3>
+            <p>Runs the full pipeline with a simulated runner in a temporary repo.</p>
+            <div class="code"><button class="copy" aria-label="Copy command">Copy</button><pre><code>git clone https://github.com/deepskpathak/orchestra
+cd orchestra
+node bin/orchestra.ts demo</code></pre></div>
+          </div>
+        </li>
+        <li class="step">
+          <div class="step-num">2</div>
+          <div class="step-body">
+            <h3>Install it</h3>
+            <p>As a Claude Code plugin, or as a CLI in any terminal.</p>
+            <div class="code"><button class="copy" aria-label="Copy command">Copy</button><pre><code><span class="c"># Claude Code plugin</span>
+claude plugin marketplace add &lt;path-to-orchestra&gt;
+claude plugin install orchestra@orchestra-local
+
+<span class="c"># or plain CLI</span>
+cd &lt;path-to-orchestra&gt; &amp;&amp; npm link</code></pre></div>
+          </div>
+        </li>
+        <li class="step">
+          <div class="step-num">3</div>
+          <div class="step-body">
+            <h3>Initialise your repo</h3>
+            <p>Creates <code>.orchestra/</code>, seeds harness v1 and detects your test command.</p>
+            <div class="code"><button class="copy" aria-label="Copy command">Copy</button><pre><code>cd your-repo
+orchestra init
+orchestra doctor</code></pre></div>
+          </div>
+        </li>
+        <li class="step">
+          <div class="step-num">4</div>
+          <div class="step-body">
+            <h3>Run a goal, then land it</h3>
+            <p>Results land on an integration branch. You decide when to merge.</p>
+            <div class="code"><button class="copy" aria-label="Copy command">Copy</button><pre><code>orchestra run "Add a --json flag to the export command"
+
+git log main..orchestra/&lt;run&gt;/integration
+git merge orchestra/&lt;run&gt;/integration</code></pre></div>
+          </div>
+        </li>
+      </ol>
+    </section>
+
+    <!-- VI. DOCS -->
+    <section class="section docs" id="docs" aria-labelledby="docs-title">
+      <div class="section-head">
+        <p class="movement"><span>VI.</span> Docs</p>
+        <h2 id="docs-title">The score, part by part.</h2>
+        <p class="lede">Short versions here. Every tab links to the full page in the repository.</p>
+      </div>
+
+      <div class="tabs" id="doc-tabs">
+        <div class="tab-list" role="tablist" aria-label="Documentation topics">
+          <button role="tab" id="tab-commands" aria-controls="panel-commands" aria-selected="true">Commands</button>
+          <button role="tab" id="tab-arch" aria-controls="panel-arch" aria-selected="false" tabindex="-1">Architecture</button>
+          <button role="tab" id="tab-self" aria-controls="panel-self" aria-selected="false" tabindex="-1">Self-improvement</button>
+          <button role="tab" id="tab-dash" aria-controls="panel-dash" aria-selected="false" tabindex="-1">Dashboards</button>
+          <button role="tab" id="tab-iso" aria-controls="panel-iso" aria-selected="false" tabindex="-1">Isolation</button>
+          <button role="tab" id="tab-config" aria-controls="panel-config" aria-selected="false" tabindex="-1">Configuration</button>
+        </div>
+
+        <div class="tab-panel" role="tabpanel" id="panel-commands" aria-labelledby="tab-commands">
+          <div class="cmd-filter">
+            <label for="cmd-search" class="sr">Filter commands</label>
+            <input id="cmd-search" type="search" placeholder="Filter commands… try “evolve” or “sandbox”" autocomplete="off">
+          </div>
+          <div class="cmd-table" id="cmd-table" role="list"></div>
+          <p class="panel-foot">Inside Claude Code, the plugin adds <code>/orchestra:setup</code>, <code>/orchestra:run</code>, <code>/orchestra:serve</code>, <code>/orchestra:status</code>, <code>/orchestra:stats</code>, <code>/orchestra:bench</code> and <code>/orchestra:evolve</code>. Full reference: <a href="https://github.com/deepskpathak/orchestra#commands">README › Commands</a>.</p>
+        </div>
+
+        <div class="tab-panel" role="tabpanel" id="panel-arch" aria-labelledby="tab-arch" hidden>
+          <div class="two-col">
+            <div>
+              <h3>How a run flows</h3>
+              <ol class="flow">
+                <li><b>Plan.</b> The planner returns a task graph and hidden scenarios, written to <code>holdout/&lt;run&gt;.json</code> outside every worktree.</li>
+                <li><b>Build.</b> One worker per task, each in <code>.orchestra/worktrees/&lt;run&gt;/&lt;task&gt;</code>, cut from the integration tip.</li>
+                <li><b>Verify.</b> Your test command runs, then the judge scores against criteria and scenarios.</li>
+                <li><b>Repair.</b> A reject becomes repair notes for a fresh worker attempt.</li>
+                <li><b>Merge.</b> A serialized queue merges onto <code>orchestra/&lt;run&gt;/integration</code> and re-runs tests.</li>
+                <li><b>Learn.</b> The librarian writes lessons for the next run.</li>
+              </ol>
+            </div>
+            <div>
+              <h3>Outside the loop</h3>
+              <p>The <strong>frozen scorer</strong> grades eval replays for promotion. The <strong>integrity monitor</strong> inspects worker diffs for grading-surface edits, weakened tests and reward hacks. The evolver can neither see nor edit either one.</p>
+              <pre class="ascii" aria-label="Architecture diagram">goal
+  │
+planner ─► task graph + hidden scenarios
+  │
+  ├─► worker A (worktree) ─┐
+  ├─► worker B (worktree) ─┼─► tests + judge ─► merge queue ─► integration
+  └─► worker C (waits A) ──┘        │ fail
+                                    └─► repair notes ─► next attempt
+  │
+librarian ─► learnings (read by the next run)</pre>
+              <a class="doc-link" href="https://github.com/deepskpathak/orchestra/blob/main/docs/architecture.md">Read the architecture guide →</a>
+            </div>
+          </div>
+        </div>
+
+        <div class="tab-panel" role="tabpanel" id="panel-self" aria-labelledby="tab-self" hidden>
+          <div class="two-col">
+            <div>
+              <h3>The harness is the evolvable part</h3>
+              <p>Role prompts (<code>planner.md</code>, <code>worker.md</code>, <code>judge.md</code>, <code>librarian.md</code>, <code>evolver.md</code>), <code>config.json</code>, and three small optional files: <code>tools.md</code>, <code>style.md</code>, <code>checklist.md</code>.</p>
+              <ul class="ticks">
+                <li>Each version lives in <code>harness/&lt;vN&gt;/</code>. Versions are append-only.</li>
+                <li><code>archive.json</code> records parent, rationale, eval score and status.</li>
+                <li>The review checklist can only get stricter. <code>passThreshold</code> never goes down.</li>
+              </ul>
+            </div>
+            <div>
+              <h3>The loop</h3>
+              <div class="code"><button class="copy" aria-label="Copy command">Copy</button><pre><code>orchestra stats       <span class="c"># health per harness version</span>
+orchestra learnings   <span class="c"># what this repo taught it</span>
+orchestra evolve      <span class="c"># propose, eval, maybe promote</span>
+orchestra promote v1  <span class="c"># roll back any time</span></code></pre></div>
+              <p class="note">Evolution reruns past goals, so it costs roughly <code>sample × 2</code> runs. Tune <code>evolve.sample</code>, <code>evolve.every</code> and <code>evolve.candidates</code>.</p>
+              <a class="doc-link" href="https://github.com/deepskpathak/orchestra/blob/main/docs/self-improvement.md">Read the self-improvement guide →</a>
+            </div>
+          </div>
+        </div>
+
+        <div class="tab-panel" role="tabpanel" id="panel-dash" aria-labelledby="tab-dash" hidden>
+          <p>All four views read the same source of truth (<code>run.json</code> and <code>events.jsonl</code>), so they always agree.</p>
+          <div class="dash-grid">
+            <div class="dash-card"><h4>Full-screen terminal</h4><code>orchestra watch</code><p>Live board, redraws about every 150 ms. Press <kbd>q</kbd> to quit.</p></div>
+            <div class="dash-card"><h4>One-shot board</h4><code>orchestra status</code><p>Snapshots for scripts and chat. <code>--plain</code> or <code>--color</code>.</p></div>
+            <div class="dash-card"><h4>Web dashboard</h4><code>orchestra serve</code><p>Read-only, localhost port 4317 by default. Diffs, logs, past runs.</p></div>
+            <div class="dash-card"><h4>Statusline</h4><code>orchestra statusline</code><p>An always-visible summary inside Claude Code.</p></div>
+          </div>
+          <a class="doc-link" href="https://github.com/deepskpathak/orchestra/blob/main/docs/dashboards.md">Read the dashboards guide →</a>
+        </div>
+
+        <div class="tab-panel" role="tabpanel" id="panel-iso" aria-labelledby="tab-iso" hidden>
+          <div class="two-col">
+            <div>
+              <h3>The boundary is the OS, not the hook</h3>
+              <p>Opt in with <code>--sandbox auto|srt|claude</code> or <code>--sandbox docker</code>. Workers can write only to the worktree and temp, cannot read credentials, <code>.env*</code> or the holdout, and reach only the model API plus <code>sandbox.allowedHosts</code>.</p>
+              <ul class="ticks">
+                <li>Pre-flight self-test aborts if a blocked host or denied path is reachable.</li>
+                <li>Credentials stripped from worker env. <code>.git/hooks</code> and <code>.git/config</code> read-only.</li>
+                <li>Only the orchestrator commits, pushes and opens PRs.</li>
+                <li><code>--unattended</code> refuses to start without a sandbox backend.</li>
+              </ul>
+            </div>
+            <div>
+              <div class="callout">
+                <strong>Default is unsandboxed.</strong> The <code>src/guard.ts</code> hook is a deny-list backstop that <code>python</code>, <code>node</code>, git remotes or DNS can bypass. Use a sandbox for anything you would not run by hand.
+              </div>
+              <div class="code"><button class="copy" aria-label="Copy command">Copy</button><pre><code>orchestra run "&lt;goal&gt;" --sandbox auto
+orchestra run "&lt;goal&gt;" --sandbox docker --gvisor
+orchestra run "&lt;goal&gt;" --unattended</code></pre></div>
+              <a class="doc-link" href="https://github.com/deepskpathak/orchestra/blob/main/docs/isolation.md">Read the isolation guide →</a>
+            </div>
+          </div>
+        </div>
+
+        <div class="tab-panel" role="tabpanel" id="panel-config" aria-labelledby="tab-config" hidden>
+          <p>Two plain-JSON layers. <strong>Project config</strong> (<code>.orchestra/config.json</code>) controls concurrency, tools and budgets. <strong>Harness config</strong> controls models, retries and thresholds per role, and is versioned and evolvable.</p>
+          <div class="cfg">
+            <div class="cfg-row"><code>concurrency</code><span>3</span><p>Maximum tasks running in parallel.</p></div>
+            <div class="cfg-row"><code>testCommand</code><span>auto</span><p>Run in each worktree and on the integration branch. Verification is much stronger with one.</p></div>
+            <div class="cfg-row"><code>runBudgetUsd</code><span>20</span><p>Spend cap per run.</p></div>
+            <div class="cfg-row"><code>judgeTiers</code><span>off</span><p>A cheap judge first, escalating to the strong judge near the threshold.</p></div>
+            <div class="cfg-row"><code>verification.*</code><span>off</span><p>Judge panel, agentic judge, acceptance contracts, oracles, mutation score.</p></div>
+            <div class="cfg-row"><code>sandbox.allowedHosts</code><span>[]</span><p>Extra hosts sandboxed workers may reach (the model API is always allowed).</p></div>
+          </div>
+          <a class="doc-link" href="https://github.com/deepskpathak/orchestra/blob/main/docs/configuration.md">Full configuration reference →</a>
+        </div>
+      </div>
+    </section>
+
+    <!-- VII. HOW-TOS -->
+    <section class="section howto" id="howto" aria-labelledby="howto-title">
+      <div class="section-head">
+        <p class="movement"><span>VII.</span> How-tos</p>
+        <h2 id="howto-title">How do I…</h2>
+      </div>
+
+      <div class="accordion">
+        <details>
+          <summary>…see it work without spending tokens?</summary>
+          <div class="acc-body">
+            <p>Use the demo, or point the simulator at your own repo.</p>
+            <div class="code"><button class="copy" aria-label="Copy command">Copy</button><pre><code>orchestra demo
+ORCHESTRA_RUNNER=fake orchestra run "Add a health endpoint"</code></pre></div>
+            <p class="note"><code>ORCHESTRA_FAKE_STEP_MS</code> sets the simulated step delay (default 150).</p>
+          </div>
+        </details>
+        <details>
+          <summary>…review and land what Orchestra built?</summary>
+          <div class="acc-body">
+            <p>Nothing touches your branch. The run prints exact commands when it finishes.</p>
+            <div class="code"><button class="copy" aria-label="Copy command">Copy</button><pre><code>git log main..orchestra/&lt;run&gt;/integration
+git diff main...orchestra/&lt;run&gt;/integration
+git merge orchestra/&lt;run&gt;/integration</code></pre></div>
+          </div>
+        </details>
+        <details>
+          <summary>…run in the background and check in later?</summary>
+          <div class="acc-body">
+            <div class="code"><button class="copy" aria-label="Copy command">Copy</button><pre><code>orchestra run "&lt;goal&gt;" --detach
+orchestra watch     <span class="c"># live board, q to quit</span>
+orchestra status    <span class="c"># one-shot snapshot</span></code></pre></div>
+          </div>
+        </details>
+        <details>
+          <summary>…watch a run in the browser?</summary>
+          <div class="acc-body">
+            <div class="code"><button class="copy" aria-label="Copy command">Copy</button><pre><code>orchestra run "&lt;goal&gt;" --serve   <span class="c"># dashboard for this run</span>
+orchestra serve --port 4317        <span class="c"># or standalone, read-only</span></code></pre></div>
+          </div>
+        </details>
+        <details>
+          <summary>…work safely on a repo I don't fully trust?</summary>
+          <div class="acc-body">
+            <p>Use the Docker backend (no network by default) and optionally gVisor. Add hosts like a package registry only if needed.</p>
+            <div class="code"><button class="copy" aria-label="Copy command">Copy</button><pre><code>orchestra run "&lt;goal&gt;" --sandbox docker --gvisor --unattended</code></pre></div>
+          </div>
+        </details>
+        <details>
+          <summary>…roll back a harness change I don't like?</summary>
+          <div class="acc-body">
+            <p>Versions are append-only, so any one can be made current again.</p>
+            <div class="code"><button class="copy" aria-label="Copy command">Copy</button><pre><code>orchestra stats         <span class="c"># compare versions</span>
+orchestra promote v1    <span class="c"># make v1 current again</span></code></pre></div>
+          </div>
+        </details>
+        <details>
+          <summary>…see what Orchestra has learned about my repo?</summary>
+          <div class="acc-body">
+            <div class="code"><button class="copy" aria-label="Copy command">Copy</button><pre><code>orchestra learnings
+orchestra learnings --domain cli
+orchestra learnings --domain global</code></pre></div>
+            <p class="note">Lessons are plain JSON and Markdown in <code>.orchestra/learnings/</code>. You can read and edit them.</p>
+          </div>
+        </details>
+        <details>
+          <summary>…require a human sign-off on risky tasks?</summary>
+          <div class="acc-body">
+            <p>Turn on <code>oversight.riskTiers</code>. High-risk tasks wait as <code>awaiting_approval</code> until a different person approves, then <code>resume</code> finishes deferred work.</p>
+            <div class="code"><button class="copy" aria-label="Copy command">Copy</button><pre><code>orchestra approve &lt;runId&gt; &lt;taskId&gt; --by &lt;name&gt;
+orchestra resume &lt;runId&gt;</code></pre></div>
+          </div>
+        </details>
+        <details>
+          <summary>…benchmark whether a setting actually helps?</summary>
+          <div class="acc-body">
+            <p>The bench suite runs arms × goals × repeats with hidden checks and paired statistics.</p>
+            <div class="code"><button class="copy" aria-label="Copy command">Copy</button><pre><code>orchestra bench --verify-oracles
+orchestra bench --ablations</code></pre></div>
+            <a class="doc-link" href="https://github.com/deepskpathak/orchestra/blob/main/docs/bench.md">Benchmark guide →</a>
+          </div>
+        </details>
+      </div>
+    </section>
+
+    <!-- VIII. STATUS -->
+    <section class="section status" aria-labelledby="status-title">
+      <div class="status-card">
+        <p class="movement"><span>VIII.</span> Liner notes</p>
+        <h2 id="status-title">What's proven, and what isn't yet.</h2>
+        <div class="two-col">
+          <ul class="ticks">
+            <li>The full test suite runs against a simulator, no model calls.</li>
+            <li>Real end-to-end runs with the Claude Code sandbox merged 2 of 2 and 3 of 3 tasks, at $3.04 and $4.52.</li>
+            <li>Every new capability is opt-in and off by default.</li>
+          </ul>
+          <ul class="ticks ticks-open">
+            <li>Some sandbox backends (srt, docker, sandbox-exec) have not run a real worker yet.</li>
+            <li>Most research hypotheses are built but unmeasured.</li>
+            <li>No harness variant has been promoted from a real gain yet.</li>
+          </ul>
+        </div>
+        <p class="status-links">
+          <a href="https://github.com/deepskpathak/orchestra/blob/main/docs/status.md">Project status</a>
+          <a href="https://github.com/deepskpathak/orchestra/blob/main/docs/whitepaper-orchestra.md">Whitepaper</a>
+          <a href="https://github.com/deepskpathak/orchestra/blob/main/CHANGELOG.md">Changelog</a>
+        </p>
+      </div>
+    </section>
+
+    <!-- FINALE -->
+    <section class="finale" aria-labelledby="finale-title">
+      <p class="movement"><span>𝄐</span> Finale</p>
+      <h2 id="finale-title">Raise the baton.</h2>
+      <div class="hero-actions center">
+        <a class="btn btn-primary" href="https://github.com/deepskpathak/orchestra">Get Orchestra on GitHub</a>
+        <a class="btn btn-ghost" href="https://github.com/deepskpathak/orchestra/blob/main/docs/getting-started.md">Getting started guide</a>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <div><span class="brand-mark" aria-hidden="true">♫</span> Orchestra · MIT License · Built on Claude Code</div>
+    <nav aria-label="Footer">
+      <a href="https://github.com/deepskpathak/orchestra/blob/main/CONTRIBUTING.md">Contributing</a>
+      <a href="https://github.com/deepskpathak/orchestra/blob/main/SECURITY.md">Security</a>
+      <a href="https://github.com/deepskpathak/orchestra/blob/main/docs/blog/orchestra-substack-post.md">Blog</a>
+    </nav>
+  </footer>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <script src="film.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
