@@ -114,7 +114,33 @@ export interface Run {
   mutation?: { total: number; killed: number; score?: number; floor: number; pass?: boolean; invalid?: number; skipped?: string }; // W4.5; skipped (with a reason) means no score was computed, so there is no score or pass
   contract?: { path: string; sha256: string }; // W4.3 the acceptance contract workers cannot edit
   verificationModes?: string[]; // M4 modes enabled when the run started (panel, agentic, contracts, oracles, mutation); absent = none
+  // W7.1: work an approval left undone when it finalised an awaiting_approval run; `orchestra resume` runs it and clears this
+  deferred?: DeferredWork[];
+  ablate?: Ablation; // opt-in ablation the run started with (bench); absent when none
+  evalLearnings?: boolean; // an eval replay that reads the learnings store; absent when clean-room
+  isolation?: RunIsolation; // how workers were confined at run start, so a resume can inherit it; absent on older runs
 }
+
+// Worker isolation a run started with (never secrets). backend 'none' means no OS sandbox.
+export interface RunIsolation {
+  backend: 'srt' | 'claude' | 'docker' | 'none';
+  unattended: boolean;
+  scrubEnv: boolean; // push and publish credentials stripped from agent env
+  image?: string;
+  gvisor?: boolean;
+  network?: string; // docker network; absent means none
+  allowedHosts?: string[];
+  allowLocalBinding?: boolean;
+}
+
+export interface Ablation {
+  scenarios?: boolean; // the judge and contrast comparer see no hidden scenarios
+  repair?: boolean; // one attempt per task, no repair loop
+  learnings?: boolean; // planner and workers get no learnings
+  contrastive?: boolean; // never run contrastive repair
+}
+
+export type DeferredWork = 'tasks' | 'mutation' | 'learning';
 
 // One live agent session, shown as a lane in the dashboard.
 export interface ActiveAgent {
