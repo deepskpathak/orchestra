@@ -44,7 +44,7 @@ export const MODEL_API_HOST = 'api.anthropic.com';
 export interface SandboxPolicy {
   write: { allow: string[]; deny: string[] };
   read: { deny: string[] };
-  network: { allowedHosts: string[] };
+  network: { allowedHosts: string[]; allowLocalBinding: boolean };
   gitCommonDir: string; // shared by every worktree; the docker backend mounts it and workers commit into it
 }
 
@@ -55,6 +55,9 @@ export interface PolicyInput {
   hiddenScenarioDir: string; // the judge-only scenario directory under .orchestra, supplied by the caller
   gitCommonDir: string;
   allowedHosts?: string[];
+  // Opt-in. Tests that bind 127.0.0.1 fail inside the sandbox without it. Risk: on macOS it also lets
+  // sandboxed commands connect to any localhost port (local databases, dev servers) without the proxy.
+  allowLocalBinding?: boolean;
 }
 
 // Credential locations and secret files a worker never needs. ".env*" is a glob, matched anywhere.
@@ -73,7 +76,7 @@ export function buildSandboxPolicy(i: PolicyInput): SandboxPolicy {
       deny: [join(i.gitCommonDir, 'hooks'), join(i.gitCommonDir, 'config')],
     },
     read: { deny: [...HOME_SECRETS.map((p) => join(i.home, p)), ...ENV_GLOBS, i.hiddenScenarioDir] },
-    network: { allowedHosts: [...new Set(hosts)] },
+    network: { allowedHosts: [...new Set(hosts)], allowLocalBinding: i.allowLocalBinding === true },
     gitCommonDir: i.gitCommonDir,
   };
 }
@@ -105,7 +108,8 @@ export function claudeSandboxSettings(policy: SandboxPolicy): Record<string, unk
       allowUnsandboxedCommands: false, // no escape hatch to run outside the sandbox
       failIfUnavailable: true, // refuse to run rather than fall back to unsandboxed
       autoAllowBashIfSandboxed: true,
-      network: { allowedDomains: [...policy.network.allowedHosts] },
+      // allowLocalBinding is emitted only when enabled, so the default shape is unchanged.
+      network: { allowedDomains: [...policy.network.allowedHosts], ...(policy.network.allowLocalBinding ? { allowLocalBinding: true } : {}) },
       filesystem: {
         allowWrite: [...policy.write.allow],
         denyWrite: [...policy.write.deny],
@@ -128,7 +132,11 @@ export function claudeSandboxSettings(policy: SandboxPolicy): Record<string, unk
 // that gap is open for files created mid-run.
 export function srtSandboxSettings(policy: SandboxPolicy): Record<string, unknown> {
   return {
-    network: { allowedDomains: [...policy.network.allowedHosts], deniedDomains: [] },
+    network: {
+      allowedDomains: [...policy.network.allowedHosts],
+      deniedDomains: [],
+      ...(policy.network.allowLocalBinding ? { allowLocalBinding: true } : {}),
+    },
     filesystem: {
       denyRead: [...policy.read.deny],
       allowWrite: [...policy.write.allow],
@@ -196,6 +204,9 @@ export interface PreflightOptions {
   cwd: string; // a worktree the worker could use
   docker?: { image?: string; gvisor?: boolean; network?: string };
   timeoutMs?: number;
+  // Candidate host dirs for the docker read canary, tried in order (default: see unmountedCanaryBase).
+  // Injectable because inside a sandbox neither default is writable, so tests need a controllable base.
+  canaryBases?: string[];
 }
 
 export interface PreflightResult {
@@ -247,9 +258,9 @@ function argvGuard(body: string): string {
 // A host directory for the docker read canary that no container mount covers. Read isolation for
 // docker comes from not mounting a path, so the canary has to live outside every mount (tmpdir is
 // mounted rw, so the usual temp location would make the probe open for real). Null when none is usable.
-function unmountedCanaryBase(mounts: string[]): string | null {
+function unmountedCanaryBase(mounts: string[], bases: string[] = ['/var/tmp', homedir()]): string | null {
   const covered = (p: string) => mounts.some((m) => p === m || p.startsWith(m.endsWith(sep) ? m : m + sep));
-  for (const base of ['/var/tmp', homedir()]) {
+  for (const base of bases) {
     try {
       if (base && !covered(base)) {
         const d = mkdtempSync(join(base, 'orchestra-canary-'));
@@ -282,7 +293,7 @@ export function preflightSandbox(policy: SandboxPolicy, backend: 'srt' | 'claude
     // docker cannot: its canary must be outside every mounted path (see unmountedCanaryBase).
     let canary: string | null = join(dir, 'canary.txt');
     if (backend === 'docker') {
-      canaryDir = unmountedCanaryBase([opts.cwd, policy.write.allow[1] ?? tmpdir(), policy.gitCommonDir]);
+      canaryDir = unmountedCanaryBase([opts.cwd, policy.write.allow[1] ?? tmpdir(), policy.gitCommonDir], opts.canaryBases);
       canary = canaryDir ? join(canaryDir, 'canary.txt') : null;
     }
     if (canary) writeFileSync(canary, 'orchestra preflight canary\n');
@@ -340,6 +351,16 @@ export function preflightSandbox(policy: SandboxPolicy, backend: 'srt' | 'claude
       else if (!out.includes(BLOCKED)) failures.push(`${name} probe inconclusive: wrapper exited ${r.status} with no result, treating the sandbox as not working`);
     };
 
+    // allowLocalBinding is opt-in and widens the sandbox, so the run log says so every time. The docker
+    // backend never reads it (container networking is set by --sandbox-network), so a user who set it
+    // there would otherwise assume local binding works or is confined when neither is guaranteed.
+    if (policy.network.allowLocalBinding) {
+      warnings.push(
+        backend === 'docker'
+          ? 'sandbox.allowLocalBinding is ignored with --sandbox docker: container networking comes from --sandbox-network'
+          : 'sandbox.allowLocalBinding is on: localhost access is widened, and on macOS sandboxed commands can connect to any localhost port (local databases, dev servers), bypassing the proxy',
+      );
+    }
     const dockerNet = backend === 'docker' ? (opts.docker?.network ?? DEFAULT_NETWORK) : null;
     if (dockerNet === 'none') {
       warnings.push(`docker network is none: the worker cannot reach ${MODEL_API_HOST}, so a claude worker will fail unless the image provides its own route. Set --sandbox-network to a network that reaches the model API (docs/isolation.md)`);

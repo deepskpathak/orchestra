@@ -178,11 +178,14 @@ export const makeClaudeRunner = (spawnFn: SpawnFn = spawn): Runner => (req) =>
     let buf = '';
     let stderr = '';
     let lastText = '';
-    let result: AgentResult | null = null;
+    // durationMs is wall clock and only known at close, so the accumulated result carries none until then.
+    let result: Omit<AgentResult, 'durationMs'> | null = null;
     const toolCounts: Record<string, number> = {};
 
+    let timedOut = false;
     const timer = req.timeoutMs
       ? setTimeout(() => {
+          timedOut = true;
           child.kill('SIGTERM');
         }, req.timeoutMs)
       : null;
@@ -206,15 +209,36 @@ export const makeClaudeRunner = (spawnFn: SpawnFn = spawn): Runner => (req) =>
           }
         }
       } else if (msg.type === 'result') {
+        // A worker that starts a background Bash task resumes on the task notification, so one session
+        // emits several result messages. num_turns and usage are per segment (sum them); total_cost_usd is
+        // cumulative (take the last, summing would double count). Duration is wall clock, set at close.
+        // Evidence, not inference: a real two-segment worker session on Claude Code 2.1.310 reported
+        //   result 1: num_turns 11, duration_ms 176517, total_cost_usd 0.2656, output_tokens 6690, cache_read 438038
+        //   result 2: num_turns 2,  duration_ms 6439,   total_cost_usd 0.2992, output_tokens 674,  cache_read 111157
+        // Cost rose while turns, duration and both token counts shown dropped. A cumulative counter cannot
+        // decrease, so those are per segment and cost is cumulative. Recheck if a Claude Code upgrade
+        // changes the stream-json result shape.
         const isError = Boolean(msg.is_error) || msg.subtype !== 'success';
+        const seg = parseUsage(msg);
+        const usage = result?.usage && seg
+          ? {
+              inputTokens: result.usage.inputTokens + seg.inputTokens,
+              outputTokens: result.usage.outputTokens + seg.outputTokens,
+              cacheReadTokens: result.usage.cacheReadTokens + seg.cacheReadTokens,
+              cacheWriteTokens: result.usage.cacheWriteTokens + seg.cacheWriteTokens,
+            }
+          : (seg ?? result?.usage);
+        const turns = (result?.turns ?? 0) + Number(msg.num_turns ?? 0);
         result = {
           ok: !isError,
           text: typeof msg.result === 'string' ? msg.result : lastText,
-          structured: msg.structured_output ?? undefined,
-          costUsd: Number(msg.total_cost_usd ?? 0),
-          turns: Number(msg.num_turns ?? 0),
-          durationMs: Number(msg.duration_ms ?? Date.now() - started),
-          usage: parseUsage(msg),
+          // A resumed segment often ends without structured output; the earlier segment's (for example a
+          // flag_for_human verdict) is still the session's answer, so it is not dropped.
+          structured: msg.structured_output ?? result?.structured,
+          // A segment without total_cost_usd keeps the earlier cumulative figure rather than resetting spend to 0.
+          costUsd: Number(msg.total_cost_usd ?? result?.costUsd ?? 0),
+          turns,
+          usage,
           toolCounts,
           error: isError ? (msg.errors?.join('; ') || msg.result || msg.subtype) : undefined,
         };
@@ -236,10 +260,21 @@ export const makeClaudeRunner = (spawnFn: SpawnFn = spawn): Runner => (req) =>
       if (timer) clearTimeout(timer);
       resolve({ ok: false, text: '', costUsd: 0, turns: 0, durationMs: Date.now() - started, error: `spawn ${command} failed: ${err.message}` });
     });
-    child.on('close', (code) => {
+    child.on('close', (code: number | null, signal: NodeJS.Signals | null) => {
       if (timer) clearTimeout(timer);
       if (buf) handle(buf);
-      if (result) return resolve(result);
+      if (result) {
+        const final = { ...result, durationMs: Date.now() - started };
+        // A session can emit a success result and then resume (background task notification). If it is
+        // then killed (our timeout SIGTERM) or exits non-zero, the earlier success does not describe how
+        // the session ended, so report it as failed. Text, cost, turns and usage are kept for the ledger.
+        // Exit 0 keeps the result as reported, and an error result keeps its own, more specific error.
+        if (final.ok && (signal || (code !== null && code !== 0))) {
+          const how = signal ? `killed by ${signal}${timedOut ? ` after the ${req.timeoutMs}ms timeout` : ''}` : `exited ${code}`;
+          return resolve({ ...final, ok: false, error: `claude ${how} after a result` });
+        }
+        return resolve(final);
+      }
       resolve({
         ok: false,
         text: lastText,

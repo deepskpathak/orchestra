@@ -6,9 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- Opt-in `sandbox.allowLocalBinding` (boolean, default false) in `.orchestra/config.json`. When true it sets `network.allowLocalBinding: true` in the srt settings and `sandbox.network.allowLocalBinding: true` in the Claude Code sandbox settings, so tests that bind 127.0.0.1 can run inside the sandbox. On macOS it also lets sandboxed commands reach any localhost port without the proxy. Documented in `docs/configuration.md`.
+
 ### Fixed
 
 - Sandbox pre-flight for the srt and docker backends now checks argv pass-through: the probe runs `node -e <script> orchestra-probe --settings <json> -p <prompt>` (JSON with quotes, spaces and `$`, and no `--` of its own, like a worker) and fails pre-flight if the arguments do not arrive byte for byte. A srt wrapper that loses its `--`, the bug fixed in #74, now fails pre-flight. When both probes are skipped, pre-flight warns that argv was not verified. The probe argv is hand-written rather than built by the worker code path, and the claude backend probe does not check argv.
+- Docker pre-flight tests no longer depend on `/var/tmp` or `$HOME` being writable. `PreflightOptions.canaryBases` is an optional list of candidate host dirs for the docker read canary; tests inject a temp dir, and omitting it keeps the `['/var/tmp', homedir()]` default.
+- Runner result accounting: a worker that starts a background Bash task resumes on the task notification, so `claude -p --output-format stream-json` emits more than one `result` message. `makeClaudeRunner` now sums `num_turns` and token usage across them (both are per segment), takes `total_cost_usd` from the last that reports it (it is cumulative), measures `durationMs` as wall clock from spawn to exit, takes `ok`, `error` and `text` from the last, and keeps the latest `structured_output` any segment produced. A session killed by a signal (the runner timeout) or exiting non-zero after a success result now reports `ok: false` with an error naming the signal or exit code, keeping the accumulated text, cost, turns and usage. Turn caps, `cacheReadShare` and durations were undercounted before. For single-result sessions `durationMs` also changes: it was the result's `duration_ms` and is now wall clock from spawn to exit for every session, since that is the time budgets and the ledger should see. Other single-result fields are unchanged.
 
 ## [0.7.0] - 2026-10-27
 
