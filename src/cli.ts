@@ -358,9 +358,33 @@ function sandboxOption(store: Store, iso: ReturnType<typeof resolveSandbox>) {
 
 // W7.1: finish a run that `orchestra approve` finalised with deferred work. Same output as `run`, without
 // --detach and the automatic evolution check.
+const RESUME_USAGE = 'usage: orchestra resume <runId> [--serve] [--sandbox <mode>] [--sandbox-image <image>] [--sandbox-network <net>] [--gvisor] [--unattended] [--override-isolation]';
+
+// The run id of `orchestra resume`; throws on an unsupported flag, a flag missing its value, or not exactly one id.
+export function resumeRunId(args: string[]): string {
+  const bools = new Set(['--serve', '--gvisor', '--unattended', '--override-isolation']);
+  const values = new Set(['--sandbox', '--sandbox-image', '--sandbox-network']);
+  const ids: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (values.has(a)) {
+      if (args[i + 1] === undefined || args[i + 1].startsWith('-')) throw new Error(`${a} needs a value. ${RESUME_USAGE}`);
+      i++;
+    } else if (a.startsWith('-')) {
+      if (!bools.has(a)) throw new Error(`unsupported flag ${a} for resume. ${RESUME_USAGE}`);
+    } else ids.push(a);
+  }
+  if (ids.length !== 1) throw new Error(RESUME_USAGE);
+  return ids[0];
+}
+
 async function cmdResume(args: string[]): Promise<void> {
-  const runId = goalFromArgs(args);
-  if (!runId || runId.includes(' ')) die('usage: orchestra resume <runId>');
+  let runId = '';
+  try {
+    runId = resumeRunId(args);
+  } catch (e) {
+    die((e as Error).message);
+  }
   const store = storeOrDie();
   try {
     assertResumable(store, runId);

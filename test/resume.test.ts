@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import type { AgentRequest, AgentResult, Runner } from '../src/agent.ts';
 import { approveTask } from '../src/approve.ts';
-import { resumeIsolation } from '../src/cli.ts';
+import { resumeIsolation, resumeRunId } from '../src/cli.ts';
 import { resumeRun, runGoal } from '../src/conductor.ts';
 import { fakeRunner } from '../src/fake.ts';
 import { PACKAGE_ROOT } from '../src/harness.ts';
@@ -514,3 +514,16 @@ test('orchestra resume (CLI): weaker isolation is refused, --override-isolation 
   assert.match(forced.stderr, /warning: run .* has no recorded isolation/);
   assert.ok(store.events(run.id).some((e) => /^Resume isolation:/.test(e.msg)));
 }));
+
+test('orchestra resume rejects unsupported flags and anything but one run id', () => {
+  assert.equal(resumeRunId(['r1', '--serve', '--sandbox', 'srt', '--unattended', '--override-isolation']), 'r1');
+  assert.throws(() => resumeRunId(['r1', '--detach']), /unsupported flag --detach/);
+  assert.throws(() => resumeRunId(['r1', '--no-evolve']), /unsupported flag --no-evolve/);
+  assert.throws(() => resumeRunId(['r1', '--sandbox']), /--sandbox needs a value/);
+  assert.throws(() => resumeRunId(['r1', 'r2']), /usage: orchestra resume <runId>/);
+  assert.throws(() => resumeRunId([]), /usage: orchestra resume <runId>/);
+  const cli = join(PACKAGE_ROOT, 'bin', 'orchestra.ts');
+  const r = spawnSync(process.execPath, [cli, 'resume', 'r1', '--detach'], { encoding: 'utf8', timeout: 60000 });
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /unsupported flag --detach/);
+});
