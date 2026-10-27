@@ -88,6 +88,8 @@ export function parseDiff(diff: string): FileDiff[] {
 const ASSERT_RE = /\b(assert(\.\w+)?|expect|should|t\.(is|true|false|deepEqual|equal|throws)|self\.assert\w*)\s*[.(]|\bassert\b/;
 const SKIP_RE = /\b(?:it|test|describe|suite)\.(skip|only|todo)\b|\b(?:xit|xdescribe|xtest|fit|fdescribe)\s*\(|\bt\.(skip|todo)\b|@pytest\.mark\.skip|\bunittest\.skip|@Disabled|@Ignore\b/;
 
+const SPECIAL_CASING = 'special-casing a literal input';
+
 const HACK_PATTERNS: Array<[RegExp, string]> = [
   [/\bprocess\.exit\(\s*0?\s*\)/, 'early success exit (process.exit(0))'],
   [/\b(?:sys\.exit|os\._exit|exit)\(\s*0\s*\)/, 'early success exit'],
@@ -97,8 +99,8 @@ const HACK_PATTERNS: Array<[RegExp, string]> = [
   [/\bassert\.\w+\s*=[^=]/, 'overwriting an assert method'],
   [/\b(?:Object|Reflect)\.(?:defineProperty|setPrototypeOf)\(\s*(?:globalThis|global|assert|process)\b/, 'monkey-patching a global'],
   [/\b(?:process\.argv|process\.env\.\w+|NODE_ENV|CI)\b.*\b(?:test|TEST|CI)\b.*\b(?:return|exit)\b/, 'branching on test environment'],
-  [/\bif\s*\(.*(?:===|==)\s*['"`][^'"`]{3,}['"`].*\)\s*(?:\{\s*)?return\b/, 'special-casing a literal input'],
-  [/\bcase\s+['"`][^'"`]{3,}['"`]\s*:\s*return\b/, 'special-casing a literal input'],
+  [/\bif\s*\(.*(?:===|==)\s*['"`][^'"`]{3,}['"`].*\)\s*(?:\{\s*)?return\b/, SPECIAL_CASING],
+  [/\bcase\s+['"`][^'"`]{3,}['"`]\s*:\s*return\b/, SPECIAL_CASING],
 ];
 
 function isComment(line: string): boolean {
@@ -138,9 +140,13 @@ export function analyzeDiff(diff: string, paths: string[] = []): IntegrityFlag[]
     }
     if (f.deleted) continue;
     const reported = new Set<string>();
+    // Test fakes and stubs branch on literal inputs by design (e.g. `if (c === 'node') return ...`),
+    // so literal special-casing is only a hack signal outside test files. Other patterns still apply.
+    const testFile = isTestFile(f.path);
     for (const line of f.added) {
       if (isComment(line)) continue;
       for (const [re, detail] of HACK_PATTERNS) {
+        if (testFile && detail === SPECIAL_CASING) continue;
         if (re.test(line) && !reported.has(detail)) {
           reported.add(detail);
           flags.push({ kind: 'reward-hack', file: f.path, detail: `${detail}: ${line.trim().slice(0, 80)}` });
