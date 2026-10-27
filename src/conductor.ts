@@ -30,14 +30,9 @@ import { DEFAULT_PROVIDER, resolveModel } from './models.ts';
 import { resolveProvider, type ModelProvider } from './provider.ts';
 import { verificationModes } from './outcomes.ts';
 import { AGENTIC_INSTRUCTION, NO_EVIDENCE_NOTE, executedChecksSection, runScenarioChecks, type CheckResult } from './judge-checks.ts';
-import type { ActiveAgent, CriterionResult, OrchestraEvent, PanelRecord, ProjectConfig, Role, Run, Scenario, Task, Verdict } from './types.ts';
+import type { Ablation, ActiveAgent, CriterionResult, OrchestraEvent, PanelRecord, ProjectConfig, Role, Run, Scenario, Task, Verdict } from './types.ts';
 
-export interface Ablation {
-  scenarios?: boolean; // the judge and contrast comparer see no hidden scenarios
-  repair?: boolean; // one attempt per task, no repair loop
-  learnings?: boolean; // planner and workers get no learnings
-  contrastive?: boolean; // never run contrastive repair
-}
+export type { Ablation };
 
 export interface ConductorOptions {
   store: Store;
@@ -545,6 +540,9 @@ export class Conductor {
       baseRef: opts.baseRef,
       requestedBy: detectRequester(opts.store.root),
       ...(modes.length ? { verificationModes: modes } : {}),
+      // Recorded so a resume runs under the same ablation and learnings mode as the first pass.
+      ...(Object.values(this.ablate).some(Boolean) ? { ablate: { ...this.ablate } } : {}),
+      ...(this.evalLearnings ? { evalLearnings: true } : {}),
     };
   }
 
@@ -2133,7 +2131,7 @@ export async function resumeRun(opts: ResumeOptions): Promise<Run> {
   try {
     // Checked under the lock, so a resume that just finished (marker cleared) is not run twice.
     const run = assertResumable(opts.store, opts.runId);
-    return await new Conductor({ ...opts, goal: run.goal, kind: run.kind, harnessVersion: run.harness, baseRef: run.baseRef }, run).resume();
+    return await new Conductor({ ...opts, goal: run.goal, kind: run.kind, harnessVersion: run.harness, baseRef: run.baseRef, ablate: opts.ablate ?? run.ablate, evalLearnings: opts.evalLearnings ?? run.evalLearnings }, run).resume();
   } finally {
     release();
   }

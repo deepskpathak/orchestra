@@ -116,6 +116,15 @@ export interface Run {
   verificationModes?: string[]; // M4 modes enabled when the run started (panel, agentic, contracts, oracles, mutation); absent = none
   // W7.1: work an approval left undone when it finalised an awaiting_approval run; `orchestra resume` runs it and clears this
   deferred?: DeferredWork[];
+  ablate?: Ablation; // opt-in ablation the run started with (bench); absent when none
+  evalLearnings?: boolean; // an eval replay that reads the learnings store; absent when clean-room
+}
+
+export interface Ablation {
+  scenarios?: boolean; // the judge and contrast comparer see no hidden scenarios
+  repair?: boolean; // one attempt per task, no repair loop
+  learnings?: boolean; // planner and workers get no learnings
+  contrastive?: boolean; // never run contrastive repair
 }
 
 export type DeferredWork = 'tasks' | 'mutation' | 'learning';

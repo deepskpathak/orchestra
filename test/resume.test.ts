@@ -391,3 +391,25 @@ test('learning on resume does not see first-pass "blocked" events of tasks that 
   assert.doesNotMatch(prompts[0], /T2 blocked/);
   assert.match(prompts[0], /T4 blocked/);
 }));
+
+test('resume keeps the ablation the run started with (ablate.repair: one attempt, no repair)', () => asRequester(async () => {
+  async function scenario(ablate: boolean) {
+    const store = repo();
+    const inner = planned([t('T1'), t('T2', ['T1'])], ['T1']);
+    // T2's first judge says fail; with repair on it gets a second attempt.
+    const runner: Runner = async (req) => {
+      if (req.role === 'judge' && req.meta?.task === 'T2' && req.meta?.attempt === 1) return { ok: true, text: '', costUsd: 0, turns: 1, durationMs: 1, structured: { pass: false, score: 0.1, summary: 'wrong', issues: ['wrong'] } };
+      return inner(req);
+    };
+    const run = await runGoal({ store, runner, goal: 'g', ...(ablate ? { ablate: { repair: true } } : {}) });
+    assert.deepEqual(run.ablate, ablate ? { repair: true } : undefined);
+    await approveTask(store, run.id, 'T1', 'bob');
+    return resumeRun({ store, runner, runId: run.id });
+  }
+  const ablated = await scenario(true);
+  assert.equal(ablated.tasks[1].status, 'failed');
+  assert.equal(ablated.tasks[1].attempts, 1);
+  const normal = await scenario(false);
+  assert.equal(normal.tasks[1].status, 'merged');
+  assert.equal(normal.tasks[1].attempts, 2);
+}));
