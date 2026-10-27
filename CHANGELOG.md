@@ -6,8 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-27
+
 ### Added
 
+- Optional `h2-none` and `h2-agentic` bench arms in `bench/arms.json` for the H2 pilot. They differ only in `verification.agenticJudge.enabled` and cap each run at `runBudgetUsd` 1.5. A plain `orchestra bench` is unchanged.
 - `orchestra resume <runId>` (W7.1) finishes a run that `orchestra approve` finalised with work deferred, on the same run id and integration branch. It runs the tasks that were blocked behind the approved tasks through the normal scheduler, then the mutation pass and `learn()`, and recomputes satisfaction and status. `approveTask` records the owed work in the new `Run.deferred` (`tasks`, `mutation` when the run started with it, `learning`), which decides what resume runs, and its event, error and CLI output now point at `orchestra resume`. The marker is cleared only when the resumed tail finishes, so a failed or killed resume can be retried; a failure before any work starts leaves the run file unchanged. A lock file (`runs/<id>/resume.lock`) refuses a second concurrent resume and is taken over when its process is gone. Runs now record `Run.isolation` (sandbox backend, docker settings, unattended, env scrubbing, allowed hosts), `Run.ablate` and `Run.evalLearnings`; resume inherits them. Isolation flags on resume may only tighten the recorded isolation unless `--override-isolation` is given (warns and logs); runs recorded before this need flags or `--override-isolation`. The command takes `--serve`, rejects unsupported flags such as `--detach`, and exits 0 for `done` or `awaiting_approval`. On resume the librarian no longer sees the first pass's "blocked" events for tasks that merged. `Conductor.execute()` now shares its post-plan tail with `resume()`; behaviour of `run` is unchanged.
 - Opt-in `sandbox.allowLocalBinding` (boolean, default false) in `.orchestra/config.json`. When true it sets `network.allowLocalBinding: true` in the srt settings and `sandbox.network.allowLocalBinding: true` in the Claude Code sandbox settings, so tests that bind 127.0.0.1 can run inside the sandbox. On macOS it also lets sandboxed commands reach any localhost port without the proxy. Documented in `docs/configuration.md`.
 - `throughput.sharedFiles` (string list, unset means `["CHANGELOG.md"]`), used only when footprint scheduling or batch merge is on. Shared append-only files no longer count as footprint overlap, so independent tasks that each add a changelog line can run and batch-merge in parallel; before, every footprint listed `CHANGELOG.md`, so the real runs serialized every task and batches held one task. These files merge with git's `union` driver through a temporary `core.attributesFile`, so parallel appends land without a conflict and the user's `.gitattributes` is untouched. Applies to the single-task, batch and `orchestra approve` merges. `[]` restores the old behaviour.
@@ -219,7 +222,8 @@ First release.
 - **Simulated runner** for tests and `orchestra demo`.
 - **Read-only web dashboard**: `orchestra serve` and `orchestra run --serve`. A dependency-free `node:http` server on `127.0.0.1` streams `run.json` and `events.jsonl` over SSE to a single-file HTML page, with task detail (verdict, diff, agent log tails) and an `/orchestra:serve` skill.
 
-[Unreleased]: https://github.com/deepskpathak/orchestra/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/deepskpathak/orchestra/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/deepskpathak/orchestra/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/deepskpathak/orchestra/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/deepskpathak/orchestra/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/deepskpathak/orchestra/compare/v0.5.0...v0.6.0
