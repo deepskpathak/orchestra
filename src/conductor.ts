@@ -949,6 +949,10 @@ export class Conductor {
     const learnings = (this.run.kind === 'eval' && !this.evalLearnings) || this.ablate.learnings ? {} : readAllLearnings(store);
     const others = this.run.tasks.filter((t) => t.id !== task.id).map((t) => `- ${t.id} ${t.title} [${t.status}]`);
     const depLog = (cfg.throughput?.decisionLog ?? cfg.throughput?.footprintScheduling) ? decisionLog(task.deps.map((d) => this.task(d)).filter((d): d is Task => d?.status === 'merged')) : '';
+    // W6.5: the budget line goes in the prompt and, word for word, in the run events, so it can be checked after the run.
+    const budget = cfg.budgets?.workerPrompt.enabled ? this.budgetState(task) : undefined;
+    const budgetText = budget ? budgetLine(budget) : '';
+    if (budget) this.emit('log', `${task.id} attempt ${task.attempts} ${budgetText}`, { budget: { attempt: task.attempts, ...budget, line: budgetText } }, task.id);
     const prompt = joinPrompt(
       workerPrompt({
         goal: this.run.goal,
@@ -970,7 +974,7 @@ export class Conductor {
         atlasQuery: this.atlasQuery(),
       }),
     ) + (depLog ? `\n\n## Decisions from merged dependencies\n${depLog}` : '')
-      + (cfg.budgets?.workerPrompt.enabled ? `\n\n## Budget\n${budgetLine(this.budgetState(task))}` : '');
+      + (budgetText ? `\n\n## Budget\n${budgetText}` : '');
 
     if (!this.ablate.contrastive && contrastApplies(cfg, task)) return this.attemptContrast(task, wt, base, prompt);
 
@@ -1956,6 +1960,7 @@ export class Conductor {
       cacheReadTokens: res.usage?.cacheReadTokens,
       cacheWriteTokens: res.usage?.cacheWriteTokens,
       toolCounts: res.toolCounts,
+      ...(cap ? { cap: { turns: cap.turns, usd: cap.usd } } : {}),
     });
     this.emit('agent.end', `${role}${task ? ` ${task.id}` : ''} ${res.ok ? 'finished' : `error: ${res.error}`} ($${res.costUsd.toFixed(2)}, ${Math.round(res.durationMs / 1000)}s)`, undefined, task?.id, role);
     this.save();
