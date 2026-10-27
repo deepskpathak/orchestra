@@ -67,18 +67,17 @@ Two tooling gaps surfaced. Bench runs live in throwaway stores, so `orchestra st
 - srt on Linux: `denyRead` globs such as `**/.env` are expanded to the files that exist when the worker starts, so a `.env` created mid-run is readable from a shell. macOS matches the globs as patterns.
 - srt wraps the worker argv into one `bash -c` string. On Linux one argument is capped at 128 KiB, so a very large prompt or system prompt would fail to spawn (E2BIG). The harness prompt files total about 22 KB today, but task text, lessons and repair notes add to that and have not been measured.
 - The sandbox pre-flight probe checks argv pass-through for srt and docker with a hand-written, worker-like argv (`node -e <script> orchestra-probe --settings <json> -p <prompt>`, no `--` of its own), so a srt wrapper that drops its `--` (the #74 bug) or a wrapper that mangles quoting fails pre-flight. It does not build the probe through the worker code path (`buildCommand` in `src/agent.ts`), so it cannot catch a bug in how workers assemble their own argv, and the claude backend probe (a Bash tool call) does not check argv. Checked against fakes only. If both probes are skipped, pre-flight warns that argv was not verified.
-- A run that ends `awaiting_approval` finishes when its last held task is approved, but the mutation pass and `learn()` are not re-run, and blocked dependents need a new run.
+- `orchestra resume` reloads the hidden scenarios, contract and atlas from planning but not per-task in-memory state such as worker budget use from the first pass; resumed tasks start fresh. It runs no automatic evolution check, unlike `orchestra run`. Its isolation check compares free-form settings: a different docker image or network counts as weaker because Orchestra cannot rank them. The resume lock trusts a pid, so a reused pid can make a stale lock look live (delete the lock file). Checked with the fake runner only.
 
 ## Recommended next steps
 
 Done on 2026-10-26: `claude -p --max-turns` confirmed on Claude Code 2.1.310 (hidden from `--help`; a reached cap ends with `error_max_turns`), sandbox formats checked (#74), whitepaper and blog updated (#75). Released as 0.7.0.
 
-Done on 2026-10-27: real end-to-end runs with the Claude Code sandbox (above), and their fixes merged (#77, #78).
+Done on 2026-10-27: real end-to-end runs with the Claude Code sandbox (above), and their fixes merged (#77, #78). H2 pilot (#80). `orchestra resume` for runs that end `awaiting_approval` (#81).
 
 1. Point the global `orchestra` install and the plugin at this repository (they run 0.6.1 today), then gather H1 from new evolution cycles. Rerun H2 with harder goals, three repeats and a bench test command (about $25), and record check output and verification modes in bench rows.
-2. Add a resume path for runs that end `awaiting_approval`.
-3. Stop shared append-only files such as `CHANGELOG.md` from counting as footprint overlap, so independent tasks can run and merge in parallel.
-4. Log the budget lines given to workers (or record them in the run events), so budget behaviour can be checked after a run.
-5. Reduce integrity-monitor false positives on test fakes, such as branching on a command name in a fake executor.
-6. Build the pre-flight probe through the same wrapper code path as workers (buildCommand in src/agent.ts) instead of a hand-written argv, and cover the claude backend.
-7. Make the M6 batch-merge interleaving test deterministic if it flakes in CI. It uses short sleeps.
+2. Stop shared append-only files such as `CHANGELOG.md` from counting as footprint overlap, so independent tasks can run and merge in parallel.
+3. Log the budget lines given to workers (or record them in the run events), so budget behaviour can be checked after a run.
+4. Reduce integrity-monitor false positives on test fakes, such as branching on a command name in a fake executor.
+5. Build the pre-flight probe through the same wrapper code path as workers (buildCommand in src/agent.ts) instead of a hand-written argv, and cover the claude backend.
+6. Make the M6 batch-merge interleaving test deterministic if it flakes in CI. It uses short sleeps.

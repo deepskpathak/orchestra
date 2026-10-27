@@ -1,0 +1,529 @@
+import assert from 'node:assert/strict';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { test } from 'node:test';
+import type { AgentRequest, AgentResult, Runner } from '../src/agent.ts';
+import { approveTask } from '../src/approve.ts';
+import { resumeIsolation, resumeRunId } from '../src/cli.ts';
+import { resumeRun, runGoal } from '../src/conductor.ts';
+import { fakeRunner } from '../src/fake.ts';
+import { PACKAGE_ROOT } from '../src/harness.ts';
+import { runSatisfaction } from '../src/oversight.ts';
+import { DEFAULT_PROJECT_CONFIG } from '../src/store.ts';
+import type { ProjectConfig, RunIsolation } from '../src/types.ts';
+import type { ProbeExec } from '../src/sandbox.ts';
+import { tempRepo } from './helpers.ts';
+
+// W7.1 resume: finish a run that approval finalised with deferred work, on the same run and integration branch.
+
+const t = (id: string, deps: string[] = []) => ({ id, title: id, description: id, acceptance: [`${id} works`], deps });
+
+// Fixed plan; workers of the `risky` tasks also write an infra file, which the default risk tiers hold.
+function planned(tasks: any[], risky: string[], calls: string[] = [], judgePrompts: string[] = []): Runner {
+  const inner = fakeRunner({ stepMs: 0, failFirstAttemptOf: [] });
+  return async (req: AgentRequest): Promise<AgentResult> => {
+    calls.push(`${req.role}:${req.meta?.task ?? ''}`);
+    if (req.role === 'judge') judgePrompts.push(req.prompt);
+    if (req.role === 'planner') return { ok: true, text: '', costUsd: 0, turns: 1, durationMs: 1, structured: { tasks, scenarios: [{ id: 'S1', given: 'a hidden setup', when: 'HIDDEN-SCENARIO-MARK happens', then: 'it works' }] } };
+    const res = await inner(req);
+    const id = req.meta?.task ?? '';
+    if (req.role === 'worker' && risky.includes(id)) {
+      mkdirSync(join(req.cwd, 'infra'), { recursive: true });
+      writeFileSync(join(req.cwd, 'infra', `${id}.tf`), 'resource {}\n');
+    }
+    return res;
+  };
+}
+
+function repo(config: Partial<ProjectConfig> = {}) {
+  return tempRepo({ oversight: { riskTiers: { ...DEFAULT_PROJECT_CONFIG.oversight!.riskTiers, enabled: true } }, ...config });
+}
+
+async function asRequester<T>(fn: () => Promise<T>): Promise<T> {
+  const prev = process.env.ORCHESTRA_REQUESTER;
+  process.env.ORCHESTRA_REQUESTER = 'alice';
+  try {
+    return await fn();
+  } finally {
+    if (prev === undefined) delete process.env.ORCHESTRA_REQUESTER;
+    else process.env.ORCHESTRA_REQUESTER = prev;
+  }
+}
+
+const branchFiles = (root: string, branch: string) => execFileSync('git', ['ls-tree', '-r', '--name-only', branch], { cwd: root, encoding: 'utf8' });
+const branches = (root: string) => execFileSync('git', ['branch', '--list', 'orchestra/*/integration', '--format=%(refname:short)'], { cwd: root, encoding: 'utf8' }).trim().split('\n').filter(Boolean);
+
+test('resume runs the task blocked behind an approved task on the same run and branch, then learns', () => asRequester(async () => {
+  const store = repo();
+  const calls: string[] = [];
+  const judged: string[] = [];
+  const runner = planned([t('T1'), t('T2'), t('T3', ['T2'])], ['T2'], calls, judged);
+  const run = await runGoal({ store, runner, goal: 'g' });
+  assert.equal(run.status, 'awaiting_approval');
+  assert.deepEqual(run.tasks.map((x) => x.status), ['merged', 'awaiting_approval', 'blocked']);
+
+  const approved = await approveTask(store, run.id, 'T2', 'bob');
+  assert.equal(approved.status, 'failed');
+  assert.deepEqual(approved.deferred, ['tasks', 'learning']);
+  assert.match(approved.error!, /orchestra resume/);
+  assert.ok(store.events(run.id).some((e) => e.kind === 'task.merged' && /orchestra resume/.test(e.msg)));
+  const tip = execFileSync('git', ['rev-parse', run.integrationBranch!], { cwd: store.root, encoding: 'utf8' }).trim();
+
+  calls.length = 0;
+  judged.length = 0;
+  const done = await resumeRun({ store, runner, runId: run.id });
+  assert.equal(done.id, run.id);
+  assert.ok(judged.length && judged.every((p) => p.includes('HIDDEN-SCENARIO-MARK')), 'hidden scenarios are reloaded for the judge');
+  assert.equal(done.integrationBranch, run.integrationBranch);
+  assert.deepEqual(branches(store.root), [run.integrationBranch], 'no new integration branch');
+  assert.equal(done.status, 'done', done.error);
+  assert.equal(done.error, undefined);
+  assert.equal(done.deferred, undefined);
+  assert.deepEqual(done.tasks.map((x) => x.status), ['merged', 'merged', 'merged']);
+  assert.equal(done.satisfaction, runSatisfaction(done.tasks));
+  assert.ok(done.satisfaction! > approved.satisfaction!, 'satisfaction now counts T3');
+  assert.ok(!calls.includes('planner:'), 'resume does not re-plan');
+  assert.ok(calls.includes('worker:T3') && calls.includes('judge:T3'));
+  assert.ok(!calls.some((c) => c === 'worker:T1' || c === 'worker:T2'), 'merged tasks are not redone');
+  assert.ok(calls.includes('librarian:'), 'learning runs on resume');
+  assert.ok(store.events(run.id).some((e) => e.kind === 'learn'));
+  const files = branchFiles(store.root, run.integrationBranch!);
+  assert.match(files, /fake\/T3/);
+  assert.match(files, /infra\/T2\.tf/);
+  // The branch moved forward from the approved tip: T3 was merged on top of it.
+  execFileSync('git', ['merge-base', '--is-ancestor', tip, run.integrationBranch!], { cwd: store.root });
+  assert.equal(store.events(run.id).filter((e) => e.kind === 'run.end').length, 2);
+  assert.equal(store.loadRun(run.id)!.status, 'done');
+  // The integration worktree is cleaned up again.
+  assert.doesNotMatch(execFileSync('git', ['worktree', 'list'], { cwd: store.root, encoding: 'utf8' }), /_integration/);
+}));
+
+test('approving the last held task with no blocked dependents defers mutation and learning only; resume runs both', () => asRequester(async () => {
+  const store = repo({ testCommand: 'true', verification: { ...DEFAULT_PROJECT_CONFIG.verification, mutation: { ...DEFAULT_PROJECT_CONFIG.verification.mutation, enabled: true, floor: 0 } } });
+  writeFileSync(join(store.root, 'calc.js'), 'export const ok = (a, b) => a === b && a < 3;\n');
+  execFileSync('git', ['add', '-A'], { cwd: store.root });
+  execFileSync('git', ['commit', '-qm', 'calc'], { cwd: store.root });
+  const calls: string[] = [];
+  const runner = planned([t('T1'), t('T2')], ['T2'], calls);
+  const mutation = { changedFiles: ['calc.js'], exec: () => ({ ok: true }) };
+  const run = await runGoal({ store, runner, goal: 'g', mutation });
+  assert.equal(run.status, 'awaiting_approval');
+  assert.equal(run.mutation, undefined, 'mutation waits for approval');
+  assert.ok(!calls.includes('librarian:'));
+
+  const approved = await approveTask(store, run.id, 'T2', 'bob');
+  assert.equal(approved.status, 'done');
+  assert.deepEqual(approved.deferred, ['mutation', 'learning']);
+
+  calls.length = 0;
+  const done = await resumeRun({ store, runner, runId: run.id, mutation });
+  assert.equal(done.status, 'done', done.error);
+  assert.equal(done.deferred, undefined);
+  assert.ok(!calls.some((c) => c.startsWith('worker:')), 'nothing to run, no workers');
+  assert.equal(done.mutation!.total, 3);
+  assert.ok(store.events(run.id).some((e) => /Mutation score/.test(e.msg)));
+  assert.ok(calls.includes('librarian:'));
+  assert.ok(store.ledgerRows().some((r) => r.run === run.id && r.role === 'librarian'));
+}));
+
+test('resume preconditions: unknown run, tasks still held, nothing to resume', () => asRequester(async () => {
+  const store = repo();
+  const runner = planned([t('T1'), t('T2', ['T1'])], ['T1']);
+  await assert.rejects(() => resumeRun({ store, runner, runId: 'nope' }), /unknown run "nope"/);
+
+  const run = await runGoal({ store, runner, goal: 'g' });
+  assert.equal(run.status, 'awaiting_approval');
+  await assert.rejects(() => resumeRun({ store, runner, runId: run.id }), new RegExp(`awaiting approval \\(T1\\).*orchestra approve ${run.id} T1 --by <name>`));
+  assert.equal(store.loadRun(run.id)!.status, 'awaiting_approval', 'a refused resume changes nothing');
+
+  await approveTask(store, run.id, 'T1', 'bob');
+  const done = await resumeRun({ store, runner, runId: run.id });
+  assert.equal(done.status, 'done', done.error);
+  await assert.rejects(() => resumeRun({ store, runner, runId: run.id }), /nothing to resume/);
+
+  const plain = await runGoal({ store, runner: fakeRunner({ stepMs: 0 }), goal: 'plain' });
+  await assert.rejects(() => resumeRun({ store, runner, runId: plain.id }), /nothing to resume/);
+}));
+
+test('a resumed task that is itself high risk holds the run again; approve and resume finish it', () => asRequester(async () => {
+  const store = repo();
+  const runner = planned([t('T1'), t('T2', ['T1'])], ['T1', 'T2']);
+  const run = await runGoal({ store, runner, goal: 'g' });
+  await approveTask(store, run.id, 'T1', 'bob');
+
+  const held = await resumeRun({ store, runner, runId: run.id });
+  assert.equal(held.status, 'awaiting_approval');
+  assert.equal(held.deferred, undefined, 'a held run carries no marker until approval finalises it');
+  assert.equal(held.error, undefined);
+  assert.deepEqual(held.tasks.map((x) => x.status), ['merged', 'awaiting_approval']);
+  await assert.rejects(() => resumeRun({ store, runner, runId: run.id }), /T2/);
+
+  const approved = await approveTask(store, run.id, 'T2', 'bob');
+  assert.equal(approved.status, 'done');
+  assert.deepEqual(approved.deferred, ['learning']);
+  const done = await resumeRun({ store, runner, runId: run.id });
+  assert.equal(done.status, 'done', done.error);
+  assert.equal(done.id, run.id);
+  assert.match(branchFiles(store.root, run.integrationBranch!), /infra\/T2\.tf/);
+}));
+
+test('resume keeps failed tasks and their dependents as they are', () => asRequester(async () => {
+  const store = repo();
+  // T1 is held; T2 behind it gets reset; T3 behind T2 too. A run file edit marks T3 needs_human: T4 behind it stays blocked.
+  const runner = planned([t('T1'), t('T2', ['T1']), t('T3'), t('T4', ['T3'])], ['T1', 'T3']);
+  const run = await runGoal({ store, runner, goal: 'g' });
+  assert.deepEqual(run.tasks.map((x) => x.status), ['awaiting_approval', 'blocked', 'awaiting_approval', 'blocked']);
+  const stored = store.loadRun(run.id)!;
+  stored.tasks[2].status = 'needs_human';
+  store.saveRun(stored);
+  await approveTask(store, run.id, 'T1', 'bob');
+  // T3 is no longer awaiting approval, so the approval finalises the run.
+  const done = await resumeRun({ store, runner, runId: run.id });
+  assert.deepEqual(done.tasks.map((x) => x.status), ['merged', 'merged', 'needs_human', 'blocked']);
+  assert.equal(done.status, 'failed');
+  assert.match(done.error!, /1 blocked, 1 need a human/);
+}));
+
+test('resume reloads the frozen contract and refuses when it was modified', () => asRequester(async () => {
+  const store = repo({ verification: { ...DEFAULT_PROJECT_CONFIG.verification, contracts: { ...DEFAULT_PROJECT_CONFIG.verification.contracts, enabled: true } } });
+  const runner = planned([t('T1'), t('T2', ['T1'])], ['T1']);
+  const run = await runGoal({ store, runner, goal: 'g' });
+  await approveTask(store, run.id, 'T1', 'bob');
+  const path = run.contract!.path;
+  const original = store.readJson<any>(path, null);
+  store.writeJson(path, { ...original, criteria: [] });
+  const before = JSON.stringify(store.loadRun(run.id));
+  await assert.rejects(() => resumeRun({ store, runner, runId: run.id }), /does not match its recorded sha256/);
+  assert.equal(JSON.stringify(store.loadRun(run.id)), before, 'a refused resume leaves the run untouched');
+
+  store.writeJson(path, original);
+  const done = await resumeRun({ store, runner, runId: run.id });
+  assert.equal(done.status, 'done', done.error);
+}));
+
+test('orchestra resume (CLI): usage, refusal and a finished run', () => asRequester(async () => {
+  const store = repo();
+  const run = await runGoal({ store, runner: planned([t('T1'), t('T2', ['T1'])], ['T1']), goal: 'g' });
+  const cli = join(PACKAGE_ROOT, 'bin', 'orchestra.ts');
+  const resume = (...a: string[]) => spawnSync(process.execPath, [cli, 'resume', ...a], { cwd: store.root, encoding: 'utf8', timeout: 60000, env: { ...process.env, ORCHESTRA_RUNNER: 'fake', ORCHESTRA_FAKE_STEP_MS: '0' } });
+  const usage = resume();
+  assert.equal(usage.status, 1);
+  assert.match(usage.stderr, /usage: orchestra resume <runId>/);
+  const held = resume(run.id);
+  assert.equal(held.status, 1);
+  assert.match(held.stderr, /awaiting approval/);
+
+  const approve = spawnSync(process.execPath, [cli, 'approve', run.id, 'T1', '--by', 'bob'], { cwd: store.root, encoding: 'utf8', timeout: 60000 });
+  assert.equal(approve.status, 0, approve.stderr);
+  assert.match(approve.stdout, new RegExp(`orchestra resume ${run.id}`));
+
+  const ok = resume(run.id);
+  assert.equal(ok.status, 0, ok.stdout + ok.stderr);
+  assert.match(ok.stdout, new RegExp(`run ${run.id} DONE: 2/2 tasks merged`));
+  assert.equal(store.loadRun(run.id)!.status, 'done');
+  const again = resume(run.id);
+  assert.equal(again.status, 1);
+  assert.match(again.stderr, /nothing to resume/);
+}));
+
+test('a resume that fails before any work runs leaves the stored run untouched', () => asRequester(async () => {
+  const store = repo();
+  const runner = planned([t('T1'), t('T2', ['T1'])], ['T1']);
+  const run = await runGoal({ store, runner, goal: 'g' });
+  await approveTask(store, run.id, 'T1', 'bob');
+  // The integration branch is checked out elsewhere, so the resume cannot reopen it.
+  const other = join(store.root, '..', `other-${run.id}`);
+  execFileSync('git', ['worktree', 'add', '-q', other, run.integrationBranch!], { cwd: store.root });
+  const before = JSON.stringify(store.loadRun(run.id));
+  const ends = store.events(run.id).filter((e) => e.kind === 'run.end').length;
+  await assert.rejects(() => resumeRun({ store, runner, runId: run.id }), /already (checked out|used by worktree)/);
+  assert.equal(JSON.stringify(store.loadRun(run.id)), before);
+  assert.equal(store.events(run.id).filter((e) => e.kind === 'run.end').length, ends, 'no extra run.end');
+
+  execFileSync('git', ['worktree', 'remove', '--force', other], { cwd: store.root });
+  const done = await resumeRun({ store, runner, runId: run.id });
+  assert.equal(done.status, 'done', done.error);
+}));
+
+test('the marker survives a failed pre-flight and a throw inside the tail; a retry finishes the run', () => asRequester(async () => {
+  const store = repo();
+  let librarianThrows = 1;
+  const inner = planned([t('T1'), t('T2', ['T1'])], ['T1']);
+  const runner: Runner = async (req) => {
+    if (req.role === 'librarian' && librarianThrows-- > 0) throw new Error('librarian crashed');
+    return inner(req);
+  };
+  const run = await runGoal({ store, runner: inner, goal: 'g' });
+  await approveTask(store, run.id, 'T1', 'bob');
+  const before = JSON.stringify(store.loadRun(run.id));
+
+  // Pre-flight: the probe reaches a blocked host, so workers must not be dispatched.
+  const open: ProbeExec = () => ({ status: 0, stdout: 'ORCHESTRA_PROBE_OPEN\n', stderr: '' });
+  await assert.rejects(() => resumeRun({ store, runner, runId: run.id, sandbox: { backend: 'srt' }, preflightExec: open }), /pre-flight failed/);
+  assert.equal(JSON.stringify(store.loadRun(run.id)), before);
+
+  // A throw inside the tail (the librarian): the run fails but keeps its marker.
+  const failed = await resumeRun({ store, runner, runId: run.id });
+  assert.equal(failed.status, 'failed');
+  assert.match(failed.error!, /librarian crashed/);
+  assert.deepEqual(store.loadRun(run.id)!.deferred, ['tasks', 'learning']);
+  assert.equal(failed.tasks[1].status, 'merged');
+
+  const done = await resumeRun({ store, runner, runId: run.id });
+  assert.equal(done.status, 'done', done.error);
+  assert.equal(done.deferred, undefined);
+}));
+
+test('a resume killed mid-run is recoverable: in-flight tasks restart, a landed merge counts as merged', () => asRequester(async () => {
+  const store = repo();
+  const calls: string[] = [];
+  const runner = planned([t('T1'), t('T2', ['T1'])], ['T1'], calls);
+  const run = await runGoal({ store, runner, goal: 'g' });
+  await approveTask(store, run.id, 'T1', 'bob');
+  // What a Ctrl-C during the worker leaves behind: status running, T2 running, marker still set.
+  const crashed = store.loadRun(run.id)!;
+  crashed.status = 'running';
+  crashed.tasks[1].status = 'running';
+  store.saveRun(crashed);
+  const done = await resumeRun({ store, runner, runId: run.id });
+  assert.equal(done.status, 'done', done.error);
+  assert.equal(done.tasks[1].status, 'merged');
+
+  // Killed after T2's merge landed but before the run file said so.
+  const landed = store.loadRun(run.id)!;
+  landed.status = 'running';
+  landed.tasks[1].status = 'merging';
+  landed.deferred = ['learning'];
+  store.saveRun(landed);
+  calls.length = 0;
+  const again = await resumeRun({ store, runner, runId: run.id });
+  assert.equal(again.status, 'done', again.error);
+  assert.equal(again.tasks[1].status, 'merged');
+  assert.ok(!calls.includes('worker:T2'), 'a landed merge is not redone');
+}));
+
+test('a second concurrent resume of the same run is refused; a stale lock from a dead resume is taken over', () => asRequester(async () => {
+  const store = repo();
+  const runner = planned([t('T1'), t('T2', ['T1'])], ['T1']);
+  const run = await runGoal({ store, runner, goal: 'g' });
+  await approveTask(store, run.id, 'T1', 'bob');
+  const lock = store.path('runs', run.id, 'resume.lock');
+
+  // A lock left by a process that no longer exists.
+  const dead = spawnSync(process.execPath, ['-e', '']).pid!;
+  writeFileSync(lock, String(dead));
+  const [a, b] = await Promise.allSettled([resumeRun({ store, runner, runId: run.id }), resumeRun({ store, runner, runId: run.id })]);
+  assert.equal(a.status, 'fulfilled');
+  assert.equal((a as PromiseFulfilledResult<any>).value.status, 'done');
+  assert.equal(b.status, 'rejected');
+  assert.match(String((b as PromiseRejectedResult).reason), /already being resumed/);
+  assert.equal(existsSync(lock), false, 'the lock is released');
+}));
+
+// The marker decides what resume runs, whatever the config says by then.
+const mutationOn = (on: boolean) => ({ testCommand: 'true', verification: { ...DEFAULT_PROJECT_CONFIG.verification, mutation: { ...DEFAULT_PROJECT_CONFIG.verification.mutation, enabled: on, floor: 0 } } });
+function withCalc(store: ReturnType<typeof repo>) {
+  writeFileSync(join(store.root, 'calc.js'), 'export const ok = (a, b) => a === b && a < 3;\n');
+  execFileSync('git', ['add', '-A'], { cwd: store.root });
+  execFileSync('git', ['commit', '-qm', 'calc'], { cwd: store.root });
+  return store;
+}
+const setConfig = (store: ReturnType<typeof repo>, patch: Partial<ProjectConfig>) => store.writeJson('config.json', { ...store.config(), ...patch });
+
+test('the deferred marker is authoritative: mutation follows the run start, not the config at approve or resume', () => asRequester(async () => {
+  const mutation = { changedFiles: ['calc.js'], exec: () => ({ ok: true }) };
+  // Started with mutation, then turned off: still owed and still run.
+  const on = withCalc(repo(mutationOn(true)));
+  const runner = planned([t('T1'), t('T2')], ['T2']);
+  const r1 = await runGoal({ store: on, runner, goal: 'g', mutation });
+  setConfig(on, mutationOn(false));
+  assert.deepEqual((await approveTask(on, r1.id, 'T2', 'bob')).deferred, ['mutation', 'learning']);
+  const d1 = await resumeRun({ store: on, runner, runId: r1.id, mutation });
+  assert.equal(d1.mutation?.total, 3, 'the mutation pass ran although the config now has it off');
+
+  // Started without mutation, then turned on: not owed, not run.
+  const off = withCalc(repo(mutationOn(false)));
+  const r2 = await runGoal({ store: off, runner, goal: 'g', mutation });
+  setConfig(off, mutationOn(true));
+  assert.deepEqual((await approveTask(off, r2.id, 'T2', 'bob')).deferred, ['learning']);
+  const d2 = await resumeRun({ store: off, runner, runId: r2.id, mutation });
+  assert.equal(d2.status, 'done', d2.error);
+  assert.equal(d2.mutation, undefined, 'no mutation pass for a run that did not start with it');
+}));
+
+test('the deferred marker is authoritative for learning too', () => asRequester(async () => {
+  const store = repo();
+  const calls: string[] = [];
+  const runner = planned([t('T1'), t('T2', ['T1'])], ['T1'], calls);
+  const run = await runGoal({ store, runner, goal: 'g' });
+  await approveTask(store, run.id, 'T1', 'bob');
+  const stored = store.loadRun(run.id)!;
+  stored.deferred = ['tasks'];
+  store.saveRun(stored);
+  calls.length = 0;
+  const done = await resumeRun({ store, runner, runId: run.id });
+  assert.equal(done.status, 'done', done.error);
+  assert.ok(calls.includes('worker:T2'));
+  assert.ok(!calls.includes('librarian:'), 'learning is not owed, so it does not run');
+}));
+
+test('learning on resume does not see first-pass "blocked" events of tasks that merged', () => asRequester(async () => {
+  const store = repo();
+  const prompts: string[] = [];
+  const inner = planned([t('T1'), t('T2', ['T1']), t('T3'), t('T4', ['T3'])], ['T1']);
+  // T3 fails for good, so T4 is really blocked and that event must still reach the librarian.
+  const runner: Runner = async (req) => {
+    if (req.role === 'librarian') prompts.push(req.prompt);
+    if (req.role === 'judge' && req.meta?.task === 'T3') return { ok: true, text: '', costUsd: 0, turns: 1, durationMs: 1, structured: { pass: false, score: 0.1, summary: 'wrong', issues: ['wrong'] } };
+    return inner(req);
+  };
+  const run = await runGoal({ store, runner, goal: 'g' });
+  // T3 failed, so this run is a plain failure, not held; hold it by hand to exercise the filter.
+  assert.ok(store.events(run.id).some((e) => e.msg === 'T2 blocked: dependency never landed'));
+  const stored = store.loadRun(run.id)!;
+  stored.tasks[0].status = 'merged';
+  stored.deferred = ['tasks', 'learning'];
+  store.saveRun(stored);
+  prompts.length = 0;
+  const done = await resumeRun({ store, runner, runId: run.id });
+  assert.equal(done.tasks[1].status, 'merged');
+  assert.equal(prompts.length, 1);
+  assert.doesNotMatch(prompts[0], /T2 blocked/);
+  assert.match(prompts[0], /T4 blocked/);
+}));
+
+test('resume keeps the ablation the run started with (ablate.repair: one attempt, no repair)', () => asRequester(async () => {
+  async function scenario(ablate: boolean) {
+    const store = repo();
+    const inner = planned([t('T1'), t('T2', ['T1'])], ['T1']);
+    // T2's first judge says fail; with repair on it gets a second attempt.
+    const runner: Runner = async (req) => {
+      if (req.role === 'judge' && req.meta?.task === 'T2' && req.meta?.attempt === 1) return { ok: true, text: '', costUsd: 0, turns: 1, durationMs: 1, structured: { pass: false, score: 0.1, summary: 'wrong', issues: ['wrong'] } };
+      return inner(req);
+    };
+    const run = await runGoal({ store, runner, goal: 'g', ...(ablate ? { ablate: { repair: true } } : {}) });
+    assert.deepEqual(run.ablate, ablate ? { repair: true } : undefined);
+    await approveTask(store, run.id, 'T1', 'bob');
+    return resumeRun({ store, runner, runId: run.id });
+  }
+  const ablated = await scenario(true);
+  assert.equal(ablated.tasks[1].status, 'failed');
+  assert.equal(ablated.tasks[1].attempts, 1);
+  const normal = await scenario(false);
+  assert.equal(normal.tasks[1].status, 'merged');
+  assert.equal(normal.tasks[1].attempts, 2);
+}));
+
+// Isolation on resume (security): inherit by default, refuse weaker unless overridden, legacy runs need flags.
+const req = (backend: 'srt' | 'claude' | 'docker' | null, more: { unattended?: boolean; image?: string; gvisor?: boolean; network?: string } = {}) => ({ backend, unattended: false, ...more });
+const srtUnattended: RunIsolation = { backend: 'srt', unattended: true, scrubEnv: true, allowedHosts: ['registry.npmjs.org'] };
+const docker: RunIsolation = { backend: 'docker', unattended: false, scrubEnv: true, image: 'img:1', gvisor: true };
+
+test('resume isolation: no flags inherit the recorded isolation, including its allowed hosts', () => {
+  const out = resumeIsolation('r1', srtUnattended, null, false, { allowedHosts: ['evil.example'] });
+  assert.deepEqual(out.sandbox?.backend, 'srt');
+  assert.equal(out.unattended, true);
+  assert.deepEqual(out.sandbox?.allowedHosts, ['registry.npmjs.org'], 'a widened config does not reach a resumed run');
+  assert.equal(out.warning, undefined);
+  assert.deepEqual(resumeIsolation('r1', { backend: 'none', unattended: false, scrubEnv: false }, null, false), { unattended: false });
+});
+
+test('resume isolation: weaker flags are refused, stronger ones allowed', () => {
+  assert.throws(() => resumeIsolation('r1', srtUnattended, req(null, { unattended: false }), false), /no sandbox instead of srt.*--unattended dropped.*--override-isolation/);
+  assert.throws(() => resumeIsolation('r1', srtUnattended, req('srt'), false), /--unattended dropped/);
+  assert.throws(() => resumeIsolation('r1', srtUnattended, req('claude', { unattended: true }), false), /backend claude instead of srt/);
+  assert.throws(() => resumeIsolation('r1', docker, req('docker', { image: 'img:1', gvisor: true, network: 'bridge' }), false), /network bridge instead of none/);
+  assert.throws(() => resumeIsolation('r1', docker, req('docker', { image: 'img:1' }), false), /--gvisor dropped/);
+  assert.throws(() => resumeIsolation('r1', docker, req('docker', { image: 'other', gvisor: true }), false), /image other instead of img:1/);
+  // Stronger: a backend where there was none, --unattended added, docker network narrowed to none.
+  const none: RunIsolation = { backend: 'none', unattended: false, scrubEnv: false };
+  assert.equal(resumeIsolation('r1', none, req('srt', { unattended: true }), false).sandbox?.backend, 'srt');
+  const same = resumeIsolation('r1', srtUnattended, req('srt', { unattended: true }), false);
+  assert.deepEqual(same.sandbox?.allowedHosts, ['registry.npmjs.org']);
+  assert.equal(same.warning, undefined);
+  const bridged: RunIsolation = { ...docker, network: 'bridge' };
+  assert.equal(resumeIsolation('r1', bridged, req('docker', { image: 'img:1', gvisor: true, network: 'none' }), false).sandbox?.network, 'none');
+});
+
+test('resume isolation: --override-isolation accepts weaker isolation with a warning', () => {
+  const out = resumeIsolation('r1', srtUnattended, req(null), true);
+  assert.equal(out.sandbox, undefined);
+  assert.equal(out.unattended, false);
+  assert.match(out.warning!, /--override-isolation.*no sandbox instead of srt/);
+});
+
+test('resume isolation: a run recorded before isolation was stored needs flags or --override-isolation', () => {
+  assert.throws(() => resumeIsolation('r1', undefined, null, false), /recorded before Orchestra stored worker isolation.*--override-isolation/);
+  const flags = resumeIsolation('r1', undefined, req('srt', { unattended: true }), false);
+  assert.equal(flags.sandbox?.backend, 'srt');
+  assert.match(flags.warning!, /no recorded isolation/);
+  const forced = resumeIsolation('r1', undefined, null, true);
+  assert.equal(forced.sandbox, undefined);
+  assert.match(forced.warning!, /unchecked/);
+});
+
+test('runs record their isolation and resumeRun inherits it when the caller passes none', () => asRequester(async () => {
+  const store = repo();
+  const runner = planned([t('T1'), t('T2', ['T1'])], ['T1']);
+  const probes: string[] = [];
+  const blocked: ProbeExec = (c) => {
+    probes.push(c);
+    return { status: 0, stdout: c === 'node' ? 'ORCHESTRA_PROBE_OPEN\n' : 'ORCHESTRA_PROBE_BLOCKED\n', stderr: '' };
+  };
+  const run = await runGoal({ store, runner, goal: 'g', sandbox: { backend: 'srt' }, unattended: true, preflightExec: blocked });
+  assert.deepEqual(run.isolation, { backend: 'srt', unattended: true, scrubEnv: true });
+  await approveTask(store, run.id, 'T1', 'bob');
+  probes.length = 0;
+  const seen: AgentRequest[] = [];
+  const watched: Runner = async (r) => {
+    seen.push(r);
+    return runner(r);
+  };
+  const done = await resumeRun({ store, runner: watched, runId: run.id, preflightExec: blocked });
+  assert.equal(done.status, 'done', done.error);
+  assert.ok(probes.length > 0, 'the inherited sandbox is pre-flighted');
+  const worker = seen.find((r) => r.role === 'worker')!;
+  assert.equal(worker.sandbox?.backend, 'srt');
+  assert.ok(worker.env, 'agent env is scrubbed');
+}));
+
+test('orchestra resume (CLI): weaker isolation is refused, --override-isolation warns and logs, legacy runs need flags', () => asRequester(async () => {
+  const store = repo();
+  const cli = join(PACKAGE_ROOT, 'bin', 'orchestra.ts');
+  const resume = (...a: string[]) => spawnSync(process.execPath, [cli, 'resume', ...a], { cwd: store.root, encoding: 'utf8', timeout: 60000, env: { ...process.env, ORCHESTRA_RUNNER: 'fake', ORCHESTRA_FAKE_STEP_MS: '0' } });
+  const runner = planned([t('T1'), t('T2', ['T1'])], ['T1']);
+  const run = await runGoal({ store, runner, goal: 'g' });
+  await approveTask(store, run.id, 'T1', 'bob');
+  // Pretend the run started sandboxed and unattended.
+  const stored = store.loadRun(run.id)!;
+  stored.isolation = srtUnattended;
+  store.saveRun(stored);
+  const weaker = resume(run.id, '--sandbox', 'off');
+  assert.equal(weaker.status, 1);
+  assert.match(weaker.stderr, /weaken the isolation.*no sandbox instead of srt/);
+
+  // Legacy: no isolation recorded at all.
+  delete stored.isolation;
+  store.saveRun(stored);
+  const legacy = resume(run.id);
+  assert.equal(legacy.status, 1);
+  assert.match(legacy.stderr, /recorded before Orchestra stored worker isolation/);
+  const forced = resume(run.id, '--override-isolation');
+  assert.equal(forced.status, 0, forced.stdout + forced.stderr);
+  assert.match(forced.stderr, /warning: run .* has no recorded isolation/);
+  assert.ok(store.events(run.id).some((e) => /^Resume isolation:/.test(e.msg)));
+}));
+
+test('orchestra resume rejects unsupported flags and anything but one run id', () => {
+  assert.equal(resumeRunId(['r1', '--serve', '--sandbox', 'srt', '--unattended', '--override-isolation']), 'r1');
+  assert.throws(() => resumeRunId(['r1', '--detach']), /unsupported flag --detach/);
+  assert.throws(() => resumeRunId(['r1', '--no-evolve']), /unsupported flag --no-evolve/);
+  assert.throws(() => resumeRunId(['r1', '--sandbox']), /--sandbox needs a value/);
+  assert.throws(() => resumeRunId(['r1', 'r2']), /usage: orchestra resume <runId>/);
+  assert.throws(() => resumeRunId([]), /usage: orchestra resume <runId>/);
+  const cli = join(PACKAGE_ROOT, 'bin', 'orchestra.ts');
+  const r = spawnSync(process.execPath, [cli, 'resume', 'r1', '--detach'], { encoding: 'utf8', timeout: 60000 });
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /unsupported flag --detach/);
+});

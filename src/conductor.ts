@@ -30,14 +30,9 @@ import { DEFAULT_PROVIDER, resolveModel } from './models.ts';
 import { resolveProvider, type ModelProvider } from './provider.ts';
 import { verificationModes } from './outcomes.ts';
 import { AGENTIC_INSTRUCTION, NO_EVIDENCE_NOTE, executedChecksSection, runScenarioChecks, type CheckResult } from './judge-checks.ts';
-import type { ActiveAgent, CriterionResult, OrchestraEvent, PanelRecord, ProjectConfig, Role, Run, Scenario, Task, Verdict } from './types.ts';
+import type { Ablation, ActiveAgent, RunIsolation, CriterionResult, OrchestraEvent, PanelRecord, ProjectConfig, Role, Run, Scenario, Task, Verdict } from './types.ts';
 
-export interface Ablation {
-  scenarios?: boolean; // the judge and contrast comparer see no hidden scenarios
-  repair?: boolean; // one attempt per task, no repair loop
-  learnings?: boolean; // planner and workers get no learnings
-  contrastive?: boolean; // never run contrastive repair
-}
+export type { Ablation };
 
 export interface ConductorOptions {
   store: Store;
@@ -512,7 +507,8 @@ export class Conductor {
   private readonly warmSignal = new Promise<void>((r) => { this.wakeScheduler = r; });
   private readonly wtRoot: string;
 
-  constructor(opts: ConductorOptions) {
+  // `existing` resumes a stored run in place (see resume()); otherwise a new run is created.
+  constructor(opts: ConductorOptions, existing?: Run) {
     this.store = opts.store;
     this.cfg = opts.store.config();
     this.provider = resolveProvider(this.cfg.provider, opts.runner);
@@ -525,6 +521,10 @@ export class Conductor {
     this.ablate = opts.ablate ?? {};
     this.evalLearnings = opts.evalLearnings ?? false;
     this.wtRoot = opts.store.path('worktrees');
+    if (existing) {
+      this.run = existing;
+      return;
+    }
     const id = (opts.kind === 'eval' ? 'e' : '') + newRunId();
     const modes = verificationModes(this.cfg.verification);
     this.run = {
@@ -540,6 +540,10 @@ export class Conductor {
       baseRef: opts.baseRef,
       requestedBy: detectRequester(opts.store.root),
       ...(modes.length ? { verificationModes: modes } : {}),
+      // Recorded so a resume runs under the same ablation and learnings mode as the first pass.
+      ...(Object.values(this.ablate).some(Boolean) ? { ablate: { ...this.ablate } } : {}),
+      ...(this.evalLearnings ? { evalLearnings: true } : {}),
+      isolation: recordIsolation(opts.sandbox, opts.unattended),
     };
   }
 
@@ -547,7 +551,7 @@ export class Conductor {
 
   async execute(): Promise<Run> {
     const { run, store } = this;
-    try {
+    return this.guarded(async () => {
       g.assertRepo(store.root);
       g.excludeOrchestra(store.root);
       this.integration = g.createIntegration(store.root, this.wtRoot, run.id, run.baseRef);
@@ -561,34 +565,105 @@ export class Conductor {
       await this.plan();
       run.status = 'running';
       this.save();
-      await this.schedule();
-      if (onlyHeldForApproval(run.tasks)) {
-        // W7.1: the run is waiting on a human, not failed. Satisfaction, mutation and learning describe the whole
-        // run, so they wait for `orchestra approve` (which finalises satisfaction and status; see src/approve.ts).
-        run.status = 'awaiting_approval';
-        const held = run.tasks.filter((t) => t.status === 'awaiting_approval').map((t) => t.id);
-        this.emit('log', `Run waits for approval of ${held.join(', ')}; satisfaction, mutation score and learning are deferred`, { held });
-        return run;
-      }
-      const mutationFailure = await this.mutationPass();
+      await this.complete();
+    });
+  }
 
-      const merged = run.tasks.filter((t) => t.status === 'merged');
-      run.satisfaction = runSatisfaction(run.tasks);
+  // W7.1: finish a run that approval finalised with work deferred (run.deferred). Same run id and integration
+  // branch: reopen the branch tip, reload what plan() stored (hidden scenarios, contract, atlas), make the tasks
+  // that were blocked only behind held-then-merged tasks runnable again, then run the shared tail. Call
+  // assertResumable() first; resumeRun() does.
+  async resume(): Promise<Run> {
+    const { run, store } = this;
+    // Setup touches nothing in the stored run: a failure here (branch checked out elsewhere, contract mismatch,
+    // pre-flight) throws to the caller and leaves the run file as it was.
+    try {
+      g.assertRepo(store.root);
+      this.integration = g.reopenIntegration(store.root, this.wtRoot, run.id, run.integrationBranch!, run.baseRef!);
+      this.knownGood = g.head(this.integration.path);
+      this.reloadPlan();
+      this.sandboxPreflight();
+    } catch (e) {
+      if (this.integration) g.removeWorktree(store.root, this.integration.path);
+      throw e;
+    }
+    return this.guarded(async () => {
+      const recovered = this.recoverInFlight();
+      const reset = this.unblockResumable();
+      const deferred = run.deferred ?? [];
+      run.status = 'running';
+      delete run.error;
+      this.emit('log', `Run resumed after approval (deferred: ${deferred.join(', ') || 'none'})${reset.length ? `; running ${reset.join(', ')}` : '; no tasks to run'}${recovered.length ? `; recovered ${recovered.join(', ')} from an interrupted resume` : ''}`, { deferred, reset, recovered });
+      this.save();
+      // The marker decides, not today's config: mutation only if the run started with it, learning only if owed.
+      await this.complete({ mutation: deferred.includes('mutation') ? 'always' : 'never', learning: deferred.includes('learning') });
+      // Cleared only once the tail finished: a resume that throws or is killed keeps the marker and can be retried.
+      delete run.deferred;
+    });
+  }
 
-      if (run.kind === 'goal') {
-        run.status = 'compounding';
-        this.save();
-        await this.learn();
+  // The planner's outputs that later phases read, as plan() stored them. The contract must still verify.
+  private reloadPlan(): void {
+    const { run, store } = this;
+    this.scenarios = store.readJson<Scenario[]>(`holdout/${run.id}.json`, []);
+    if (run.contract) {
+      const contract = store.readJson<Contract>(run.contract.path, { criteria: [] });
+      if (contractSha(contract) !== run.contract.sha256) throw new Error(`acceptance contract ${run.contract.path} does not match its recorded sha256; refusing to resume`);
+      this.contract = contract;
+    }
+    this.loadAtlas();
+  }
+
+  // A resume that died mid-run (crash, Ctrl-C) leaves tasks in flight. A merge that reached the integration branch
+  // counts as merged; any other in-flight task restarts on a clean worktree from the integration tip.
+  private recoverInFlight(): string[] {
+    const { store } = this;
+    const recovered: string[] = [];
+    for (const t of this.run.tasks) {
+      if (t.status !== 'running' && t.status !== 'judging' && t.status !== 'merging') continue;
+      recovered.push(t.id);
+      if (t.status === 'merging' && t.branch && g.tryGit(store.root, 'merge-base', '--is-ancestor', t.branch, this.integration.branch).ok) {
+        t.status = 'merged';
+        t.endedAt ??= Date.now();
+        continue;
       }
-      run.status = merged.length === run.tasks.length && !mutationFailure ? 'done' : 'failed';
-      if (mutationFailure && !run.error) run.error = mutationFailure;
-      if (run.status === 'failed' && !run.error) {
-        const human = run.tasks.filter((t) => t.status === 'needs_human').length;
-        const blocked = run.tasks.filter((t) => t.status === 'blocked').length;
-        const awaiting = run.tasks.filter((t) => t.status === 'awaiting_approval').length;
-        const failed = run.tasks.length - merged.length - human - blocked - awaiting;
-        run.error = `${run.tasks.length - merged.length} of ${run.tasks.length} tasks did not land (${failed} failed, ${blocked} blocked, ${human} need a human${awaiting ? `, ${awaiting} awaiting approval` : ''})`;
+      if (t.worktree) g.removeWorktree(store.root, t.worktree);
+      if (t.branch) g.deleteBranch(store.root, t.branch);
+      delete t.worktree;
+      delete t.branch;
+      t.status = 'pending';
+    }
+    return recovered;
+  }
+
+  // Blocked tasks whose dependency chain ends only in merged tasks go back to pending. A task behind a failed or
+  // needs_human task stays blocked.
+  private unblockResumable(): string[] {
+    const dead = new Map<string, boolean>();
+    const isDead = (t: Task | undefined): boolean => {
+      if (!t) return false;
+      const known = dead.get(t.id);
+      if (known !== undefined) return known;
+      dead.set(t.id, false); // normalizeTasks breaks cycles; this guards a hand-edited run file
+      const d = t.status === 'failed' || t.status === 'needs_human' || t.status === 'awaiting_approval' || (t.status === 'blocked' && t.deps.some((x) => isDead(this.task(x))));
+      dead.set(t.id, d);
+      return d;
+    };
+    const reset: string[] = [];
+    for (const t of this.run.tasks) {
+      if (t.status === 'blocked' && !isDead(t)) {
+        t.status = 'pending';
+        reset.push(t.id);
       }
+    }
+    return reset;
+  }
+
+  // Runs `body`, records any error as a failed run, and always finalises (cleanup, run metrics, run.end).
+  private async guarded(body: () => Promise<void>): Promise<Run> {
+    const { run } = this;
+    try {
+      await body();
     } catch (err) {
       run.status = 'failed';
       run.error = (err as Error).message;
@@ -612,14 +687,49 @@ export class Conductor {
     return run;
   }
 
+  // The post-plan tail shared by execute() and resume(): schedule, approval hold, mutation, satisfaction,
+  // learning and the final status. `work` defaults to a fresh run's: mutation as configured, learning for goal runs.
+  private async complete(work: { mutation: 'config' | 'always' | 'never'; learning: boolean } = { mutation: 'config', learning: this.run.kind === 'goal' }): Promise<void> {
+    const { run } = this;
+    await this.schedule();
+    if (onlyHeldForApproval(run.tasks)) {
+      // W7.1: the run is waiting on a human, not failed. Satisfaction, mutation and learning describe the whole
+      // run, so they wait for `orchestra approve` (which finalises satisfaction and status; see src/approve.ts).
+      run.status = 'awaiting_approval';
+      const held = run.tasks.filter((t) => t.status === 'awaiting_approval').map((t) => t.id);
+      this.emit('log', `Run waits for approval of ${held.join(', ')}; satisfaction, mutation score and learning are deferred`, { held });
+      return;
+    }
+    const mutationFailure = work.mutation === 'never' ? undefined : await this.mutationPass(work.mutation === 'always');
+
+    const merged = run.tasks.filter((t) => t.status === 'merged');
+    run.satisfaction = runSatisfaction(run.tasks);
+
+    if (work.learning) {
+      run.status = 'compounding';
+      this.save();
+      await this.learn();
+    }
+    run.status = merged.length === run.tasks.length && !mutationFailure ? 'done' : 'failed';
+    if (mutationFailure && !run.error) run.error = mutationFailure;
+    if (run.status === 'failed' && !run.error) {
+      const human = run.tasks.filter((t) => t.status === 'needs_human').length;
+      const blocked = run.tasks.filter((t) => t.status === 'blocked').length;
+      const awaiting = run.tasks.filter((t) => t.status === 'awaiting_approval').length;
+      const failed = run.tasks.length - merged.length - human - blocked - awaiting;
+      run.error = `${run.tasks.length - merged.length} of ${run.tasks.length} tasks did not land (${failed} failed, ${blocked} blocked, ${human} need a human${awaiting ? `, ${awaiting} awaiting approval` : ''})`;
+    }
+  }
+
   // ---------- phases ----------
 
   // W4.5: mutate the source files this run changed, in a scratch worktree, and see whether the test
-  // command and scenario checks notice. Returns an error message only when failBelowFloor trips.
-  private async mutationPass(): Promise<string | undefined> {
+  // command and scenario checks notice. Returns an error message only when failBelowFloor trips. `force` runs it
+  // even if mutation is now off in the config (a resumed run that started with it).
+  private async mutationPass(force = false): Promise<string | undefined> {
     const { run, store } = this;
     const cfg = store.config().verification.mutation;
-    if (!cfg.enabled || !run.tasks.some((t) => t.status === 'merged')) return undefined;
+    if ((!cfg.enabled && !force) || !run.tasks.some((t) => t.status === 'merged')) return undefined;
     const testCommand = store.config().testCommand;
     let wt: { path: string; branch: string } | undefined;
     try {
@@ -1691,9 +1801,13 @@ export class Conductor {
           .join('\n'),
       )
       .join('\n');
+    // A resumed run's log still has the first pass's "<id> blocked: ..." for tasks that have since merged; those
+    // failures did not happen in the end, so the librarian must not learn from them.
+    const merged = new Set(run.tasks.filter((t) => t.status === 'merged').map((t) => t.id));
     const events = store
       .events(run.id)
       .filter((e) => e.kind === 'task.repair' || e.kind === 'task.failed' || e.kind === 'task.needs_human')
+      .filter((e) => !(e.kind === 'task.failed' && e.task && merged.has(e.task) && e.msg.startsWith(`${e.task} blocked:`)))
       .filter((e) => !e.msg.includes(MONITOR_MARK))
       .map((e) => `- ${e.msg}`)
       .join('\n');
@@ -1951,6 +2065,25 @@ export function normalizeTasks(raw: any[]): Task[] {
   return tasks;
 }
 
+export function recordIsolation(sandbox: ConductorOptions['sandbox'], unattended = false): RunIsolation {
+  const out: RunIsolation = { backend: sandbox?.backend ?? 'none', unattended, scrubEnv: Boolean(sandbox || unattended) };
+  if (sandbox?.image !== undefined) out.image = sandbox.image;
+  if (sandbox?.gvisor) out.gvisor = true;
+  if (sandbox?.network !== undefined) out.network = sandbox.network;
+  if (sandbox?.allowedHosts?.length) out.allowedHosts = [...sandbox.allowedHosts];
+  if (sandbox?.allowLocalBinding) out.allowLocalBinding = true;
+  return out;
+}
+
+// The conductor options a stored isolation record stands for.
+export function isolationOptions(iso: RunIsolation): Pick<ConductorOptions, 'sandbox' | 'unattended'> {
+  if (iso.backend === 'none') return { unattended: iso.unattended };
+  return {
+    unattended: iso.unattended,
+    sandbox: { backend: iso.backend, allowedHosts: iso.allowedHosts, allowLocalBinding: iso.allowLocalBinding, image: iso.image, gvisor: iso.gvisor, network: iso.network },
+  };
+}
+
 // Who asked for the run: ORCHESTRA_REQUESTER, else git user.name, else "unknown" (W7.1).
 function detectRequester(root: string): string {
   const env = process.env.ORCHESTRA_REQUESTER?.trim();
@@ -1968,3 +2101,65 @@ export async function runGoal(opts: ConductorOptions): Promise<Run> {
   return new Conductor(opts).execute();
 }
 
+export type ResumeOptions = Omit<ConductorOptions, 'goal' | 'kind' | 'baseRef' | 'harnessVersion'> & { runId: string };
+
+// Throws with the reason a run cannot be resumed (W7.1); returns the stored run otherwise.
+export function assertResumable(store: Store, runId: string): Run {
+  const run = store.loadRun(runId);
+  if (!run) throw new Error(`unknown run "${runId}"`);
+  const held = run.tasks.filter((t) => t.status === 'awaiting_approval');
+  if (held.length) {
+    throw new Error(`run ${runId} still has tasks awaiting approval (${held.map((t) => t.id).join(', ')}). Approve them first: ${held.map((t) => `orchestra approve ${runId} ${t.id} --by <name>`).join('; ')}`);
+  }
+  if (!run.deferred?.length) throw new Error(`run ${runId} has nothing to resume (status ${run.status}); only a run finalised by \`orchestra approve\` with deferred work can be resumed`);
+  if (!run.integrationBranch || !run.baseRef) throw new Error(`run ${runId} has no integration branch or base commit to resume from`);
+  return run;
+}
+
+// One resume per run at a time: an O_EXCL lock file holding the resumer's pid. A lock whose pid is gone (a crashed
+// or killed resume) is stale and is taken over, so a run that died mid-resume stays resumable.
+function acquireResumeLock(store: Store, runId: string): () => void {
+  const path = store.path('runs', runId, 'resume.lock');
+  for (let tries = 0; tries < 2; tries++) {
+    try {
+      writeFileSync(path, String(process.pid), { flag: 'wx' });
+      return () => rmSync(path, { force: true });
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
+      let pid = NaN;
+      try {
+        pid = Number(readFileSync(path, 'utf8').trim());
+      } catch {
+        // removed between our write and read; the next try takes it
+      }
+      if (pidAlive(pid)) throw new Error(`run ${runId} is already being resumed (pid ${pid}). Wait for it to finish, or delete ${path} if that process is not an orchestra resume`);
+      rmSync(path, { force: true });
+    }
+  }
+  throw new Error(`could not take the resume lock ${path}`);
+}
+
+function pidAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+// Finish a run held for approval once its held tasks are approved: same run id, same integration branch.
+export async function resumeRun(opts: ResumeOptions): Promise<Run> {
+  if (!opts.store.loadRun(opts.runId)) throw new Error(`unknown run "${opts.runId}"`);
+  const release = acquireResumeLock(opts.store, opts.runId);
+  try {
+    // Checked under the lock, so a resume that just finished (marker cleared) is not run twice.
+    const run = assertResumable(opts.store, opts.runId);
+    // Callers that say nothing about isolation get the run's own, never a silent downgrade to none.
+    const inherit = opts.sandbox === undefined && opts.unattended === undefined && run.isolation ? isolationOptions(run.isolation) : {};
+    return await new Conductor({ ...opts, ...inherit, goal: run.goal, kind: run.kind, harnessVersion: run.harness, baseRef: run.baseRef, ablate: opts.ablate ?? run.ablate, evalLearnings: opts.evalLearnings ?? run.evalLearnings }, run).resume();
+  } finally {
+    release();
+  }
+}
