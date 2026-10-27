@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- `orchestra resume <runId>` (W7.1) finishes a run that `orchestra approve` finalised with work deferred, on the same run id and integration branch. It runs the tasks that were blocked behind the approved tasks through the normal scheduler, then the mutation pass and `learn()`, and recomputes satisfaction and status. `approveTask` records the owed work in the new `Run.deferred` (`tasks`, `mutation`, `learning`) and its event, error and CLI output now point at `orchestra resume`. The command takes `--serve` and the sandbox flags of `run` and exits 0 for `done` or `awaiting_approval`. `Conductor.execute()` now shares its post-plan tail with `resume()`; behaviour of `run` is unchanged.
 - Opt-in `sandbox.allowLocalBinding` (boolean, default false) in `.orchestra/config.json`. When true it sets `network.allowLocalBinding: true` in the srt settings and `sandbox.network.allowLocalBinding: true` in the Claude Code sandbox settings, so tests that bind 127.0.0.1 can run inside the sandbox. On macOS it also lets sandboxed commands reach any localhost port without the proxy. Documented in `docs/configuration.md`.
 
 ### Fixed
