@@ -319,3 +319,50 @@ test('a second concurrent resume of the same run is refused; a stale lock from a
   assert.match(String((b as PromiseRejectedResult).reason), /already being resumed/);
   assert.equal(existsSync(lock), false, 'the lock is released');
 }));
+
+// The marker decides what resume runs, whatever the config says by then.
+const mutationOn = (on: boolean) => ({ testCommand: 'true', verification: { ...DEFAULT_PROJECT_CONFIG.verification, mutation: { ...DEFAULT_PROJECT_CONFIG.verification.mutation, enabled: on, floor: 0 } } });
+function withCalc(store: ReturnType<typeof repo>) {
+  writeFileSync(join(store.root, 'calc.js'), 'export const ok = (a, b) => a === b && a < 3;\n');
+  execFileSync('git', ['add', '-A'], { cwd: store.root });
+  execFileSync('git', ['commit', '-qm', 'calc'], { cwd: store.root });
+  return store;
+}
+const setConfig = (store: ReturnType<typeof repo>, patch: Partial<ProjectConfig>) => store.writeJson('config.json', { ...store.config(), ...patch });
+
+test('the deferred marker is authoritative: mutation follows the run start, not the config at approve or resume', () => asRequester(async () => {
+  const mutation = { changedFiles: ['calc.js'], exec: () => ({ ok: true }) };
+  // Started with mutation, then turned off: still owed and still run.
+  const on = withCalc(repo(mutationOn(true)));
+  const runner = planned([t('T1'), t('T2')], ['T2']);
+  const r1 = await runGoal({ store: on, runner, goal: 'g', mutation });
+  setConfig(on, mutationOn(false));
+  assert.deepEqual((await approveTask(on, r1.id, 'T2', 'bob')).deferred, ['mutation', 'learning']);
+  const d1 = await resumeRun({ store: on, runner, runId: r1.id, mutation });
+  assert.equal(d1.mutation?.total, 3, 'the mutation pass ran although the config now has it off');
+
+  // Started without mutation, then turned on: not owed, not run.
+  const off = withCalc(repo(mutationOn(false)));
+  const r2 = await runGoal({ store: off, runner, goal: 'g', mutation });
+  setConfig(off, mutationOn(true));
+  assert.deepEqual((await approveTask(off, r2.id, 'T2', 'bob')).deferred, ['learning']);
+  const d2 = await resumeRun({ store: off, runner, runId: r2.id, mutation });
+  assert.equal(d2.status, 'done', d2.error);
+  assert.equal(d2.mutation, undefined, 'no mutation pass for a run that did not start with it');
+}));
+
+test('the deferred marker is authoritative for learning too', () => asRequester(async () => {
+  const store = repo();
+  const calls: string[] = [];
+  const runner = planned([t('T1'), t('T2', ['T1'])], ['T1'], calls);
+  const run = await runGoal({ store, runner, goal: 'g' });
+  await approveTask(store, run.id, 'T1', 'bob');
+  const stored = store.loadRun(run.id)!;
+  stored.deferred = ['tasks'];
+  store.saveRun(stored);
+  calls.length = 0;
+  const done = await resumeRun({ store, runner, runId: run.id });
+  assert.equal(done.status, 'done', done.error);
+  assert.ok(calls.includes('worker:T2'));
+  assert.ok(!calls.includes('librarian:'), 'learning is not owed, so it does not run');
+}));

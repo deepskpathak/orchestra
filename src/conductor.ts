@@ -596,7 +596,8 @@ export class Conductor {
       delete run.error;
       this.emit('log', `Run resumed after approval (deferred: ${deferred.join(', ') || 'none'})${reset.length ? `; running ${reset.join(', ')}` : '; no tasks to run'}${recovered.length ? `; recovered ${recovered.join(', ')} from an interrupted resume` : ''}`, { deferred, reset, recovered });
       this.save();
-      await this.complete();
+      // The marker decides, not today's config: mutation only if the run started with it, learning only if owed.
+      await this.complete({ mutation: deferred.includes('mutation') ? 'always' : 'never', learning: deferred.includes('learning') });
       // Cleared only once the tail finished: a resume that throws or is killed keeps the marker and can be retried.
       delete run.deferred;
     });
@@ -688,8 +689,8 @@ export class Conductor {
   }
 
   // The post-plan tail shared by execute() and resume(): schedule, approval hold, mutation, satisfaction,
-  // learning and the final status.
-  private async complete(): Promise<void> {
+  // learning and the final status. `work` defaults to a fresh run's: mutation as configured, learning for goal runs.
+  private async complete(work: { mutation: 'config' | 'always' | 'never'; learning: boolean } = { mutation: 'config', learning: this.run.kind === 'goal' }): Promise<void> {
     const { run } = this;
     await this.schedule();
     if (onlyHeldForApproval(run.tasks)) {
@@ -700,12 +701,12 @@ export class Conductor {
       this.emit('log', `Run waits for approval of ${held.join(', ')}; satisfaction, mutation score and learning are deferred`, { held });
       return;
     }
-    const mutationFailure = await this.mutationPass();
+    const mutationFailure = work.mutation === 'never' ? undefined : await this.mutationPass(work.mutation === 'always');
 
     const merged = run.tasks.filter((t) => t.status === 'merged');
     run.satisfaction = runSatisfaction(run.tasks);
 
-    if (run.kind === 'goal') {
+    if (work.learning) {
       run.status = 'compounding';
       this.save();
       await this.learn();
@@ -724,11 +725,12 @@ export class Conductor {
   // ---------- phases ----------
 
   // W4.5: mutate the source files this run changed, in a scratch worktree, and see whether the test
-  // command and scenario checks notice. Returns an error message only when failBelowFloor trips.
-  private async mutationPass(): Promise<string | undefined> {
+  // command and scenario checks notice. Returns an error message only when failBelowFloor trips. `force` runs it
+  // even if mutation is now off in the config (a resumed run that started with it).
+  private async mutationPass(force = false): Promise<string | undefined> {
     const { run, store } = this;
     const cfg = store.config().verification.mutation;
-    if (!cfg.enabled || !run.tasks.some((t) => t.status === 'merged')) return undefined;
+    if ((!cfg.enabled && !force) || !run.tasks.some((t) => t.status === 'merged')) return undefined;
     const testCommand = store.config().testCommand;
     let wt: { path: string; branch: string } | undefined;
     try {

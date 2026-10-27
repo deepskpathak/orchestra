@@ -55,7 +55,8 @@ export async function approveTask(store: Store, runId: string, taskId: string, b
     const notRun = run.tasks.filter((t) => t.status !== 'merged');
     const deferred: DeferredWork[] = [
       ...(notRun.length ? ['tasks' as const] : []),
-      ...(store.config().verification.mutation.enabled ? ['mutation' as const] : []),
+      // What the run started with, not today's config.
+      ...(run.verificationModes?.includes('mutation') ? ['mutation' as const] : []),
       ...(run.kind === 'goal' ? ['learning' as const] : []),
     ];
     const resume = `\`orchestra resume ${runId}\``;
