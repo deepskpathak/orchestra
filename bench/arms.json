@@ -3,5 +3,7 @@
   { "name": "atlas-off", "optional": true, "config": { "context": { "atlas": { "enabled": false, "packs": false } } } },
   { "name": "atlas-l0", "optional": true, "config": { "context": { "atlas": { "enabled": true, "packs": false } } } },
   { "name": "atlas-l0-l1", "optional": true, "config": { "context": { "atlas": { "enabled": true, "packs": true } } } },
-  { "name": "atlas-l0-l1-l2", "optional": true, "config": { "context": { "atlas": { "enabled": true, "packs": true, "query": true } } } }
+  { "name": "atlas-l0-l1-l2", "optional": true, "config": { "context": { "atlas": { "enabled": true, "packs": true, "query": true } } } },
+  { "name": "h2-none", "optional": true, "config": { "runBudgetUsd": 1.5 } },
+  { "name": "h2-agentic", "optional": true, "config": { "runBudgetUsd": 1.5, "verification": { "agenticJudge": { "enabled": true } } } }
 ]
