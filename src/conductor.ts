@@ -512,7 +512,8 @@ export class Conductor {
   private readonly warmSignal = new Promise<void>((r) => { this.wakeScheduler = r; });
   private readonly wtRoot: string;
 
-  constructor(opts: ConductorOptions) {
+  // `existing` resumes a stored run in place (see resume()); otherwise a new run is created.
+  constructor(opts: ConductorOptions, existing?: Run) {
     this.store = opts.store;
     this.cfg = opts.store.config();
     this.provider = resolveProvider(this.cfg.provider, opts.runner);
@@ -525,6 +526,10 @@ export class Conductor {
     this.ablate = opts.ablate ?? {};
     this.evalLearnings = opts.evalLearnings ?? false;
     this.wtRoot = opts.store.path('worktrees');
+    if (existing) {
+      this.run = existing;
+      return;
+    }
     const id = (opts.kind === 'eval' ? 'e' : '') + newRunId();
     const modes = verificationModes(this.cfg.verification);
     this.run = {
@@ -563,6 +568,64 @@ export class Conductor {
       this.save();
       await this.complete();
     });
+  }
+
+  // W7.1: finish a run that approval finalised with work deferred (run.deferred). Same run id and integration
+  // branch: reopen the branch tip, reload what plan() stored (hidden scenarios, contract, atlas), make the tasks
+  // that were blocked only behind held-then-merged tasks runnable again, then run the shared tail. Call
+  // assertResumable() first; resumeRun() does.
+  async resume(): Promise<Run> {
+    const { run, store } = this;
+    return this.guarded(async () => {
+      g.assertRepo(store.root);
+      this.integration = g.reopenIntegration(store.root, this.wtRoot, run.id, run.integrationBranch!, run.baseRef!);
+      this.knownGood = g.head(this.integration.path);
+      this.reloadPlan();
+      const reset = this.unblockResumable();
+      const deferred = run.deferred ?? [];
+      run.status = 'running';
+      delete run.error;
+      delete run.deferred;
+      this.emit('log', `Run resumed after approval (deferred: ${deferred.join(', ') || 'none'})${reset.length ? `; running ${reset.join(', ')}` : '; no tasks to run'}`, { deferred, reset });
+      this.save();
+      this.sandboxPreflight();
+      await this.complete();
+    });
+  }
+
+  // The planner's outputs that later phases read, as plan() stored them. The contract must still verify.
+  private reloadPlan(): void {
+    const { run, store } = this;
+    this.scenarios = store.readJson<Scenario[]>(`holdout/${run.id}.json`, []);
+    if (run.contract) {
+      const contract = store.readJson<Contract>(run.contract.path, { criteria: [] });
+      if (contractSha(contract) !== run.contract.sha256) throw new Error(`acceptance contract ${run.contract.path} does not match its recorded sha256; refusing to resume`);
+      this.contract = contract;
+    }
+    this.loadAtlas();
+  }
+
+  // Blocked tasks whose dependency chain ends only in merged tasks go back to pending. A task behind a failed or
+  // needs_human task stays blocked.
+  private unblockResumable(): string[] {
+    const dead = new Map<string, boolean>();
+    const isDead = (t: Task | undefined): boolean => {
+      if (!t) return false;
+      const known = dead.get(t.id);
+      if (known !== undefined) return known;
+      dead.set(t.id, false); // normalizeTasks breaks cycles; this guards a hand-edited run file
+      const d = t.status === 'failed' || t.status === 'needs_human' || t.status === 'awaiting_approval' || (t.status === 'blocked' && t.deps.some((x) => isDead(this.task(x))));
+      dead.set(t.id, d);
+      return d;
+    };
+    const reset: string[] = [];
+    for (const t of this.run.tasks) {
+      if (t.status === 'blocked' && !isDead(t)) {
+        t.status = 'pending';
+        reset.push(t.id);
+      }
+    }
+    return reset;
   }
 
   // Runs `body`, records any error as a failed run, and always finalises (cleanup, run metrics, run.end).
@@ -1976,5 +2039,26 @@ function round(n: number, dp = 3): number {
 
 export async function runGoal(opts: ConductorOptions): Promise<Run> {
   return new Conductor(opts).execute();
+}
+
+export type ResumeOptions = Omit<ConductorOptions, 'goal' | 'kind' | 'baseRef' | 'harnessVersion'> & { runId: string };
+
+// Throws with the reason a run cannot be resumed (W7.1); returns the stored run otherwise.
+export function assertResumable(store: Store, runId: string): Run {
+  const run = store.loadRun(runId);
+  if (!run) throw new Error(`unknown run "${runId}"`);
+  const held = run.tasks.filter((t) => t.status === 'awaiting_approval');
+  if (held.length) {
+    throw new Error(`run ${runId} still has tasks awaiting approval (${held.map((t) => t.id).join(', ')}). Approve them first: ${held.map((t) => `orchestra approve ${runId} ${t.id} --by <name>`).join('; ')}`);
+  }
+  if (!run.deferred?.length) throw new Error(`run ${runId} has nothing to resume (status ${run.status}); only a run finalised by \`orchestra approve\` with deferred work can be resumed`);
+  if (!run.integrationBranch || !run.baseRef) throw new Error(`run ${runId} has no integration branch or base commit to resume from`);
+  return run;
+}
+
+// Finish a run held for approval once its held tasks are approved: same run id, same integration branch.
+export async function resumeRun(opts: ResumeOptions): Promise<Run> {
+  const run = assertResumable(opts.store, opts.runId);
+  return new Conductor({ ...opts, goal: run.goal, kind: run.kind, harnessVersion: run.harness, baseRef: run.baseRef }, run).resume();
 }
 

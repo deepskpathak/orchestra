@@ -47,6 +47,16 @@ export function createIntegration(root: string, wtRoot: string, runId: string, b
   return { path, branch, base };
 }
 
+// Resume: check out an existing integration branch at its tip in the usual integration path.
+export function reopenIntegration(root: string, wtRoot: string, runId: string, branch: string, base: string): Worktree & { base: string } {
+  const path = join(wtRoot, runId, '_integration');
+  if (existsSync(path)) removeWorktree(root, path);
+  tryGit(root, 'worktree', 'prune');
+  mkdirSync(join(wtRoot, runId), { recursive: true });
+  git(root, 'worktree', 'add', '-q', path, branch);
+  return { path, branch, base };
+}
+
 export function createTaskWorktree(root: string, wtRoot: string, runId: string, taskId: string, from: string): Worktree {
   const branch = `orchestra/${runId}/${taskId}`;
   const path = join(wtRoot, runId, taskId);

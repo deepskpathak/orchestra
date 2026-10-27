@@ -12,7 +12,7 @@ import { atlasStats, loadOrBuildAtlas } from './atlas.ts';
 import { oversightSummary, renderOversight } from './dashboard-data.ts';
 import { ctagsExec } from './atlas-external.ts';
 import { QUERY_COMMANDS, parsePorcelain, runQuery, type QueryCommand } from './atlas-query.ts';
-import { runGoal } from './conductor.ts';
+import { assertResumable, resumeRun, runGoal } from './conductor.ts';
 import { explorationMetrics, renderExploration } from './exploration.ts';
 import { collectOutcomes, renderOutcomes } from './outcomes.ts';
 import { evaluate, evolutionDue, evolve, harvest, listEvals, metrics, resolveSplits } from './evolve.ts';
@@ -59,6 +59,10 @@ Usage:
                                  human other than the run's requester (ORCHESTRA_REQUESTER or git user.name at run start).
                                  Advisory only: names are free text, not authenticated identities. With no recorded requester
                                  the check cannot run and approve warns
+  orchestra resume <runId>       Finish a run that approval finalised with deferred work: same run and integration branch.
+                                 Runs the tasks that were blocked behind the approved tasks, then the mutation pass and
+                                 learning. Takes --serve and the --sandbox, --sandbox-image, --sandbox-network, --gvisor
+                                 and --unattended flags of run (no --detach). Exit 0 when done or awaiting_approval
   orchestra stats [--json]       Factory health per harness version, plus the eval infra failure rate, oversight and throughput
                                  metrics (interruptions, review minutes, edits, conflict rate, merge wait, cache-read share)
   orchestra evolve               Propose, evaluate (clean-room, interleaved), and maybe promote a better harness;
@@ -266,7 +270,7 @@ async function cmdRun(args: string[]): Promise<void> {
     runner: r,
     goal,
     onUpdate: (u) => (latest = u),
-    sandbox: iso.backend ? { backend: iso.backend, allowedHosts: store.config().sandbox?.allowedHosts, allowLocalBinding: store.config().sandbox?.allowLocalBinding, image: iso.image, gvisor: iso.gvisor, network: iso.network } : undefined,
+    sandbox: sandboxOption(store, iso),
     unattended: iso.unattended,
   });
   clearInterval(tick);
@@ -285,6 +289,50 @@ async function cmdRun(args: string[]): Promise<void> {
     console.log(`♫ evolve: ${out.promoted ? `promoted ${out.candidate}` : `kept ${out.incumbent}`} (${out.reason})`);
   }
   // A run held for approval is waiting on a human, not failed.
+  process.exitCode = run.status === 'done' || run.status === 'awaiting_approval' ? 0 : 1;
+}
+
+function sandboxOption(store: Store, iso: ReturnType<typeof resolveSandbox>) {
+  return iso.backend ? { backend: iso.backend, allowedHosts: store.config().sandbox?.allowedHosts, allowLocalBinding: store.config().sandbox?.allowLocalBinding, image: iso.image, gvisor: iso.gvisor, network: iso.network } : undefined;
+}
+
+// W7.1: finish a run that `orchestra approve` finalised with deferred work. Same output as `run`, without
+// --detach and the automatic evolution check.
+async function cmdResume(args: string[]): Promise<void> {
+  const runId = goalFromArgs(args);
+  if (!runId || runId.includes(' ')) die('usage: orchestra resume <runId>');
+  const store = storeOrDie();
+  try {
+    assertResumable(store, runId);
+  } catch (e) {
+    die((e as Error).message);
+  }
+  const iso = resolveSandbox(args);
+  const web = args.includes('--serve') ? await serve({ store }) : null;
+  if (web) console.log(`♫ web dashboard: ${web.url}`);
+  const live = isTTY() ? liveScreen() : null;
+  let printed = store.events(runId).length;
+  let latest: Run | null = null;
+  const tick = setInterval(() => {
+    if (!latest) return;
+    if (live) live.draw(latest, store);
+    else printed = printNewEvents(store, latest, printed);
+  }, live ? 120 : 400);
+  const run = await resumeRun({
+    store,
+    runner: runner(),
+    runId,
+    onUpdate: (u) => (latest = u),
+    sandbox: sandboxOption(store, iso),
+    unattended: iso.unattended,
+  });
+  clearInterval(tick);
+  if (live) live.close(run, store);
+  else printNewEvents(store, run, printed);
+  const c = harvest(store, run);
+  if (c) console.log(`♫ harvested run into Factory Eval (${listEvals(store).length} cases)`);
+  console.log(summary(run));
+  await web?.close();
   process.exitCode = run.status === 'done' || run.status === 'awaiting_approval' ? 0 : 1;
 }
 
@@ -830,6 +878,9 @@ export async function main(argv: string[]): Promise<void> {
       break;
     case 'approve':
       await cmdApprove(args);
+      break;
+    case 'resume':
+      await cmdResume(args);
       break;
     case 'stats':
       cmdStats(args);
