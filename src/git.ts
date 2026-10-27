@@ -3,7 +3,8 @@
 // so a run is fully reversible: delete the orchestra/<run>/* branches.
 
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 
 export function git(cwd: string, ...args: string[]): string {
@@ -99,11 +100,38 @@ export function mergeBase(cwd: string, a: string, b: string): string {
   return git(cwd, 'merge-base', a, b);
 }
 
-export function merge(integrationPath: string, branch: string, message: string): { ok: boolean; detail: string } {
-  const r = tryGit(integrationPath, '-c', 'user.name=Orchestra', '-c', 'user.email=orchestra@localhost', 'merge', '--no-ff', '-m', message, branch);
-  if (r.ok) return { ok: true, detail: r.out };
-  tryGit(integrationPath, 'merge', '--abort');
-  return { ok: false, detail: r.out };
+// `unionFiles` merge with git's built-in union driver (both sides' added lines are kept), for
+// append-only files such as CHANGELOG.md. The attribute goes in a temporary global attributes
+// file that copies the user's own, so their checkout and .gitattributes are never edited. A
+// repo .gitattributes rule for the same file still wins, as git ranks it above the global file.
+export function merge(integrationPath: string, branch: string, message: string, unionFiles: string[] = []): { ok: boolean; detail: string } {
+  const attrs = unionFiles.length ? unionAttributes(integrationPath, unionFiles) : undefined;
+  try {
+    const extra = attrs ? ['-c', `core.attributesFile=${attrs.file}`] : [];
+    const r = tryGit(integrationPath, '-c', 'user.name=Orchestra', '-c', 'user.email=orchestra@localhost', ...extra, 'merge', '--no-ff', '-m', message, branch);
+    if (r.ok) return { ok: true, detail: r.out };
+    tryGit(integrationPath, 'merge', '--abort');
+    return { ok: false, detail: r.out };
+  } finally {
+    if (attrs) rmSync(attrs.dir, { recursive: true, force: true });
+  }
+}
+
+function unionAttributes(cwd: string, files: string[]): { dir: string; file: string } {
+  const configured = tryGit(cwd, 'config', '--path', '--get', 'core.attributesFile');
+  const own = configured.ok && configured.out ? configured.out : join(process.env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'git', 'attributes');
+  let base = '';
+  try {
+    base = readFileSync(own, 'utf8');
+  } catch {
+    // no global attributes file
+  }
+  const dir = mkdtempSync(join(tmpdir(), 'orchestra-attrs-'));
+  const file = join(dir, 'attributes');
+  // A path with a slash is anchored at the repo root; a bare name matches in any directory.
+  const lines = files.map((f) => `${f.includes('/') ? '/' + f : f} merge=union`);
+  writeFileSync(file, `${base}${base && !base.endsWith('\n') ? '\n' : ''}${lines.join('\n')}\n`);
+  return { dir, file };
 }
 
 // After a merge conflict the task restarts from the latest integration tip.

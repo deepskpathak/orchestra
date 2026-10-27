@@ -1,8 +1,12 @@
 // Pure throughput helpers (W6.1, W6.2): footprint overlap, parallel-safe groups,
 // merge batches with bisect, conflict rate. No IO, no git.
-import type { LedgerRow, Task } from './types.ts';
+import type { LedgerRow, ProjectConfig, Task } from './types.ts';
 
 type Footprint = Task['footprint'];
+
+// Append-only files that nearly every task touches. They do not count as footprint overlap,
+// and they merge with git's union driver so two appends both land instead of conflicting.
+export const DEFAULT_SHARED_FILES = ['CHANGELOG.md'];
 
 function norm(p: string): string {
   return p.trim().replace(/^\.\//, '').replace(/\/+$/, '');
@@ -17,19 +21,48 @@ function pathsOverlap(a: string, b: string): boolean {
   return a === b || a.startsWith(b + '/') || b.startsWith(a + '/');
 }
 
-// A missing or empty footprint is unknown, so it overlaps everything (safe default).
-export function footprintsOverlap(a: Footprint, b: Footprint): boolean {
+// A shared entry without a slash matches that file name in any directory (like .gitattributes);
+// one with a slash matches that repo-relative path only.
+function isShared(p: string, shared: string[]): boolean {
+  const base = p.slice(p.lastIndexOf('/') + 1);
+  return shared.some((s) => (s.includes('/') ? s === p : s === base));
+}
+
+// Plain repo-relative paths only: glob characters, whitespace and gitattributes syntax are
+// dropped, so the overlap check and the union attribute always mean the same files.
+export function sanitizeSharedFiles(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  const out = new Set<string>();
+  for (const v of raw) {
+    if (typeof v !== 'string') continue;
+    const p = norm(v).replace(/^\/+/, '');
+    if (!p || /[\s*?[\]\\"#!]/.test(p) || p.split('/').includes('..')) continue;
+    out.add(p);
+  }
+  return [...out];
+}
+
+// Shared files apply only when footprint scheduling or batch merge is on, so a default run is unchanged.
+export function sharedFilesFor(cfg: Pick<ProjectConfig, 'throughput'>): string[] {
+  const t = cfg.throughput;
+  if (!t || !(t.footprintScheduling || t.batchMerge?.enabled)) return [];
+  return sanitizeSharedFiles(t.sharedFiles ?? DEFAULT_SHARED_FILES);
+}
+
+// A missing or empty footprint is unknown, so it overlaps everything (safe default). Shared files
+// are ignored, so a footprint of only shared files overlaps nothing.
+export function footprintsOverlap(a: Footprint, b: Footprint, shared: string[] = []): boolean {
   if (isEmpty(a) || isEmpty(b)) return true;
-  const fa = a!.files.map(norm).filter(Boolean);
-  const fb = b!.files.map(norm).filter(Boolean);
+  const fa = a!.files.map(norm).filter((f) => f && !isShared(f, shared));
+  const fb = b!.files.map(norm).filter((f) => f && !isShared(f, shared));
   return fa.some((x) => fb.some((y) => pathsOverlap(x, y)));
 }
 
 // Greedy grouping: each group's footprints are pairwise disjoint.
-export function parallelSafeGroups(tasks: Task[]): string[][] {
+export function parallelSafeGroups(tasks: Task[], shared: string[] = []): string[][] {
   const groups: Task[][] = [];
   for (const t of tasks) {
-    const g = groups.find((grp) => grp.every((o) => !footprintsOverlap(t.footprint, o.footprint)));
+    const g = groups.find((grp) => grp.every((o) => !footprintsOverlap(t.footprint, o.footprint, shared)));
     if (g) g.push(t);
     else groups.push([t]);
   }
@@ -37,8 +70,8 @@ export function parallelSafeGroups(tasks: Task[]): string[][] {
 }
 
 // Single writer: a task may not start while an overlapping task is in flight.
-export function canStart(task: Task, inflightTasks: Task[]): boolean {
-  return !inflightTasks.some((o) => o.id !== task.id && footprintsOverlap(task.footprint, o.footprint));
+export function canStart(task: Task, inflightTasks: Task[], shared: string[] = []): boolean {
+  return !inflightTasks.some((o) => o.id !== task.id && footprintsOverlap(task.footprint, o.footprint, shared));
 }
 
 const LOG_MAX = 600;
@@ -55,11 +88,11 @@ export function decisionLog(depTasks: Task[]): string {
 }
 
 // Batches of disjoint-footprint tasks, each at most maxBatch long, in input order.
-export function planBatches(readyToMerge: Task[], maxBatch: number): string[][] {
+export function planBatches(readyToMerge: Task[], maxBatch: number, shared: string[] = []): string[][] {
   const cap = Math.max(1, Math.floor(maxBatch) || 1);
   const batches: Task[][] = [];
   for (const t of readyToMerge) {
-    const b = batches.find((x) => x.length < cap && x.every((o) => !footprintsOverlap(t.footprint, o.footprint)));
+    const b = batches.find((x) => x.length < cap && x.every((o) => !footprintsOverlap(t.footprint, o.footprint, shared)));
     if (b) b.push(t);
     else batches.push([t]);
   }

@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Added
 
 - Opt-in `sandbox.allowLocalBinding` (boolean, default false) in `.orchestra/config.json`. When true it sets `network.allowLocalBinding: true` in the srt settings and `sandbox.network.allowLocalBinding: true` in the Claude Code sandbox settings, so tests that bind 127.0.0.1 can run inside the sandbox. On macOS it also lets sandboxed commands reach any localhost port without the proxy. Documented in `docs/configuration.md`.
+- `throughput.sharedFiles` (string list, unset means `["CHANGELOG.md"]`), used only when footprint scheduling or batch merge is on. Shared append-only files no longer count as footprint overlap, so independent tasks that each add a changelog line can run and batch-merge in parallel; before, every footprint listed `CHANGELOG.md`, so the real runs serialized every task and batches held one task. These files merge with git's `union` driver through a temporary `core.attributesFile`, so parallel appends land without a conflict and the user's `.gitattributes` is untouched. Applies to the single-task, batch and `orchestra approve` merges. `[]` restores the old behaviour.
 
 ### Fixed
 
