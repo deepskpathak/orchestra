@@ -1798,9 +1798,13 @@ export class Conductor {
           .join('\n'),
       )
       .join('\n');
+    // A resumed run's log still has the first pass's "<id> blocked: ..." for tasks that have since merged; those
+    // failures did not happen in the end, so the librarian must not learn from them.
+    const merged = new Set(run.tasks.filter((t) => t.status === 'merged').map((t) => t.id));
     const events = store
       .events(run.id)
       .filter((e) => e.kind === 'task.repair' || e.kind === 'task.failed' || e.kind === 'task.needs_human')
+      .filter((e) => !(e.kind === 'task.failed' && e.task && merged.has(e.task) && e.msg.startsWith(`${e.task} blocked:`)))
       .filter((e) => !e.msg.includes(MONITOR_MARK))
       .map((e) => `- ${e.msg}`)
       .join('\n');

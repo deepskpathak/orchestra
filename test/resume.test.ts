@@ -366,3 +366,28 @@ test('the deferred marker is authoritative for learning too', () => asRequester(
   assert.ok(calls.includes('worker:T2'));
   assert.ok(!calls.includes('librarian:'), 'learning is not owed, so it does not run');
 }));
+
+test('learning on resume does not see first-pass "blocked" events of tasks that merged', () => asRequester(async () => {
+  const store = repo();
+  const prompts: string[] = [];
+  const inner = planned([t('T1'), t('T2', ['T1']), t('T3'), t('T4', ['T3'])], ['T1']);
+  // T3 fails for good, so T4 is really blocked and that event must still reach the librarian.
+  const runner: Runner = async (req) => {
+    if (req.role === 'librarian') prompts.push(req.prompt);
+    if (req.role === 'judge' && req.meta?.task === 'T3') return { ok: true, text: '', costUsd: 0, turns: 1, durationMs: 1, structured: { pass: false, score: 0.1, summary: 'wrong', issues: ['wrong'] } };
+    return inner(req);
+  };
+  const run = await runGoal({ store, runner, goal: 'g' });
+  // T3 failed, so this run is a plain failure, not held; hold it by hand to exercise the filter.
+  assert.ok(store.events(run.id).some((e) => e.msg === 'T2 blocked: dependency never landed'));
+  const stored = store.loadRun(run.id)!;
+  stored.tasks[0].status = 'merged';
+  stored.deferred = ['tasks', 'learning'];
+  store.saveRun(stored);
+  prompts.length = 0;
+  const done = await resumeRun({ store, runner, runId: run.id });
+  assert.equal(done.tasks[1].status, 'merged');
+  assert.equal(prompts.length, 1);
+  assert.doesNotMatch(prompts[0], /T2 blocked/);
+  assert.match(prompts[0], /T4 blocked/);
+}));
