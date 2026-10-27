@@ -298,28 +298,50 @@ async function cmdRun(args: string[]): Promise<void> {
     return;
   }
 
-  const web = withWeb ? await serve({ store }) : null;
-  if (web) console.log(`♫ web dashboard: ${web.url}`);
   const r = runner();
+  const run = await drive(store, { serve: withWeb }, (onUpdate) => runGoal({
+    store,
+    runner: r,
+    goal,
+    onUpdate,
+    sandbox: sandboxOption(store, iso),
+    unattended: iso.unattended,
+  }));
+
+  if (!noEvolve && evolutionDue(store)) {
+    console.log('♫ evolution due: improving the harness…');
+    const out = await evolve(store, r, (m) => console.log(`  ${m}`));
+    console.log(`♫ evolve: ${out.promoted ? `promoted ${out.candidate}` : `kept ${out.incumbent}`} (${out.reason})`);
+  }
+  process.exitCode = exitCodeFor(run);
+}
+
+// A run held for approval is waiting on a human, not failed.
+const exitCodeFor = (run: Run) => (run.status === 'done' || run.status === 'awaiting_approval' ? 0 : 1);
+
+// Foreground drive shared by run and resume: optional web dashboard, the live screen on a TTY (event lines
+// otherwise, from `fromEvent` on), then harvest and the summary. A throw from `start` cleans up and is rethrown.
+async function drive(store: Store, o: { serve: boolean; fromEvent?: number }, start: (onUpdate: (run: Run) => void) => Promise<Run>): Promise<Run> {
+  const web = o.serve ? await serve({ store }) : null;
+  if (web) console.log(`♫ web dashboard: ${web.url}`);
   const live = isTTY() ? liveScreen() : null;
-  let printed = 0;
+  let printed = o.fromEvent ?? 0;
   let latest: Run | null = null;
   const tick = setInterval(() => {
     if (!latest) return;
     if (live) live.draw(latest, store);
     else printed = printNewEvents(store, latest, printed);
   }, live ? 120 : 400);
-
-  const run = await runGoal({
-    store,
-    runner: r,
-    goal,
-    onUpdate: (u) => (latest = u),
-    sandbox: sandboxOption(store, iso),
-    unattended: iso.unattended,
-  });
+  let run: Run;
+  try {
+    run = await start((u) => (latest = u));
+  } catch (e) {
+    clearInterval(tick);
+    live?.close(null, store);
+    await web?.close();
+    throw e;
+  }
   clearInterval(tick);
-  latest = run;
   if (live) live.close(run, store);
   else printNewEvents(store, run, printed);
 
@@ -327,14 +349,7 @@ async function cmdRun(args: string[]): Promise<void> {
   if (c) console.log(`♫ harvested run into Factory Eval (${listEvals(store).length} cases)`);
   console.log(summary(run));
   await web?.close();
-
-  if (!noEvolve && evolutionDue(store)) {
-    console.log('♫ evolution due: improving the harness…');
-    const out = await evolve(store, r, (m) => console.log(`  ${m}`));
-    console.log(`♫ evolve: ${out.promoted ? `promoted ${out.candidate}` : `kept ${out.incumbent}`} (${out.reason})`);
-  }
-  // A run held for approval is waiting on a human, not failed.
-  process.exitCode = run.status === 'done' || run.status === 'awaiting_approval' ? 0 : 1;
+  return run;
 }
 
 function sandboxOption(store: Store, iso: ReturnType<typeof resolveSandbox>) {
@@ -364,41 +379,21 @@ async function cmdResume(args: string[]): Promise<void> {
     console.error(`orchestra: warning: ${iso.warning}`);
     store.event({ t: Date.now(), run: runId, kind: 'log', msg: `Resume isolation: ${iso.warning}` });
   }
-  const web = args.includes('--serve') ? await serve({ store }) : null;
-  if (web) console.log(`♫ web dashboard: ${web.url}`);
-  const live = isTTY() ? liveScreen() : null;
-  let printed = store.events(runId).length;
-  let latest: Run | null = null;
-  const tick = setInterval(() => {
-    if (!latest) return;
-    if (live) live.draw(latest, store);
-    else printed = printNewEvents(store, latest, printed);
-  }, live ? 120 : 400);
   let run: Run;
   try {
-    run = await resumeRun({
+    run = await drive(store, { serve: args.includes('--serve'), fromEvent: store.events(runId).length }, (onUpdate) => resumeRun({
       store,
       runner: runner(),
       runId,
-      onUpdate: (u) => (latest = u),
+      onUpdate,
       sandbox: iso.sandbox,
       unattended: iso.unattended,
-    });
+    }));
   } catch (e) {
     // Setup failed before any work ran; the stored run is unchanged.
-    clearInterval(tick);
-    if (live) live.close(store.loadRun(runId)!, store);
-    await web?.close();
     die(`resume refused: ${(e as Error).message}`);
   }
-  clearInterval(tick);
-  if (live) live.close(run, store);
-  else printNewEvents(store, run, printed);
-  const c = harvest(store, run);
-  if (c) console.log(`♫ harvested run into Factory Eval (${listEvals(store).length} cases)`);
-  console.log(summary(run));
-  await web?.close();
-  process.exitCode = run.status === 'done' || run.status === 'awaiting_approval' ? 0 : 1;
+  process.exitCode = exitCodeFor(run);
 }
 
 export function summary(run: Run): string {
@@ -437,10 +432,10 @@ function liveScreen() {
       const out = renderDashboard(run, store.events(run.id), { width: width(), now: Date.now(), color: true, frame: frame++, maxEvents: 10 });
       process.stdout.write('\x1b[H\x1b[2J' + out + '\n');
     },
-    close(run: Run, store: Store) {
+    close(run: Run | null, store: Store) {
       restore();
       process.removeListener('exit', restore);
-      console.log(renderDashboard(run, store.events(run.id), { width: width(), now: Date.now(), color: true, frame: 0, maxEvents: 10 }));
+      if (run) console.log(renderDashboard(run, store.events(run.id), { width: width(), now: Date.now(), color: true, frame: 0, maxEvents: 10 }));
     },
   };
 }
