@@ -118,6 +118,19 @@ export interface Run {
   deferred?: DeferredWork[];
   ablate?: Ablation; // opt-in ablation the run started with (bench); absent when none
   evalLearnings?: boolean; // an eval replay that reads the learnings store; absent when clean-room
+  isolation?: RunIsolation; // how workers were confined at run start, so a resume can inherit it; absent on older runs
+}
+
+// Worker isolation a run started with (never secrets). backend 'none' means no OS sandbox.
+export interface RunIsolation {
+  backend: 'srt' | 'claude' | 'docker' | 'none';
+  unattended: boolean;
+  scrubEnv: boolean; // push and publish credentials stripped from agent env
+  image?: string;
+  gvisor?: boolean;
+  network?: string; // docker network; absent means none
+  allowedHosts?: string[];
+  allowLocalBinding?: boolean;
 }
 
 export interface Ablation {

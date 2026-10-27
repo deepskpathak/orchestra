@@ -30,7 +30,7 @@ import { DEFAULT_PROVIDER, resolveModel } from './models.ts';
 import { resolveProvider, type ModelProvider } from './provider.ts';
 import { verificationModes } from './outcomes.ts';
 import { AGENTIC_INSTRUCTION, NO_EVIDENCE_NOTE, executedChecksSection, runScenarioChecks, type CheckResult } from './judge-checks.ts';
-import type { Ablation, ActiveAgent, CriterionResult, OrchestraEvent, PanelRecord, ProjectConfig, Role, Run, Scenario, Task, Verdict } from './types.ts';
+import type { Ablation, ActiveAgent, RunIsolation, CriterionResult, OrchestraEvent, PanelRecord, ProjectConfig, Role, Run, Scenario, Task, Verdict } from './types.ts';
 
 export type { Ablation };
 
@@ -543,6 +543,7 @@ export class Conductor {
       // Recorded so a resume runs under the same ablation and learnings mode as the first pass.
       ...(Object.values(this.ablate).some(Boolean) ? { ablate: { ...this.ablate } } : {}),
       ...(this.evalLearnings ? { evalLearnings: true } : {}),
+      isolation: recordIsolation(opts.sandbox, opts.unattended),
     };
   }
 
@@ -2059,6 +2060,25 @@ export function normalizeTasks(raw: any[]): Task[] {
   return tasks;
 }
 
+export function recordIsolation(sandbox: ConductorOptions['sandbox'], unattended = false): RunIsolation {
+  const out: RunIsolation = { backend: sandbox?.backend ?? 'none', unattended, scrubEnv: Boolean(sandbox || unattended) };
+  if (sandbox?.image !== undefined) out.image = sandbox.image;
+  if (sandbox?.gvisor) out.gvisor = true;
+  if (sandbox?.network !== undefined) out.network = sandbox.network;
+  if (sandbox?.allowedHosts?.length) out.allowedHosts = [...sandbox.allowedHosts];
+  if (sandbox?.allowLocalBinding) out.allowLocalBinding = true;
+  return out;
+}
+
+// The conductor options a stored isolation record stands for.
+export function isolationOptions(iso: RunIsolation): Pick<ConductorOptions, 'sandbox' | 'unattended'> {
+  if (iso.backend === 'none') return { unattended: iso.unattended };
+  return {
+    unattended: iso.unattended,
+    sandbox: { backend: iso.backend, allowedHosts: iso.allowedHosts, allowLocalBinding: iso.allowLocalBinding, image: iso.image, gvisor: iso.gvisor, network: iso.network },
+  };
+}
+
 // Who asked for the run: ORCHESTRA_REQUESTER, else git user.name, else "unknown" (W7.1).
 function detectRequester(root: string): string {
   const env = process.env.ORCHESTRA_REQUESTER?.trim();
@@ -2131,7 +2151,9 @@ export async function resumeRun(opts: ResumeOptions): Promise<Run> {
   try {
     // Checked under the lock, so a resume that just finished (marker cleared) is not run twice.
     const run = assertResumable(opts.store, opts.runId);
-    return await new Conductor({ ...opts, goal: run.goal, kind: run.kind, harnessVersion: run.harness, baseRef: run.baseRef, ablate: opts.ablate ?? run.ablate, evalLearnings: opts.evalLearnings ?? run.evalLearnings }, run).resume();
+    // Callers that say nothing about isolation get the run's own, never a silent downgrade to none.
+    const inherit = opts.sandbox === undefined && opts.unattended === undefined && run.isolation ? isolationOptions(run.isolation) : {};
+    return await new Conductor({ ...opts, ...inherit, goal: run.goal, kind: run.kind, harnessVersion: run.harness, baseRef: run.baseRef, ablate: opts.ablate ?? run.ablate, evalLearnings: opts.evalLearnings ?? run.evalLearnings }, run).resume();
   } finally {
     release();
   }

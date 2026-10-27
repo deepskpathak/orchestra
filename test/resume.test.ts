@@ -5,12 +5,13 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import type { AgentRequest, AgentResult, Runner } from '../src/agent.ts';
 import { approveTask } from '../src/approve.ts';
+import { resumeIsolation } from '../src/cli.ts';
 import { resumeRun, runGoal } from '../src/conductor.ts';
 import { fakeRunner } from '../src/fake.ts';
 import { PACKAGE_ROOT } from '../src/harness.ts';
 import { runSatisfaction } from '../src/oversight.ts';
 import { DEFAULT_PROJECT_CONFIG } from '../src/store.ts';
-import type { ProjectConfig } from '../src/types.ts';
+import type { ProjectConfig, RunIsolation } from '../src/types.ts';
 import type { ProbeExec } from '../src/sandbox.ts';
 import { tempRepo } from './helpers.ts';
 
@@ -412,4 +413,104 @@ test('resume keeps the ablation the run started with (ablate.repair: one attempt
   const normal = await scenario(false);
   assert.equal(normal.tasks[1].status, 'merged');
   assert.equal(normal.tasks[1].attempts, 2);
+}));
+
+// Isolation on resume (security): inherit by default, refuse weaker unless overridden, legacy runs need flags.
+const req = (backend: 'srt' | 'claude' | 'docker' | null, more: { unattended?: boolean; image?: string; gvisor?: boolean; network?: string } = {}) => ({ backend, unattended: false, ...more });
+const srtUnattended: RunIsolation = { backend: 'srt', unattended: true, scrubEnv: true, allowedHosts: ['registry.npmjs.org'] };
+const docker: RunIsolation = { backend: 'docker', unattended: false, scrubEnv: true, image: 'img:1', gvisor: true };
+
+test('resume isolation: no flags inherit the recorded isolation, including its allowed hosts', () => {
+  const out = resumeIsolation('r1', srtUnattended, null, false, { allowedHosts: ['evil.example'] });
+  assert.deepEqual(out.sandbox?.backend, 'srt');
+  assert.equal(out.unattended, true);
+  assert.deepEqual(out.sandbox?.allowedHosts, ['registry.npmjs.org'], 'a widened config does not reach a resumed run');
+  assert.equal(out.warning, undefined);
+  assert.deepEqual(resumeIsolation('r1', { backend: 'none', unattended: false, scrubEnv: false }, null, false), { unattended: false });
+});
+
+test('resume isolation: weaker flags are refused, stronger ones allowed', () => {
+  assert.throws(() => resumeIsolation('r1', srtUnattended, req(null, { unattended: false }), false), /no sandbox instead of srt.*--unattended dropped.*--override-isolation/);
+  assert.throws(() => resumeIsolation('r1', srtUnattended, req('srt'), false), /--unattended dropped/);
+  assert.throws(() => resumeIsolation('r1', srtUnattended, req('claude', { unattended: true }), false), /backend claude instead of srt/);
+  assert.throws(() => resumeIsolation('r1', docker, req('docker', { image: 'img:1', gvisor: true, network: 'bridge' }), false), /network bridge instead of none/);
+  assert.throws(() => resumeIsolation('r1', docker, req('docker', { image: 'img:1' }), false), /--gvisor dropped/);
+  assert.throws(() => resumeIsolation('r1', docker, req('docker', { image: 'other', gvisor: true }), false), /image other instead of img:1/);
+  // Stronger: a backend where there was none, --unattended added, docker network narrowed to none.
+  const none: RunIsolation = { backend: 'none', unattended: false, scrubEnv: false };
+  assert.equal(resumeIsolation('r1', none, req('srt', { unattended: true }), false).sandbox?.backend, 'srt');
+  const same = resumeIsolation('r1', srtUnattended, req('srt', { unattended: true }), false);
+  assert.deepEqual(same.sandbox?.allowedHosts, ['registry.npmjs.org']);
+  assert.equal(same.warning, undefined);
+  const bridged: RunIsolation = { ...docker, network: 'bridge' };
+  assert.equal(resumeIsolation('r1', bridged, req('docker', { image: 'img:1', gvisor: true, network: 'none' }), false).sandbox?.network, 'none');
+});
+
+test('resume isolation: --override-isolation accepts weaker isolation with a warning', () => {
+  const out = resumeIsolation('r1', srtUnattended, req(null), true);
+  assert.equal(out.sandbox, undefined);
+  assert.equal(out.unattended, false);
+  assert.match(out.warning!, /--override-isolation.*no sandbox instead of srt/);
+});
+
+test('resume isolation: a run recorded before isolation was stored needs flags or --override-isolation', () => {
+  assert.throws(() => resumeIsolation('r1', undefined, null, false), /recorded before Orchestra stored worker isolation.*--override-isolation/);
+  const flags = resumeIsolation('r1', undefined, req('srt', { unattended: true }), false);
+  assert.equal(flags.sandbox?.backend, 'srt');
+  assert.match(flags.warning!, /no recorded isolation/);
+  const forced = resumeIsolation('r1', undefined, null, true);
+  assert.equal(forced.sandbox, undefined);
+  assert.match(forced.warning!, /unchecked/);
+});
+
+test('runs record their isolation and resumeRun inherits it when the caller passes none', () => asRequester(async () => {
+  const store = repo();
+  const runner = planned([t('T1'), t('T2', ['T1'])], ['T1']);
+  const probes: string[] = [];
+  const blocked: ProbeExec = (c) => {
+    probes.push(c);
+    return { status: 0, stdout: c === 'node' ? 'ORCHESTRA_PROBE_OPEN\n' : 'ORCHESTRA_PROBE_BLOCKED\n', stderr: '' };
+  };
+  const run = await runGoal({ store, runner, goal: 'g', sandbox: { backend: 'srt' }, unattended: true, preflightExec: blocked });
+  assert.deepEqual(run.isolation, { backend: 'srt', unattended: true, scrubEnv: true });
+  await approveTask(store, run.id, 'T1', 'bob');
+  probes.length = 0;
+  const seen: AgentRequest[] = [];
+  const watched: Runner = async (r) => {
+    seen.push(r);
+    return runner(r);
+  };
+  const done = await resumeRun({ store, runner: watched, runId: run.id, preflightExec: blocked });
+  assert.equal(done.status, 'done', done.error);
+  assert.ok(probes.length > 0, 'the inherited sandbox is pre-flighted');
+  const worker = seen.find((r) => r.role === 'worker')!;
+  assert.equal(worker.sandbox?.backend, 'srt');
+  assert.ok(worker.env, 'agent env is scrubbed');
+}));
+
+test('orchestra resume (CLI): weaker isolation is refused, --override-isolation warns and logs, legacy runs need flags', () => asRequester(async () => {
+  const store = repo();
+  const cli = join(PACKAGE_ROOT, 'bin', 'orchestra.ts');
+  const resume = (...a: string[]) => spawnSync(process.execPath, [cli, 'resume', ...a], { cwd: store.root, encoding: 'utf8', timeout: 60000, env: { ...process.env, ORCHESTRA_RUNNER: 'fake', ORCHESTRA_FAKE_STEP_MS: '0' } });
+  const runner = planned([t('T1'), t('T2', ['T1'])], ['T1']);
+  const run = await runGoal({ store, runner, goal: 'g' });
+  await approveTask(store, run.id, 'T1', 'bob');
+  // Pretend the run started sandboxed and unattended.
+  const stored = store.loadRun(run.id)!;
+  stored.isolation = srtUnattended;
+  store.saveRun(stored);
+  const weaker = resume(run.id, '--sandbox', 'off');
+  assert.equal(weaker.status, 1);
+  assert.match(weaker.stderr, /weaken the isolation.*no sandbox instead of srt/);
+
+  // Legacy: no isolation recorded at all.
+  delete stored.isolation;
+  store.saveRun(stored);
+  const legacy = resume(run.id);
+  assert.equal(legacy.status, 1);
+  assert.match(legacy.stderr, /recorded before Orchestra stored worker isolation/);
+  const forced = resume(run.id, '--override-isolation');
+  assert.equal(forced.status, 0, forced.stdout + forced.stderr);
+  assert.match(forced.stderr, /warning: run .* has no recorded isolation/);
+  assert.ok(store.events(run.id).some((e) => /^Resume isolation:/.test(e.msg)));
 }));

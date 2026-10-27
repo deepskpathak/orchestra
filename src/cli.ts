@@ -12,7 +12,7 @@ import { atlasStats, loadOrBuildAtlas } from './atlas.ts';
 import { oversightSummary, renderOversight } from './dashboard-data.ts';
 import { ctagsExec } from './atlas-external.ts';
 import { QUERY_COMMANDS, parsePorcelain, runQuery, type QueryCommand } from './atlas-query.ts';
-import { assertResumable, resumeRun, runGoal } from './conductor.ts';
+import { assertResumable, isolationOptions, recordIsolation, resumeRun, runGoal, type ConductorOptions } from './conductor.ts';
 import { explorationMetrics, renderExploration } from './exploration.ts';
 import { collectOutcomes, renderOutcomes } from './outcomes.ts';
 import { evaluate, evolutionDue, evolve, harvest, listEvals, metrics, resolveSplits } from './evolve.ts';
@@ -30,7 +30,7 @@ import { DEFAULT_PROJECT_CONFIG, Store, findMainCheckout, findRepoRoot } from '.
 import { serve } from './web/server.ts';
 import { startTui } from './tui/app.ts';
 import { compactLine, renderDashboard, renderStats, renderStatusLine } from './tui/render.ts';
-import type { Run } from './types.ts';
+import type { Run, RunIsolation } from './types.ts';
 
 const HELP = `♫ orchestra: self-improving multi-agent software factory on Claude Code
 
@@ -61,8 +61,10 @@ Usage:
                                  the check cannot run and approve warns
   orchestra resume <runId>       Finish a run that approval finalised with deferred work: same run and integration branch.
                                  Runs the tasks that were blocked behind the approved tasks, then the mutation pass and
-                                 learning. Takes --serve and the --sandbox, --sandbox-image, --sandbox-network, --gvisor
-                                 and --unattended flags of run (no --detach). Exit 0 when done or awaiting_approval
+                                 learning. Workers inherit the isolation the run started with; the --sandbox,
+                                 --sandbox-image, --sandbox-network, --gvisor and --unattended flags of run may only
+                                 tighten it, and --override-isolation accepts a weaker one (warns and logs). Also takes
+                                 --serve (no --detach). Exit 0 when done or awaiting_approval
   orchestra stats [--json]       Factory health per harness version, plus the eval infra failure rate, oversight and throughput
                                  metrics (interruptions, review minutes, edits, conflict rate, merge wait, cache-read share)
   orchestra evolve               Propose, evaluate (clean-room, interleaved), and maybe promote a better harness;
@@ -214,6 +216,49 @@ export function resolveSandbox(
   return { backend: probe.backend, unattended };
 }
 
+const ISOLATION_FLAGS = ['--sandbox', '--sandbox-image', '--sandbox-network', '--gvisor', '--unattended'];
+
+// Isolation for `orchestra resume`. No flags inherit what the run recorded at start. Flags may only tighten it:
+// a backend where there was none, --unattended, --gvisor, or docker network none. Any other change (no sandbox, a
+// different backend or image, another network, --gvisor or --unattended dropped) is refused unless `override`.
+// Runs recorded before isolation was stored need flags or `override`. Throws with the reason; `warning` is set
+// when the result is not a checked match, for the caller to print and log.
+export function resumeIsolation(
+  runId: string,
+  stored: RunIsolation | undefined,
+  requested: ReturnType<typeof resolveSandbox> | null,
+  override: boolean,
+  live: { allowedHosts?: string[]; allowLocalBinding?: boolean } = {},
+): Pick<ConductorOptions, 'sandbox' | 'unattended'> & { warning?: string } {
+  const fromFlags = (r: ReturnType<typeof resolveSandbox>, hosts: { allowedHosts?: string[]; allowLocalBinding?: boolean }) => ({
+    unattended: r.unattended,
+    ...(r.backend ? { sandbox: { backend: r.backend, allowedHosts: hosts.allowedHosts, allowLocalBinding: hosts.allowLocalBinding, image: r.image, gvisor: r.gvisor, network: r.network } } : {}),
+  });
+  if (!stored) {
+    if (!requested && !override) throw new Error(`run ${runId} was recorded before Orchestra stored worker isolation, so resume cannot inherit it. Pass the isolation flags the run used (for example --sandbox srt --unattended), or --override-isolation to resume without them`);
+    return { ...(requested ? fromFlags(requested, live) : { unattended: false }), warning: `run ${runId} has no recorded isolation; resuming with ${requested ? 'the given flags' : 'no sandbox (--override-isolation)'}, unchecked` };
+  }
+  if (!requested) return isolationOptions(stored);
+  const want = recordIsolation(fromFlags(requested, stored).sandbox, requested.unattended);
+  const weaker: string[] = [];
+  if (stored.backend !== 'none' && want.backend === 'none') weaker.push(`no sandbox instead of ${stored.backend}`);
+  else if (stored.backend !== 'none' && want.backend !== stored.backend) weaker.push(`backend ${want.backend} instead of ${stored.backend}`);
+  if (stored.backend === 'docker' && want.backend === 'docker') {
+    if ((want.image ?? '') !== (stored.image ?? '')) weaker.push(`image ${want.image ?? 'default'} instead of ${stored.image ?? 'default'}`);
+    const net = (n?: string) => n ?? 'none';
+    if (net(want.network) !== net(stored.network) && net(want.network) !== 'none') weaker.push(`network ${net(want.network)} instead of ${net(stored.network)}`);
+    if (stored.gvisor && !want.gvisor) weaker.push('--gvisor dropped');
+  }
+  if (stored.unattended && !want.unattended) weaker.push('--unattended dropped');
+  if (stored.scrubEnv && !want.scrubEnv) weaker.push('agent env no longer scrubbed');
+  // A backend added where the run had none has nothing recorded to compare hosts with, so it takes the config's.
+  const hosts = stored.backend === 'none' || override ? live : stored;
+  const out = fromFlags(requested, hosts);
+  if (!weaker.length) return out;
+  if (!override) throw new Error(`resume would weaken the isolation run ${runId} started with: ${weaker.join('; ')}. Pass the original flags (or none to inherit them), or add --override-isolation to accept this`);
+  return { ...out, warning: `--override-isolation: resuming run ${runId} with weaker isolation: ${weaker.join('; ')}` };
+}
+
 // Positionals that make up the goal. The value-taking flags are removed together with their value by
 // position, so a goal word that happens to equal a flag value ("turn off the cache --sandbox off") stays.
 export function goalFromArgs(args: string[]): string {
@@ -307,7 +352,18 @@ async function cmdResume(args: string[]): Promise<void> {
   } catch (e) {
     die((e as Error).message);
   }
-  const iso = resolveSandbox(args);
+  let iso: ReturnType<typeof resumeIsolation>;
+  try {
+    const explicit = args.some((a) => ISOLATION_FLAGS.includes(a));
+    const cfg = store.config().sandbox;
+    iso = resumeIsolation(runId, store.loadRun(runId)!.isolation, explicit ? resolveSandbox(args) : null, args.includes('--override-isolation'), { allowedHosts: cfg?.allowedHosts, allowLocalBinding: cfg?.allowLocalBinding });
+  } catch (e) {
+    die((e as Error).message);
+  }
+  if (iso.warning) {
+    console.error(`orchestra: warning: ${iso.warning}`);
+    store.event({ t: Date.now(), run: runId, kind: 'log', msg: `Resume isolation: ${iso.warning}` });
+  }
   const web = args.includes('--serve') ? await serve({ store }) : null;
   if (web) console.log(`♫ web dashboard: ${web.url}`);
   const live = isTTY() ? liveScreen() : null;
@@ -325,7 +381,7 @@ async function cmdResume(args: string[]): Promise<void> {
       runner: runner(),
       runId,
       onUpdate: (u) => (latest = u),
-      sandbox: sandboxOption(store, iso),
+      sandbox: iso.sandbox,
       unattended: iso.unattended,
     });
   } catch (e) {
