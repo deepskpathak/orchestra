@@ -401,6 +401,7 @@ async function cmdApprove(args: string[]): Promise<void> {
   try {
     const run = await approveTask(store, runId, taskId, by, (m) => console.error(m));
     console.log(`${taskId} approved by ${by} and merged into ${run.integrationBranch}.`);
+    if (run.deferred?.length) console.log(`Run ${run.id} is ${run.status}; deferred: ${run.deferred.join(', ')}. Finish it with: orchestra resume ${run.id}`);
   } catch (e) {
     die((e as Error).message);
   }

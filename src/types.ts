@@ -114,7 +114,11 @@ export interface Run {
   mutation?: { total: number; killed: number; score?: number; floor: number; pass?: boolean; invalid?: number; skipped?: string }; // W4.5; skipped (with a reason) means no score was computed, so there is no score or pass
   contract?: { path: string; sha256: string }; // W4.3 the acceptance contract workers cannot edit
   verificationModes?: string[]; // M4 modes enabled when the run started (panel, agentic, contracts, oracles, mutation); absent = none
+  // W7.1: work an approval left undone when it finalised an awaiting_approval run; `orchestra resume` runs it and clears this
+  deferred?: DeferredWork[];
 }
+
+export type DeferredWork = 'tasks' | 'mutation' | 'learning';
 
 // One live agent session, shown as a lane in the dashboard.
 export interface ActiveAgent {

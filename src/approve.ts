@@ -4,7 +4,7 @@ import { rmSync } from 'node:fs';
 import { canApprove, runSatisfaction } from './oversight.ts';
 import * as g from './git.ts';
 import type { Store } from './store.ts';
-import type { Run } from './types.ts';
+import type { DeferredWork, Run } from './types.ts';
 
 export async function approveTask(store: Store, runId: string, taskId: string, by: string, warn: (msg: string) => void = () => {}): Promise<Run> {
   const run = store.loadRun(runId);
@@ -46,20 +46,29 @@ export async function approveTask(store: Store, runId: string, taskId: string, b
   task.endedAt = now;
   task.approval = { ...(task.approval ?? { requestedAt: now }), by, decidedAt: now };
   // A run held for approval was not finalised by the conductor (no satisfaction, mutation or learning).
-  // Once the last held task lands, record satisfaction for the whole run. Mutation and learning need a
-  // worktree and a runner, so they are not re-run here; tasks blocked behind a held task never ran.
+  // Once the last held task lands, record satisfaction for the whole run and mark what is still owed in
+  // `run.deferred`: tasks blocked behind a held task, the mutation pass and learning need a worktree and a
+  // runner, so `orchestra resume` runs them on the same run and integration branch.
   let finalised = '';
   if (run.status === 'awaiting_approval' && !run.tasks.some((t) => t.status === 'awaiting_approval')) {
     run.satisfaction = runSatisfaction(run.tasks);
     const notRun = run.tasks.filter((t) => t.status !== 'merged');
+    const deferred: DeferredWork[] = [
+      ...(notRun.length ? ['tasks' as const] : []),
+      ...(store.config().verification.mutation.enabled ? ['mutation' as const] : []),
+      ...(run.kind === 'goal' ? ['learning' as const] : []),
+    ];
+    const resume = `\`orchestra resume ${runId}\``;
+    if (deferred.length) run.deferred = deferred;
+    else delete run.deferred;
     if (notRun.length) {
       run.status = 'failed';
-      run.error = `${notRun.length} of ${run.tasks.length} tasks did not land (${notRun.map((t) => t.id).join(', ')} blocked behind a task that was held for approval and never ran). Start a new run for the remainder`;
+      run.error = `${notRun.length} of ${run.tasks.length} tasks did not land (${notRun.map((t) => t.id).join(', ')} blocked behind a task that was held for approval and never ran). Run ${resume} to run them`;
     } else {
       run.status = 'done';
       delete run.error;
     }
-    finalised = `; run ${run.status}, satisfaction ${run.satisfaction}. Mutation score and learning are skipped for a run finalised by approval`;
+    finalised = `; run ${run.status}, satisfaction ${run.satisfaction}${deferred.length ? `. Deferred (${deferred.join(', ')}): run ${resume}` : ''}`;
   } else if (run.tasks.every((t) => t.status === 'merged')) {
     run.status = 'done';
     delete run.error;
