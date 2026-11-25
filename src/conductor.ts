@@ -1870,6 +1870,7 @@ export class Conductor {
     const res = preflightSandbox(this.workerPolicy(this.integration.path), opt.backend, exec, {
       cwd: this.integration.path,
       docker: { image: opt.image, gvisor: opt.gvisor, network: opt.network },
+      model: this.harness.config.models.worker, // the claude probe is a worker-shaped session
     });
     for (const w of res.warnings) this.emit('log', `Sandbox pre-flight warning: ${w}`);
     if (!res.ok) throw new Error(`Sandbox pre-flight failed, refusing to dispatch workers: ${res.failures.join('; ')}`);

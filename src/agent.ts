@@ -139,27 +139,34 @@ export type SpawnFn = typeof spawn;
 
 // The command and args to spawn for a request. Without a sandbox this is plain `claude`.
 export function buildCommand(req: AgentRequest): { command: string; args: string[] } {
-  const args = buildArgs(req);
-  if (req.sandbox?.backend === 'docker') {
-    const { policy, docker } = req.sandbox;
+  return wrapCommand(req.sandbox, req.cwd, req.env, ['claude', ...buildArgs(req)]);
+}
+
+// Wraps an inner argv the way a worker's `claude` argv is wrapped for its sandbox backend. Shared with
+// the sandbox pre-flight probe, so the probe exercises the same docker and srt assembly workers get.
+// The claude backend has no outer wrapper: its sandbox block rides inside the inner argv's --settings.
+export function wrapCommand(sandbox: AgentSandbox | undefined, cwd: string, env: AgentRequest['env'], inner: string[]): { command: string; args: string[] } {
+  const [program, ...innerArgs] = inner;
+  if (sandbox?.backend === 'docker') {
+    const { policy, docker } = sandbox;
     const [command, ...rest] = dockerArgs({
-      worktree: req.cwd,
+      worktree: cwd,
       tmpDir: policy.write.allow[1],
       image: docker?.image ?? DEFAULT_IMAGE,
-      envNames: containerEnvNames(req.env ?? {}),
+      envNames: containerEnvNames(env ?? {}),
       gitCommonDir: policy.gitCommonDir,
       gvisor: docker?.gvisor,
       network: docker?.network,
       user: hostUser(),
     });
-    return { command, args: [...rest, 'claude', ...args] };
+    return { command, args: [...rest, ...inner] };
   }
-  if (req.sandbox?.backend === 'srt') {
-    const settings = writeSrtSettings(req.cwd, req.sandbox.policy, req.sandbox.settingsDir);
-    const [command, ...rest] = srtArgs(req.sandbox.policy, settings, 'claude', args);
+  if (sandbox?.backend === 'srt') {
+    const settings = writeSrtSettings(cwd, sandbox.policy, sandbox.settingsDir);
+    const [command, ...rest] = srtArgs(sandbox.policy, settings, program, innerArgs);
     return { command, args: rest };
   }
-  return { command: 'claude', args };
+  return { command: program, args: innerArgs };
 }
 
 export function summarizeTool(name: string, input: Record<string, unknown> | undefined): string {

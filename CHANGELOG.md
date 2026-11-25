@@ -8,6 +8,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- The `claude` sandbox pre-flight probe now checks argv pass-through: the Bash command it asks the model to run carries `--settings <json> -p <prompt>` trailing arguments, and the probe script fails pre-flight if they do not arrive byte for byte.
+
+### Changed
+
+- Sandbox pre-flight probes are built through the worker code path. `buildCommand` in `src/agent.ts` now delegates to a new `wrapCommand`, which the `srt` and `docker` probes share, and their trailing arguments are the real `buildArgs` output for a worker instead of a hand-written argv. The `claude` probe is a worker-shaped session from `buildCommand` (`stream-json`, the guard hook, the inline sandbox `--settings`, `--max-budget-usd 0.5`, `--max-turns 4`, the run's worker model) instead of a separate `--settings` file and `--output-format text`.
+
 - Project website in `site/`: a single static page (no build step, no dependencies) with an animated, scrubbable explainer film, feature overview, quick start, docs tabs and how-tos. `.github/workflows/pages.yml` deploys it to GitHub Pages on pushes to `main` that touch `site/`.
 
 ## [0.8.0] - 2026-10-27

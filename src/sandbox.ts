@@ -7,7 +7,10 @@
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join, sep } from 'node:path';
-import { DEFAULT_IMAGE, DEFAULT_NETWORK, dockerArgs, hostUser } from './container.ts';
+import { DEFAULT_NETWORK } from './container.ts';
+// agent.ts imports this module too. The cycle is safe because neither side uses the other at import time:
+// pre-flight calls these only inside preflightSandbox, so it builds probes through the worker code path.
+import { buildArgs, buildCommand, wrapCommand, type AgentRequest, type AgentSandbox } from './agent.ts';
 
 export type SandboxBackend = 'srt' | 'claude' | 'none';
 
@@ -204,6 +207,7 @@ export interface PreflightOptions {
   cwd: string; // a worktree the worker could use
   docker?: { image?: string; gvisor?: boolean; network?: string };
   timeoutMs?: number;
+  model?: string; // claude backend: model for the probe session (default sonnet); the run passes its worker model
   // Candidate host dirs for the docker read canary, tried in order (default: see unmountedCanaryBase).
   // Injectable because inside a sandbox neither default is writable, so tests need a controllable base.
   canaryBases?: string[];
@@ -234,9 +238,9 @@ function readScript(file: string): string {
 }
 
 // Trailing arguments shaped like the ones real workers pass after the command: a --settings flag whose
-// JSON value holds double quotes, spaces and a dollar sign, plus -p and a prompt-like value. The srt and
-// docker probes carry them after `node -e <script> PROBE_ARGV_POSITIONAL` and the probe script checks it
-// received them intact.
+// JSON value holds double quotes, spaces and a dollar sign, plus -p and a prompt-like value. The claude
+// probe's Bash command carries them after `node -e <script> PROBE_ARGV_POSITIONAL`, and the probe script
+// checks it received them intact. They stay short because the model has to retype the command.
 export const PROBE_TRAILING_ARGS: readonly string[] = Object.freeze(['--settings', '{"a": "x y $HOME", "b": "it\'s"}', '-p', 'Say "hi" to $USER']);
 
 // Why a positional and not `--`: node rejects `node -e <script> --settings ...` ("bad option"), so
@@ -248,10 +252,26 @@ export const PROBE_TRAILING_ARGS: readonly string[] = Object.freeze(['--settings
 // exactly like a worker's `claude ... --settings <json>`. It also needs no shell in the docker image.
 export const PROBE_ARGV_POSITIONAL = 'orchestra-probe';
 
+// The stand-in worker request the probes are built from. Its prompt and system prompt carry the
+// characters a wrapper is most likely to mangle: double and single quotes, spaces and a dollar sign.
+export const PROBE_PROMPT = 'Say "hi" to $USER';
+const PROBE_SYSTEM = "Pre-flight probe: it's not a task.";
+const PROBE_BUDGET_USD = 0.5;
+
+export function probeRequest(prompt: string, cwd: string, sandbox: AgentSandbox, model = 'sonnet'): AgentRequest {
+  return { role: 'worker', prompt, system: PROBE_SYSTEM, cwd, model, budgetUsd: PROBE_BUDGET_USD, maxTurns: 4, allowedTools: ['Bash'], sandbox };
+}
+
+// The srt and docker probes' trailing args: what buildArgs gives a worker on this sandbox, so pre-flight
+// checks the real worker argv (inline guard --settings JSON, -p, --append-system-prompt and the rest).
+export function probeWorkerArgs(cwd: string, sandbox: AgentSandbox, model?: string): string[] {
+  return buildArgs(probeRequest(PROBE_PROMPT, cwd, sandbox, model));
+}
+
 // With `node -e <script> orchestra-probe a b`, process.argv is [node, orchestra-probe, a, b]. The check
 // is exact: same length, strict equality, so a dropped, split or re-quoted argument is a mismatch.
-function argvGuard(body: string): string {
-  const expected = JSON.stringify([PROBE_ARGV_POSITIONAL, ...PROBE_TRAILING_ARGS]);
+function argvGuard(body: string, trailing: readonly string[]): string {
+  const expected = JSON.stringify([PROBE_ARGV_POSITIONAL, ...trailing]);
   return `const a=process.argv.slice(1),e=${expected};if(a.length!==e.length||e.some((x,i)=>a[i]!==x)){console.log(${marker(ARGV_MISMATCH)})}else{${body}}`;
 }
 
@@ -275,13 +295,15 @@ function unmountedCanaryBase(mounts: string[], bases: string[] = ['/var/tmp', ho
 
 // Runs both probes inside the same wrapper workers get. Each must FAIL (be blocked) for ok. A probe
 // that succeeds, a wrapper that cannot start, or output with no marker (inconclusive) all fail closed.
-// The srt and docker probes also use the worker argv shape: the node command is followed by
-// `orchestra-probe <PROBE_TRAILING_ARGS>` (a --settings JSON value with quotes, spaces and a dollar sign,
-// plus -p, with no `--` in front of it, see PROBE_ARGV_POSITIONAL), and
-// the probe script verifies it received them byte for byte. This catches the class of bug fixed in PR #74,
-// where srt consumed the worker's own --settings as its settings path, which a bare `node -e` probe never
-// exercised. A mismatch fails pre-flight. The claude backend goes through a Bash tool call, so it is out
-// of scope and keeps its existing command with no trailing arguments and no argv check.
+// Probes are built through the worker code path (wrapCommand and buildCommand in src/agent.ts), so a bug
+// in how workers assemble their own argv shows up here too. srt and docker: the wrapped inner command is
+// `node -e <script> orchestra-probe <worker args>`, where the worker args come from buildArgs (no `--`
+// in front of them, see PROBE_ARGV_POSITIONAL), and the script verifies it received them byte for byte.
+// This catches the class of bug fixed in PR #74, where srt consumed the worker's own --settings as its
+// settings path. claude: the probe is a real worker-shaped `claude -p` session from buildCommand, so the
+// sandbox block is the one inline in the worker's --settings, and its Bash command carries
+// PROBE_TRAILING_ARGS so the Bash tool's sandbox wrapper is checked for argv pass-through too.
+// A mismatch fails pre-flight.
 export function preflightSandbox(policy: SandboxPolicy, backend: 'srt' | 'claude' | 'docker', exec: ProbeExec, opts: PreflightOptions): PreflightResult {
   const timeoutMs = opts.timeoutMs ?? 60_000;
   const dir = mkdtempSync(join(tmpdir(), 'orchestra-preflight-'));
@@ -298,36 +320,19 @@ export function preflightSandbox(policy: SandboxPolicy, backend: 'srt' | 'claude
     }
     if (canary) writeFileSync(canary, 'orchestra preflight canary\n');
     const probePolicy: SandboxPolicy = { ...policy, read: { deny: backend === 'docker' ? [...policy.read.deny] : [...policy.read.deny, dir] } };
-    const settings = join(dir, 'settings.json');
-    writeFileSync(settings, JSON.stringify(backend === 'srt' ? srtSandboxSettings(probePolicy) : claudeSandboxSettings(probePolicy), null, 2) + '\n');
+    // The srt settings file lands in the probe's temp dir, which is removed at the end.
+    const sandbox: AgentSandbox = { policy: probePolicy, backend, settingsDir: dir, ...(backend === 'docker' ? { docker: opts.docker } : {}) };
     const host = PROBE_HOSTS.find((h) => !policy.network.allowedHosts.includes(h)) ?? PROBE_HOSTS[0];
-    // srt and docker hand the worker argv to the command, so their probes check it. claude runs the
-    // probe through a Bash tool call, which never sees worker argv.
-    const checkArgv = backend !== 'claude';
 
     const wrap = (script: string): { command: string; args: string[] } => {
-      // Spreading copies the frozen trailing args, so nothing downstream can mutate the shared constant.
-      const inner = checkArgv ? ['node', '-e', argvGuard(script), PROBE_ARGV_POSITIONAL, ...PROBE_TRAILING_ARGS] : ['node', '-e', script];
-      if (backend === 'srt') {
-        const [command, ...args] = srtArgs(probePolicy, settings, inner[0], inner.slice(1));
-        return { command, args };
+      if (backend === 'claude') {
+        // Claude Code's sandbox confines its Bash tool, so the probe goes through a Bash call.
+        const cmd = `node -e ${shellQuote(argvGuard(script, PROBE_TRAILING_ARGS))} ${PROBE_ARGV_POSITIONAL} ${PROBE_TRAILING_ARGS.map(shellQuote).join(' ')}`;
+        const prompt = `Run exactly this one shell command with the Bash tool and reply with its stdout only, nothing else:\n${cmd}`;
+        return buildCommand(probeRequest(prompt, opts.cwd, sandbox, opts.model));
       }
-      if (backend === 'docker') {
-                const [command, ...args] = dockerArgs({
-          worktree: opts.cwd,
-          tmpDir: policy.write.allow[1] ?? tmpdir(),
-          image: opts.docker?.image ?? DEFAULT_IMAGE,
-          envNames: [],
-          gitCommonDir: policy.gitCommonDir,
-          gvisor: opts.docker?.gvisor,
-          network: opts.docker?.network,
-          user: hostUser(),
-        });
-        return { command, args: [...args, ...inner] };
-      }
-      // Claude Code's sandbox confines its Bash tool, so the probe goes through a Bash call.
-      const prompt = `Run exactly this one shell command with the Bash tool and reply with its stdout only, nothing else:\nnode -e ${shellQuote(script)}`;
-      return { command: 'claude', args: ['-p', prompt, '--settings', settings, '--allowedTools', 'Bash', '--output-format', 'text'] };
+      const trailing = probeWorkerArgs(opts.cwd, sandbox, opts.model);
+      return wrapCommand(sandbox, opts.cwd, undefined, ['node', '-e', argvGuard(script, trailing), PROBE_ARGV_POSITIONAL, ...trailing]);
     };
 
     let probesRun = 0;
@@ -345,7 +350,7 @@ export function preflightSandbox(policy: SandboxPolicy, backend: 'srt' | 'claude
       const out = `${r.stdout}\n${r.stderr}`;
       // For docker the image's ENTRYPOINT sits between the wrapper and node and can rewrite argv too,
       // so the message names it rather than blaming docker alone.
-      const culprit = backend === 'docker' ? 'the docker wrapper or the image entrypoint' : `the ${backend} wrapper`;
+      const culprit = backend === 'docker' ? 'the docker wrapper or the image entrypoint' : backend === 'claude' ? "Claude Code's Bash sandbox wrapper, or the model retyping the command" : `the ${backend} wrapper`;
       if (out.includes(ARGV_MISMATCH)) failures.push(`${name} probe: worker argv was not passed through the sandbox wrapper intact (${culprit} altered or dropped arguments)`);
       else if (out.includes(OPEN)) failures.push(`${name} probe succeeded inside the sandbox (expected it to be blocked)`);
       else if (!out.includes(BLOCKED)) failures.push(`${name} probe inconclusive: wrapper exited ${r.status} with no result, treating the sandbox as not working`);
@@ -387,7 +392,7 @@ export function preflightSandbox(policy: SandboxPolicy, backend: 'srt' | 'claude
     // The argv check rides on the probes, so with both skipped (docker on a user network or with no
     // connectivity, and no unmounted canary dir) nothing exercised the worker argv shape. Say so rather
     // than let a clean pre-flight imply it was checked.
-    if (checkArgv && probesRun === 0) {
+    if (probesRun === 0) {
       warnings.push(`argv pass-through was NOT verified: both probes were skipped, so pre-flight never ran a command with worker-like arguments through the ${backend} wrapper`);
     }
   } finally {
