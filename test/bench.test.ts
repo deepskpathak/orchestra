@@ -11,6 +11,7 @@ import { git } from '../src/git.ts';
 import { PACKAGE_ROOT } from '../src/harness.ts';
 import { goalRuns } from '../src/evolve.ts';
 import { DEFAULT_PROJECT_CONFIG } from '../src/store.ts';
+import type { ProjectConfig } from '../src/types.ts';
 import { tempRepo } from './helpers.ts';
 
 test('starter suite: every goal has fixture, check and oracle, and every oracle passes its own check', () => {
@@ -335,4 +336,43 @@ test('referenceError rejects a reference that is not among the arms in the run',
   assert.equal(referenceError(undefined, arms), undefined);
   assert.equal(referenceError('atlas-l0', arms), undefined);
   assert.match(referenceError('nope', arms) ?? '', /"nope" is not among the arms in this run \(full, atlas-l0\)/);
+});
+
+test('bench rows record the verification modes the run used and the output of a failing hidden check', async () => {
+  // Private copy of the suite whose calc-sub check always fails with a known message.
+  const suite = mkdtempSync(join(tmpdir(), 'orchestra-suite-'));
+  cpSync(DEFAULT_SUITE, suite, { recursive: true });
+  writeFileSync(join(suite, 'checks', 'calc-sub.mjs'), "console.log('expected sub(5, 3) to be 2');\nprocess.exit(1);\n");
+  const store = tempRepo();
+  const arms = [{ name: 'plain' }, { name: 'agentic', config: { verification: { agenticJudge: { enabled: true } } } as Partial<ProjectConfig> }, SINGLE_SESSION_ARM];
+  try {
+    const { rows, dir } = await runBench({ store, runner: fakeRunner(), suite, goals: ['calc-sub'], repeats: 1, arms, benchId: 'bd' });
+    const by = Object.fromEntries(rows.map((r) => [r.arm, r]));
+    assert.deepEqual(by.plain.verificationModes, []);
+    assert.deepEqual(by.agentic.verificationModes, ['agentic']);
+    assert.equal(by['single-session'].verificationModes, undefined); // no judge, so no mode
+    for (const r of rows) {
+      assert.equal(r.checkPass, false);
+      assert.match(r.checkOutput ?? '', /expected sub\(5, 3\) to be 2|no integration branch/, r.arm);
+    }
+    // The fields survive the round trip through results.jsonl.
+    const lines = readFileSync(join(dir, 'results.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+    assert.deepEqual(lines.find((l) => l.arm === 'agentic').verificationModes, ['agentic']);
+  } finally {
+    rmSync(suite, { recursive: true, force: true });
+  }
+});
+
+test('bench rows leave checkOutput out when the hidden check passes', async () => {
+  const suite = mkdtempSync(join(tmpdir(), 'orchestra-suite-'));
+  cpSync(DEFAULT_SUITE, suite, { recursive: true });
+  writeFileSync(join(suite, 'checks', 'calc-sub.mjs'), "console.log('ok');\n");
+  const store = tempRepo();
+  try {
+    const { rows } = await runBench({ store, runner: fakeRunner(), suite, goals: ['calc-sub'], repeats: 1, arms: [SINGLE_SESSION_ARM], benchId: 'bp' });
+    assert.equal(rows[0].checkPass, true);
+    assert.equal(rows[0].checkOutput, undefined);
+  } finally {
+    rmSync(suite, { recursive: true, force: true });
+  }
 });

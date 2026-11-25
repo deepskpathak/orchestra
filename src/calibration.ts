@@ -92,7 +92,9 @@ export function calibrateByMode(allRows: BenchRow[], passThreshold: number, mode
   const rows = allRows.filter(hasJudge);
   const modes = new Set<string>();
   const per = rows.map((r) => {
-    const m = modesByRun.get(r.runId)?.length ? modesByRun.get(r.runId)! : ['none'];
+    // Modes recorded on the row win: bench runs live in throwaway stores, so the run lookup has nothing for them.
+    const recorded = r.verificationModes ?? modesByRun.get(r.runId);
+    const m = recorded?.length ? recorded : ['none'];
     for (const x of m) modes.add(x);
     return m;
   });

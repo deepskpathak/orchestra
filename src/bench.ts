@@ -63,6 +63,8 @@ export interface BenchRow {
   budgetUsd?: number; // single-session rows: the matched-cost budget
   error?: string; // set when this (arm, goal, repeat) crashed; the row then counts as a failed check
   singleSession?: boolean; // written only when true: the row has no judge, so calibration skips it
+  verificationModes?: string[]; // factory rows: M4 modes the run was graded under ([] = none). The run file lives in a throwaway store, so stats reads them here
+  checkOutput?: string; // written only when the hidden check failed: the last lines of its output, or why it could not run
   costUsd: number;
   wallMs: number;
 }
@@ -128,6 +130,9 @@ export function runCheck(suite: string, goal: BenchGoal, cwd: string): { pass: b
   const r = spawnSync(cmd, [script], { cwd, encoding: 'utf8', timeout: 120_000 });
   return { pass: r.status === 0, tail: `${r.stdout ?? ''}${r.stderr ?? ''}`.trim().split('\n').slice(-8).join('\n') };
 }
+
+// Row field for a failed check only, so passing rows stay small.
+const checkOutput = (c: { pass: boolean; tail: string }): { checkOutput?: string } => (c.pass ? {} : { checkOutput: c.tail });
 
 export function applyOracle(suite: string, goal: BenchGoal, cwd: string): void {
   const oracle = scriptPath(suite, goal.oracle);
@@ -288,16 +293,16 @@ export async function runBench(o: BenchOptions): Promise<{ benchId: string; dir:
                 timeoutMs: 30 * 60_000,
                 meta: { attempt: 1 },
               });
-              const checkPass = runCheck(suite, goal, repo).pass;
-              row = { arm: arm.name, goal: goal.id, taskType: goal.taskType, humanMinutes: goal.humanMinutes, repeat, runId: `single-${goal.id}-${repeat}`, harness: harness.version, checkPass, judgeSatisfaction: null, taskVerdicts: {}, singleSession: true, budgetUsd, costUsd: res.costUsd, wallMs: Date.now() - t0 };
+              const check = runCheck(suite, goal, repo);
+              row = { arm: arm.name, goal: goal.id, taskType: goal.taskType, humanMinutes: goal.humanMinutes, repeat, runId: `single-${goal.id}-${repeat}`, harness: harness.version, checkPass: check.pass, judgeSatisfaction: null, taskVerdicts: {}, singleSession: true, budgetUsd, ...checkOutput(check), costUsd: res.costUsd, wallMs: Date.now() - t0 };
             } else {
               const run = await runGoal({ store, runner: o.runner, goal: goal.goal, harnessVersion: version, baseRef: base, kind: 'eval', ablate: arm.ablate });
-              let checkPass = false;
+              let check = { pass: false, tail: 'no integration branch: the run merged no tasks, so the hidden check did not run' };
               if (run.integrationBranch) {
                 const co = mkdtempSync(join(tmpdir(), 'orchestra-bench-check-'));
                 try {
                   git(repo, 'worktree', 'add', '-q', '--detach', co, run.integrationBranch);
-                  checkPass = runCheck(suite, goal, co).pass;
+                  check = runCheck(suite, goal, co);
                 } finally {
                   try { git(repo, 'worktree', 'remove', '--force', co); } catch { rmSync(co, { recursive: true, force: true }); }
                 }
@@ -310,10 +315,12 @@ export async function runBench(o: BenchOptions): Promise<{ benchId: string; dir:
                 repeat,
                 runId: run.id,
                 harness: run.harness,
-                checkPass,
+                checkPass: check.pass,
                 judgeSatisfaction: run.satisfaction ?? null,
                 taskVerdicts: Object.fromEntries(run.tasks.map((t) => [t.id, t.verdict ? t.verdict.pass : null])),
                 ...(run.tasks.some((t) => t.contrast?.a.verdict && t.contrast.b.verdict && t.contrast.a.verdict.pass !== t.contrast.b.verdict.pass) ? { split: true } : {}),
+                verificationModes: run.verificationModes ?? [],
+                ...checkOutput(check),
                 costUsd: run.costUsd,
                 wallMs: Date.now() - t0,
               };
