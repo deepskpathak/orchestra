@@ -307,7 +307,9 @@ test('materialiseFixture removes its temp dir when git setup fails', () => {
     assert.throws(() => materialiseFixture(suite, 'f'));
   } finally {
     process.env.PATH = oldPath;
-    process.env.TMPDIR = oldTmp;
+    // Assigning undefined would store the string 'undefined' and poison later tests where TMPDIR is unset (CI).
+    if (oldTmp === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = oldTmp;
     rmSync(suite, { recursive: true, force: true });
   }
   assert.deepEqual(readdirSync(priv), []);
