@@ -7,6 +7,5 @@
   { "name": "h2-none", "optional": true, "config": { "runBudgetUsd": 1.5 } },
   { "name": "h2-agentic", "optional": true, "config": { "runBudgetUsd": 1.5, "verification": { "agenticJudge": { "enabled": true } } } },
   { "name": "h2r-none", "optional": true, "config": { "runBudgetUsd": 1.5, "testCommand": "node --test" } },
-  { "name": "h2r-agentic", "optional": true, "config": { "runBudgetUsd": 1.5, "testCommand": "node --test", "verification": { "agenticJudge": { "enabled": true } } } },
-  { "name": "budget-cap", "optional": true, "config": { "runBudgetUsd": 0.1 } }
+  { "name": "h2r-agentic", "optional": true, "config": { "runBudgetUsd": 1.5, "testCommand": "node --test", "verification": { "agenticJudge": { "enabled": true } } } }
 ]
