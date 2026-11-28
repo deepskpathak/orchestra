@@ -66,7 +66,7 @@ orchestra bench --verify-oracles         # every oracle must pass its own check;
 
 ## Output
 
-`.orchestra/bench/<benchId>/results.jsonl` has one row per repeat: `arm, goal, taskType, humanMinutes, repeat, runId, harness, checkPass, judgeSatisfaction, taskVerdicts, costUsd, wallMs`. `summary.json` has per arm `passAt1`, `passHat3` (null until each goal has 3 repeats), `meanCostUsd` and `meanWallMs`, computed with `src/stats.ts`. The same table is printed to the terminal.
+`.orchestra/bench/<benchId>/results.jsonl` has one row per repeat: `arm, goal, taskType, humanMinutes, repeat, runId, harness, checkPass, judgeSatisfaction, taskVerdicts, costUsd, wallMs`. Factory rows also carry `verificationModes`, the M4 modes the run was graded under (`[]` means none). The run file lives in the throwaway bench repo, so `orchestra stats` reads the modes from the row. A row whose hidden check failed carries `checkOutput`: the last 8 lines of the check's output, or the reason the check did not run (no integration branch). `summary.json` has per arm `passAt1`, `passHat3` (null until each goal has 3 repeats), `meanCostUsd` and `meanWallMs`, computed with `src/stats.ts`. The same table is printed to the terminal.
 
 Use `ORCHESTRA_RUNNER=fake` to exercise the engine without spending tokens; the fake runner will mostly fail the hidden checks, which is expected.
 

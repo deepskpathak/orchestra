@@ -140,6 +140,15 @@ test('calibrateByMode splits judge agreement by the verification modes of each r
   assert.match(renderCalibrationByMode([]), /no bench results/);
 });
 
+test('calibrateByMode prefers the modes recorded on the bench row over the run lookup', async () => {
+  const { calibrateByMode } = await import('../src/calibration.ts');
+  const row = (runId: string, verificationModes?: string[]) => ({ arm: 'a', goal: 'g', taskType: 't', humanMinutes: 1, repeat: 1, runId, harness: 'v1', checkPass: true, judgeSatisfaction: 0.9, taskVerdicts: {}, costUsd: 0, wallMs: 0, ...(verificationModes ? { verificationModes } : {}) });
+  // Bench runs live in throwaway stores, so the user's store has no run file for them (the lookup map is empty).
+  const cal = calibrateByMode([row('b1', ['agentic']), row('b2', []), row('r3')], 0.7, new Map([['r3', ['panel']], ['b2', ['panel']]]));
+  const by = Object.fromEntries(cal.map((c) => [c.mode, c.n]));
+  assert.deepEqual(by, { agentic: 1, none: 1, panel: 1 }); // b2's empty list means none, not the stale lookup
+});
+
 test('store calibration grades the judge with the harness pass threshold, not an unset project key', async () => {
   const { storeCalibration, storeCalibrationByMode } = await import('../src/calibration.ts');
   const store = tempRepo();
