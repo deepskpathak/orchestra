@@ -4,6 +4,7 @@
 // Boundary model: the OS sandbox is the real control. src/guard.ts is a deny-list hook and stays as a
 // backstop (defence in depth), because a python/node/git-remote command can bypass its regexes.
 
+import { randomBytes } from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join, sep } from 'node:path';
@@ -239,6 +240,7 @@ export function probeSessionCost(stdout: string): number {
 const OPEN = 'ORCHESTRA_PROBE_OPEN';
 const BLOCKED = 'ORCHESTRA_PROBE_BLOCKED';
 const ARGV_MISMATCH = 'ORCHESTRA_PROBE_ARGV_MISMATCH';
+const VISIBLE = 'ORCHESTRA_PROBE_VISIBLE';
 // Markers are split inside the script so a model that echoes the command cannot produce a false match.
 const marker = (m: string): string => `${JSON.stringify(m.slice(0, 16))}+${JSON.stringify(m.slice(16))}`;
 // Not on the allow-list unless the user listed it, in which case the fallback host is used.
@@ -248,6 +250,14 @@ const PROBE_HOSTS = ['example.com', 'example.org'];
 // expected to be blocked; if it connects, the sandbox is not confining the worker and the run aborts.
 function networkScript(host: string): string {
   return `fetch(${JSON.stringify(`https://${host}/`)},{signal:AbortSignal.timeout(4000)}).then(()=>console.log(${marker(OPEN)}),()=>console.log(${marker(BLOCKED)}))`;
+}
+
+// Positive control for docker: the worktree must be visible inside the container, holding what the host wrote.
+// Every other probe passes when access is blocked, so a mount that came up empty would pass them all: docker
+// creates a missing bind-mount source as an empty directory, which is what colima and Docker Desktop do for
+// a host path outside the directories they share with their VM (colima shares only $HOME by default).
+function visibleScript(file: string, nonce: string): string {
+  return `try{const s=require('fs').readFileSync(${JSON.stringify(file)},'utf8');console.log(s===${JSON.stringify(nonce)}?${marker(VISIBLE)}:${marker(BLOCKED)})}catch(e){console.log(${marker(BLOCKED)})}`;
 }
 
 function readScript(file: string): string {
@@ -406,11 +416,41 @@ export function preflightSandbox(policy: SandboxPolicy, backend: 'srt' | 'claude
       if (control.includes(OPEN)) probe('network', netScript);
       else warnings.push(`network probe inconclusive: the unsandboxed control to ${host} also failed (no connectivity from this host), so the sandbox's network block is NOT verified`);
     }
+    if (backend === 'docker') {
+      // It runs through the same wrapper and argv check as the other probes, so it counts toward probesRun: with
+      // docker the argv shape is now always exercised, even when the network and read probes are both skipped.
+      const nonce = randomBytes(8).toString('hex');
+      const file = join(opts.cwd, `.orchestra-preflight-${nonce}`);
+      let wrote = false;
+      try {
+        writeFileSync(file, nonce);
+        wrote = true;
+      } catch (e) {
+        failures.push(`worktree probe: could not write a marker into the worktree ${opts.cwd} (${(e as Error).message.split('\n')[0]})`);
+      }
+      if (wrote) try {
+        const { command, args } = wrap(visibleScript(file, nonce));
+        probesRun++;
+        let r: ProbeExecResult | undefined;
+        try {
+          r = exec(command, args, { cwd: opts.cwd, timeoutMs });
+        } catch (e) {
+          failures.push(`worktree probe: sandbox wrapper could not start (${(e as Error).message})`);
+        }
+        if (r && r.error) failures.push(`worktree probe: sandbox wrapper could not start (${r.error})`);
+        else if (r && `${r.stdout}\n${r.stderr}`.includes(ARGV_MISMATCH)) failures.push('worktree probe: worker argv was not passed through the sandbox wrapper intact (the docker wrapper or the image entrypoint altered or dropped arguments)');
+        else if (r && !`${r.stdout}\n${r.stderr}`.includes(VISIBLE)) {
+          failures.push(`worktree probe: the worktree ${opts.cwd} is not visible inside the container, so workers would see an empty directory. With colima or Docker Desktop, share this path with the VM (colima shares only $HOME by default; see docs/isolation.md)`);
+        }
+      } finally {
+        rmSync(file, { force: true });
+      }
+    }
     if (canary) probe('read', readScript(canary));
     else warnings.push('read probe skipped: no host directory outside the docker mounts is writable; docker read isolation rests on not mounting secrets');
-    // The argv check rides on the probes, so with both skipped (docker on a user network or with no
-    // connectivity, and no unmounted canary dir) nothing exercised the worker argv shape. Say so rather
-    // than let a clean pre-flight imply it was checked.
+    // The argv check rides on the probes. srt and claude always run the read probe and docker always runs the
+    // worktree probe, so this only fires when a probe could not be set up. Kept so a clean pre-flight never
+    // implies a check that did not run.
     if (probesRun === 0) {
       warnings.push(`argv pass-through was NOT verified: both probes were skipped, so pre-flight never ran a command with worker-like arguments through the ${backend} wrapper`);
     }

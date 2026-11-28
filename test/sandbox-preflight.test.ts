@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -24,8 +24,11 @@ function dockerEnv() {
   const base = join(root, 'canary-base');
   mkdirSync(mountedTmp);
   mkdirSync(base);
-  const pol = buildSandboxPolicy({ worktree: '/wt', tmpDir: mountedTmp, home: '/home/u', hiddenScenarioDir: '/r/.orchestra/hidden', gitCommonDir: '/r/.git' });
-  return { root, mountedTmp, base, pol, o: { cwd: '/wt', canaryBases: [base] }, done: () => rmSync(root, { recursive: true, force: true }) };
+  // A real worktree dir: the docker worktree probe writes a marker into it.
+  const wt = join(root, 'wt');
+  mkdirSync(wt);
+  const pol = buildSandboxPolicy({ worktree: wt, tmpDir: mountedTmp, home: '/home/u', hiddenScenarioDir: '/r/.orchestra/hidden', gitCommonDir: '/r/.git' });
+  return { root, mountedTmp, base, wt, pol, o: { cwd: wt, canaryBases: [base] }, done: () => rmSync(root, { recursive: true, force: true }) };
 }
 
 const result = (stdout: string, extra: object = {}) => ({ status: 0, stdout, stderr: '', ...extra });
@@ -33,9 +36,15 @@ const BLOCKED = 'ORCHESTRA_PROBE_BLOCKED\n';
 const OPEN = 'ORCHESTRA_PROBE_OPEN\n';
 // Decides by probe kind: the network script calls fetch, the read script calls readFileSync.
 // The unsandboxed positive control (command "node") always reaches the network here.
+const VISIBLE = 'ORCHESTRA_PROBE_VISIBLE\n';
+// The docker worktree probe reads a nonce file the host wrote into the worktree; these fakes report it visible.
+const isVisibleProbe = (script: string) => script.includes("'utf8');console.log(s===");
+// Wraps a test exec so the docker worktree probe sees its marker; everything else goes to the wrapped exec.
+const withVisible = (exec: ProbeExec): ProbeExec => (c, args, o) => (isVisibleProbe(args.join(' ')) ? result(VISIBLE) : exec(c, args, o));
 const fake = (net: string, read: string): ProbeExec => (c, args) => {
   if (c === 'node') return result(OPEN);
   const script = args.join(' ');
+  if (isVisibleProbe(script)) return result(VISIBLE);
   return result(script.includes('fetch(') ? net : read);
 };
 
@@ -148,7 +157,7 @@ test('docker network none warns that the model API is unreachable; a chosen netw
   const d = dockerEnv();
   try {
     const calls: string[] = [];
-    const exec: ProbeExec = (c, a) => (calls.push(c + ' ' + a.join(' ')), result(c === 'node' ? OPEN : BLOCKED));
+    const exec: ProbeExec = withVisible((c, a) => (calls.push(c + ' ' + a.join(' ')), result(c === 'node' ? OPEN : BLOCKED)));
     const none = preflightSandbox(d.pol, 'docker', exec, d.o);
     assert.equal(none.ok, true);
     assert.ok(none.warnings.some((w) => /network is none.*api\.anthropic\.com/.test(w)));
@@ -196,7 +205,7 @@ test('docker canary candidates: an empty list takes the no-usable-canary path; a
   try {
     for (const bases of [[], [d.mountedTmp]]) {
       const calls: string[] = [];
-      const r = preflightSandbox(d.pol, 'docker', (c, args) => (calls.push(args.join(' ')), result(c === 'node' ? OPEN : BLOCKED)), { ...d.o, canaryBases: bases });
+      const r = preflightSandbox(d.pol, 'docker', withVisible((c, args) => (calls.push(args.join(' ')), result(c === 'node' ? OPEN : BLOCKED))), { ...d.o, canaryBases: bases });
       assert.equal(r.ok, true);
       assert.equal(calls.length, 2, 'control + docker network probe, no read probe');
       assert.ok(r.warnings.some((w) => /read probe skipped/.test(w)));
@@ -209,9 +218,9 @@ test('docker canary candidates: an empty list takes the no-usable-canary path; a
 test('docker read probe is skipped with a warning when no unmounted dir is usable', () => {
   const mounted = buildSandboxPolicy({ worktree: '/wt', tmpDir: '/var/tmp', home: '/home/u', hiddenScenarioDir: '/h', gitCommonDir: homedir() });
   const calls: string[] = [];
-  const r = preflightSandbox(mounted, 'docker', (_c, args) => (calls.push(args.join(' ')), result(_c === 'node' ? OPEN : BLOCKED)), opts);
+  const r = preflightSandbox(mounted, 'docker', withVisible((_c, args) => (calls.push(args.join(' ')), result(_c === 'node' ? OPEN : BLOCKED))), opts);
   assert.equal(r.ok, true);
-  assert.equal(calls.length, 2, 'control + docker network probe, no read probe');
+  assert.equal(calls.length, 2, 'control + docker network probe, no read probe (the worktree probe is answered by withVisible)');
   assert.ok(r.warnings.some((w) => /read probe skipped/.test(w)));
 });
 
@@ -375,25 +384,39 @@ test('#74 regression: a srtArgs without its -- fails pre-flight against a comman
   assert.ok(regressed.failures.every((f) => /inconclusive/.test(f)), regressed.failures.join('; '));
 });
 
-test('both probes skipped: warns that argv pass-through was not verified', () => {
+test('docker with both blocking probes skipped still checks argv through the worktree probe', () => {
   // /var/tmp and the home dir are both mounted here, so docker has nowhere to put the read canary.
   const mounted = buildSandboxPolicy({ worktree: '/wt', tmpDir: '/var/tmp', home: '/home/u', hiddenScenarioDir: '/h', gitCommonDir: homedir() });
   const calls: string[] = [];
-  const exec: ProbeExec = (c) => (calls.push(c), result(BLOCKED));
+  const exec: ProbeExec = withVisible((c) => (calls.push(c), result(BLOCKED)));
   // A user network skips the network probe; no connectivity (control BLOCKED) skips it under none.
   for (const docker of [{ network: 'orch-egress' }, {}]) {
     calls.length = 0;
     const r = preflightSandbox(mounted, 'docker', exec, { ...opts, docker });
-    assert.equal(r.ok, true);
-    assert.ok(!calls.includes('docker'), 'no probe ran through the wrapper');
-    assert.ok(r.warnings.some((w) => /argv pass-through was NOT verified/.test(w)), r.warnings.join('; '));
+    assert.equal(r.ok, true, r.failures.join('; '));
+    assert.ok(!r.warnings.some((w) => /argv pass-through was NOT verified/.test(w)), r.warnings.join('; '));
   }
-  // Any probe that ran checked argv, so no such warning.
-  const ran = preflightSandbox(policy, 'docker', fake(BLOCKED, BLOCKED), opts);
-  assert.ok(!ran.warnings.some((w) => /argv pass-through/.test(w)));
-  const srt = preflightSandbox(policy, 'srt', exec, opts);
-  assert.ok(!srt.warnings.some((w) => /argv pass-through/.test(w)), 'srt always runs the read probe');
 });
+
+test('docker worktree probe: an empty mount fails pre-flight, and an altered argv is reported as such', () => {
+  const d = dockerEnv();
+  try {
+    // Every blocking probe passes, as it would against an empty bind mount, but the marker is not visible.
+    const empty = preflightSandbox(d.pol, 'docker', (c) => (c === 'node' ? result(OPEN) : result(BLOCKED)), d.o);
+    assert.equal(empty.ok, false);
+    assert.ok(empty.failures.some((f) => /worktree probe: the worktree .* is not visible inside the container/.test(f) && /colima/.test(f)), empty.failures.join('; '));
+    const argv = preflightSandbox(d.pol, 'docker', (c, args) => (c === 'node' ? result(OPEN) : isVisibleProbe(args.join(' ')) ? result('ORCHESTRA_PROBE_ARGV_MISMATCH\n') : result(BLOCKED)), d.o);
+    assert.ok(argv.failures.some((f) => /worktree probe: worker argv was not passed through/.test(f)), argv.failures.join('; '));
+    // The marker is removed whatever the outcome.
+    assert.deepEqual(readdirSync(d.wt).filter((n) => n.startsWith('.orchestra-preflight-')), []);
+    // A worktree the host cannot write to fails closed.
+    const unwritable = preflightSandbox(d.pol, 'docker', fake(BLOCKED, BLOCKED), { ...d.o, cwd: join(d.root, 'missing') });
+    assert.ok(unwritable.failures.some((f) => /could not write a marker/.test(f)), unwritable.failures.join('; '));
+  } finally {
+    d.done();
+  }
+});
+
 
 function countingRunner(inner: Runner) {
   const calls: string[] = [];

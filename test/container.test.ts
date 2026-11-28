@@ -93,7 +93,7 @@ test('e2e: fixture goal completes through the conductor with a docker spawn shim
       goal: 'Add a thing',
       sandbox: { backend: 'docker', image: 'img:1', gvisor: true },
       // Pre-flight probes get a fake exec so no real docker is needed.
-      preflightExec: () => ({ status: 0, stdout: 'ORCHESTRA_PROBE_BLOCKED\n', stderr: '' }),
+      preflightExec: (_c, args) => ({ status: 0, stdout: args.join(' ').includes("'utf8');console.log(s===") ? 'ORCHESTRA_PROBE_VISIBLE\n' : 'ORCHESTRA_PROBE_BLOCKED\n', stderr: '' }), // the worktree probe must see its marker
       runner: (req: AgentRequest) => {
         if (req.sandbox) shim.push(buildCommand(req));
         return inner(req);
