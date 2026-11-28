@@ -4,6 +4,7 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { BenchRow } from './bench.ts';
+import { loadHarness } from './harness.ts';
 import { cohensKappa } from './stats.ts';
 import type { Store } from './store.ts';
 
@@ -174,6 +175,10 @@ export function parseGrades(text: string): Map<string, boolean> {
 
 const calDir = (store: Store): string => store.path('bench', 'calibration');
 
+// The judge pass threshold is a harness setting (HarnessConfig), not a project one; the project config has no
+// such key, and reading it there gave undefined, so every judge verdict counted as a fail. Uses the incumbent's.
+const passThreshold = (store: Store): number => loadHarness(store).config.passThreshold;
+
 export function readBenchRows(store: Store): CalRow[] {
   const root = store.path('bench');
   if (!existsSync(root)) return [];
@@ -192,7 +197,7 @@ export function readGrades(store: Store): Map<string, boolean> {
 }
 
 export function writeSample(store: Store, size: number, seed = 1, margin = DEFAULT_NEAR_MARGIN): { file: string; items: SampleItem[] } {
-  const items = stratifiedSample(readBenchRows(store), store.config().passThreshold, size, seed, margin);
+  const items = stratifiedSample(readBenchRows(store), passThreshold(store), size, seed, margin);
   mkdirSync(calDir(store), { recursive: true });
   const file = join(calDir(store), 'sample.jsonl');
   writeFileSync(file, items.map((i) => JSON.stringify(i)).join('\n') + (items.length ? '\n' : ''));
@@ -209,7 +214,7 @@ export function importGrades(store: Store, file: string): { imported: number; to
 }
 
 export function storeCalibration(store: Store): HarnessCalibration[] {
-  return calibrate(readBenchRows(store), store.config().passThreshold, readGrades(store));
+  return calibrate(readBenchRows(store), passThreshold(store), readGrades(store));
 }
 
 // Reason string when the incumbent's measured agreement is below the configured floor, else null.
@@ -227,7 +232,7 @@ export function storeCalibrationByMode(store: Store): ModeCalibration[] {
     const run = store.loadRun(id);
     if (run) modes.set(id, run.verificationModes ?? []);
   }
-  return calibrateByMode(readBenchRows(store), store.config().passThreshold, modes);
+  return calibrateByMode(readBenchRows(store), passThreshold(store), modes);
 }
 
 export function renderCalibrationByMode(cal: ModeCalibration[]): string {
