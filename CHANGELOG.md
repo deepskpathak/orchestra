@@ -21,6 +21,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- With concurrent sessions, the `runBudgetUsd` ceiling could fail a task with "run budget $N exhausted" while money was still left: a sibling worker had reserved the whole remainder, and the refused session was not retried. A session blocked only by other sessions' reservations now waits for them to settle. It is refused only when spend alone has reached the ceiling. Found in the H2 hard-goals pilot (bench `b20261128035158`).
 - Judge calibration (`orchestra stats`, `orchestra bench calibrate --sample` and the `evolve.minJudgeAgreement` gate) read `passThreshold` from the project config, which has no such key. Every judge verdict counted as a fail, so agreement equalled the hidden-check failure rate. It now uses the incumbent harness's `passThreshold`.
 
 ## [0.8.0] - 2026-10-27

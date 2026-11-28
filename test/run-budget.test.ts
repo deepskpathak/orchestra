@@ -99,3 +99,23 @@ test('isBudgetRefusal only matches a session that never started', () => {
   assert.equal(isBudgetRefusal({ ...refused, costUsd: 0.2 }), false, 'a session that spent money ran');
   assert.equal(isBudgetRefusal({ ...refused, error: 'max budget' }), false);
 });
+
+test('run budget: a session blocked only by a sibling reservation waits for it instead of failing its task', async () => {
+  // Both workers are dispatched in one scheduler pass. The first reserves the whole $3 left, so the second
+  // must wait for it to settle (pilot b20261128035158 failed T2 here with "run budget $3 exhausted").
+  let release!: () => void;
+  const hold = new Promise<void>((r) => { release = r; });
+  const store = tempRepo({ runBudgetUsd: 3.01, concurrency: 2 });
+  const { runner, reqs } = priced([task('T1'), task('T2')], { planner: 0.01, worker: 0.2, judge: 0.1, librarian: 0.1 }, { hold });
+  const done = runGoal({ store, runner, goal: 'g' });
+  for (let i = 0; i < 50 && !reqs.some((r) => r.role === 'worker'); i++) await new Promise((r) => setTimeout(r, 10));
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(reqs.filter((r) => r.role === 'worker').length, 1, 'the second worker waits rather than starting with no budget');
+  release();
+  const run = await done;
+  assert.deepEqual(run.tasks.map((t) => t.status), ['merged', 'merged']);
+  const workers = reqs.filter((r) => r.role === 'worker');
+  assert.equal(workers[0].budgetUsd, 3);
+  assert.ok(workers[1].budgetUsd >= 2.5 && workers[1].budgetUsd <= 2.8, `second worker cap ${workers[1].budgetUsd} is what was left once the first settled`);
+  assert.equal(store.events(run.id).some((e) => /not started/.test(e.msg)), false);
+});
