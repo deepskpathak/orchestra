@@ -422,3 +422,30 @@ test('H4 arms differ only in the planner cascade and cache discipline', () => {
   assert.deepEqual(cost.cache!.discipline, { enabled: true, warmFirst: true });
   assert.deepEqual({ ...cost, planner: base.planner, cache: base.cache }, base);
 });
+
+test('bench interleaves factory arms per goal and repeat, rotating the order, and records token totals per row', async () => {
+  const store = tempRepo();
+  const arms = [{ name: 'a' }, { name: 'b' }, SINGLE_SESSION_ARM];
+  const { rows } = await runBench({ store, runner: fakeRunner(), goals: ['calc-sub', 'calc-mul'], repeats: 2, arms, benchId: 'bi' });
+  assert.deepEqual(
+    rows.map((r) => `${r.goal}#${r.repeat}:${r.arm}`),
+    [
+      // Goals come in suite order, so calc-mul runs before calc-sub.
+      'calc-mul#1:a', 'calc-mul#1:b', 'calc-mul#2:b', 'calc-mul#2:a',
+      'calc-sub#1:a', 'calc-sub#1:b', 'calc-sub#2:b', 'calc-sub#2:a',
+      'calc-mul#1:single-session', 'calc-mul#2:single-session', 'calc-sub#1:single-session', 'calc-sub#2:single-session',
+    ],
+    'arms alternate which goes first; single-session baselines still run last',
+  );
+  for (const r of rows.filter((x) => !x.singleSession)) {
+    assert.ok(r.tokens, `${r.arm} ${r.goal} has tokens`);
+    for (const k of ['input', 'output', 'cacheRead', 'cacheWrite'] as const) assert.equal(typeof r.tokens![k], 'number');
+    assert.ok(r.tokens!.input + r.tokens!.output > 0, 'the fake runner reports usage, so the totals are not all zero');
+  }
+});
+
+test('runTokens sums one run and skips the others', async () => {
+  const { runTokens } = await import('../src/bench.ts');
+  const t = runTokens([{ run: 'r1', inputTokens: 5, outputTokens: 2, cacheReadTokens: 100, cacheWriteTokens: 7 }, { run: 'r2', inputTokens: 999 }, { run: 'r1', inputTokens: 1 }], 'r1');
+  assert.deepEqual(t, { input: 6, output: 2, cacheRead: 100, cacheWrite: 7 });
+});
