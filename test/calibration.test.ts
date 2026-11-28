@@ -139,3 +139,15 @@ test('calibrateByMode splits judge agreement by the verification modes of each r
   assert.match(renderCalibrationByMode(cal), /agentic\s+1/);
   assert.match(renderCalibrationByMode([]), /no bench results/);
 });
+
+test('store calibration grades the judge with the harness pass threshold, not an unset project key', async () => {
+  const { storeCalibration, storeCalibrationByMode } = await import('../src/calibration.ts');
+  const store = tempRepo();
+  mkdirSync(store.path('bench', 'b1'), { recursive: true });
+  // The judge passed (0.9 is above the v1 threshold, 0.75) and so did every hidden check: full agreement.
+  const rows: BenchRow[] = mk(4, () => ({ judgeSatisfaction: 0.9, checkPass: true }));
+  writeFileSync(store.path('bench', 'b1', 'results.jsonl'), rows.map((r) => JSON.stringify(r)).join('\n') + '\n');
+  assert.equal(storeCalibration(store).find((c) => c.harness === 'v1')?.agreement, 1);
+  assert.equal(storeCalibrationByMode(store).find((c) => c.mode === 'none')?.agreement, 1);
+  assert.ok(writeSample(store, 4, 1).items.every((i) => i.judgePass), 'sampled verdicts carry the judge pass');
+});

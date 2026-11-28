@@ -10,6 +10,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Project website in `site/`: a single static page (no build step, no dependencies) with an animated, scrubbable explainer film, feature overview, quick start, docs tabs and how-tos. `.github/workflows/pages.yml` deploys it to GitHub Pages on pushes to `main` that touch `site/`.
 
+### Fixed
+
+- Judge calibration (`orchestra stats`, `orchestra bench calibrate --sample` and the `evolve.minJudgeAgreement` gate) read `passThreshold` from the project config, which has no such key. Every judge verdict counted as a fail, so agreement equalled the hidden-check failure rate. It now uses the incumbent harness's `passThreshold`.
+
 ## [0.8.0] - 2026-10-27
 
 ### Added
