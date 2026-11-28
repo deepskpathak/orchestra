@@ -79,3 +79,16 @@ On its face, 1 of 4 failed the check, which is a go. **The result is not valid**
 ## Pilot 2 plan (approved 2026-11-28)
 
 The user approved raising `runBudgetUsd` to $4 for `h2h-none` and `h2h-agentic` (and for the H4 arms). Pilot 2 is the same 4 runs on `main` with #128. The gate is unchanged. At about $3 per run, pilot 2 is expected to cost $12, with a $16 hard cap. If the gate says go, the full 24-run design is expected to cost about $72, with a $96 hard cap. The full run still needs its own approval.
+
+## Pilot 2 (2026-11-28): no go
+
+Bench `b20261128044844`, `h2h-none`, the four hard goals, 1 repeat, `runBudgetUsd` 4, on `main` with #128. Spend was $7.12.
+
+| Goal | Hidden check | Judge satisfaction | Cost |
+|---|---|---|---|
+| `args-refactor-preserve` | pass | 0.97 | $2.65 |
+| `calc-expr` | pass | 0.95 | $1.73 |
+| `rec-csv-strict` | pass | 0.98 | $1.00 |
+| `text-wrap-unicode` | pass | 0.97 | $1.74 |
+
+0 of 4 failed the hidden check, so by the gate this is **no go**. With enough budget, workers solved all four hard goals. Under H4 (below, and `h4.md`), the same four goals were run 24 more times across two arms, and only the `h4-cost` arm failed the check on any of them. `args-string-opt` and `args-usage` failed the check 4 times, 3 of them with the judge passing the run (merged but wrong). So a third pilot should be built from those two goals plus the four hard ones, not from the hard ones alone. That needs a new pilot section and approval before any spend.

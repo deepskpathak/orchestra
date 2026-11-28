@@ -79,6 +79,14 @@ Both used throwaway copies of the `calc` fixture, the real tools, and the code o
 
 The srt worker could not run `git commit` itself (its sandbox makes `.git/hooks` and `.git/config` read-only), and the harness committed for it, as designed. The run stayed under the $3 ceiling, so the ceiling's cut-off path did not trigger. The fake-runner tests in #124 cover that path.
 
+## H2 pilots and H4 (2026-11-28)
+
+- **H2 pilot 1** (`b20261128035158`, $10.86): invalid. The $3 ceiling decided both failures, and one of them was a bug in #124, fixed in #128.
+- **H2 pilot 2** (`b20261128044844`, $7.12, `runBudgetUsd` 4): 4 of 4 passed the hidden check, so the gate says no go. See research/h2-hard.md.
+- **H4** (`b20261128045815`, $32.60): not supported. Cost per accepted run was 7.2% lower with the cascade and cache discipline (bar: 15%), and check pass was 21 of 24 against 23 of 24 (bar: at most 1 fewer). See research/h4.md.
+- **Prompt caching confounds every cost number in the bench.** Back-to-back runs read a warm 1-hour cache and cost about a quarter of a cold run. Cost comparisons need interleaved arms and cache tokens per row.
+- **An accidental bench** (`b20261128043521`, $3.71) ran when `orchestra bench --help` was ignored. Fixed in #131.
+
 ## H1 and H2, first look (2026-10-27)
 
 **H1 (integrity) is not measurable from the existing record.** Every evolution cycle so far ran under the globally installed `orchestra` command, which links to an older clone at 0.6.1 that has no frozen scorer. The archived eval score of every case equals the candidate's own judge satisfaction to three decimals. No variant was promoted (v3 and v4 were rejected, v2 was never scored), so there is no promoted gain that could disappear under the frozen scorer. Re-scoring is not possible either, because eval-run branches are deleted after scoring, so the diffs are gone. H1 needs new evolution cycles run from this repository's code. The global install and the plugin were pointed at this checkout on 2026-10-27.
@@ -129,10 +137,10 @@ Done on 2026-11-28: the `runBudgetUsd` ceiling (#124), hard H2 goals and kept st
 
 Recommendations, in priority order:
 
-1. **Run the H2 hard-goals pilot** (research/h2-hard.md): 4 runs, about $10. Go to the full 24-run design (about $60) only if 1 to 3 of the 4 runs fail the hidden check.
-2. **Run H4** (research/h3-h8-plan.md): 48 runs, about $106.
-3. **Run one docker worker.** Export `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`) and run with `--sandbox docker --sandbox-network bridge`. With a non-`none` network the network probe is skipped by design.
-4. **Add the bench row fields that H5 to H8 need** (merge wait, worker tokens, footprint recall), the composite goals for H5 and a larger fixture for H6 to H8. This is code only, with no spend.
-5. **H1 and H3:** check the archives again after the next promotion. Keep the replay diffs of promoted variants so they can be re-scored. Evolution cycles that run unattended need a login that does not expire (4 runs on 2026-11-21 failed with an expired login).
+1. **Record cache tokens in bench rows and interleave arms** (arm order per goal and repeat) before any further cost measurement. This is code only, with no spend.
+2. **H2 pilot 3** from `args-string-opt`, `args-usage` and the four hard goals: they produced 3 merged-but-wrong runs under H4. It needs a new pilot section and approval.
+3. **Run one docker worker.** Export `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`), `colima start`, then run with `--sandbox docker --sandbox-network bridge`.
+4. **Add the bench row fields that H5 to H8 need** (merge wait, worker tokens, footprint recall), the composite goals for H5 and a larger fixture for H6 to H8.
+5. **H1 and H3:** check the archives again after the next promotion.
 6. **Make the M6 batch-merge interleaving test deterministic** if it flakes in CI.
 7. **Choose between the W8 and W10 epics** and review #88.
