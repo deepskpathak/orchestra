@@ -1,6 +1,6 @@
 # Project status
 
-Last updated 2026-11-28.
+Last updated 2026-11-28 (afternoon).
 
 ## Where things stand
 
@@ -34,7 +34,7 @@ Each milestone went through its own branch, a code review with one fix commit pe
 
 The test suite runs against fakes and injected executors. Two real runs on 2026-10-27 (see below) exercised the Claude Code sandbox backend, the atlas, batch merge, the judge panel and budgets. The following are still unproven against the real tool:
 
-- **OS sandbox backends (M5) other than Claude Code's.** srt, docker and sandbox-exec have not run a real worker. srt and docker are not installed on the development machine, so the 2026-11-25 round could not run them. The srt settings shape and the Claude Code sandbox keys and `//` permission-rule syntax were checked against their docs on 2026-10-26 (#74), and that check fixed an srt argv bug that made every srt worker fail closed.
+- **Docker workers (M5).** On 2026-11-28 srt 0.0.83, the docker CLI 29.10.1 and colima 0.10.3 were installed, and an `orchestra-worker:latest` image was built (node 22, git, Claude Code 2.1.332; see docs/isolation.md). The srt and docker pre-flight probes passed against the real tools, and a real `--sandbox srt` run merged its task (below). No docker worker has run yet. The container passes credentials only as `ANTHROPIC_*` and `CLAUDE_*` env names, and this machine's Claude login lives in the macOS keychain, so a docker worker needs `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`) or `ANTHROPIC_API_KEY` in the environment, plus `--sandbox-network bridge` (the default `none` also blocks the model API). The srt settings shape and the Claude Code sandbox keys were checked against their docs on 2026-10-26 (#74).
 - **Budget caps (M6).** Reached for the first time on 2026-11-25 (run `r20261125-1553-rueo`, `runBudgetUsd` 0.1). The planner spent $0.88, so the only task failed with "run budget $0.1 exhausted" and no worker started, as documented. But the librarian still ran ($0.40), so the run spent $1.28 against a $0.10 cap. `runBudgetUsd` stops dispatch. It is not a spend ceiling. The budget line logging from #84 has still not been exercised, because no worker ran.
 - **universal-ctags and graphify inputs (W9.5).** Optional, detect-and-degrade.
 - **The research hypotheses H1 to H8.** M2 built the machinery (`orchestra bench`, paired statistics, ablations, judge calibration). H1 and H2 have a first look (below); H3 to H8 are unmeasured.
@@ -67,6 +67,18 @@ Both runs used a throwaway copy of the `calc` fixture and the real `claude` bina
 
 The #121 claude probe, a worker-shaped session that checks argv pass-through through the Bash tool, passed against the real Claude Code sandbox. Its two probe sessions are not counted in the run's cost.
 
+## Real runs (2026-11-28)
+
+Both used throwaway copies of the `calc` fixture, the real tools, and the code of #124 (the `runBudgetUsd` ceiling), with `runBudgetUsd` 3 and `testCommand` `node --test`.
+
+| Check | Result | Cost |
+|---|---|---|
+| srt pre-flight, standalone (`preflightSandbox`) | The positive control reached the probe host. Inside srt, the network probe and the read canary were both blocked, and the argv check passed. | $0 |
+| docker pre-flight, standalone (`--network=none`, colima) | Both probes were blocked inside the container and the argv check passed. One warning, as documented: with network `none` a claude worker cannot reach the model API. | $0 |
+| `r20261128-1043-lkgy`, `--sandbox srt` | Pre-flight passed. 1 of 1 tasks merged, satisfaction 1.00. Planner $0.88, worker $0.11, judge $0.89, librarian $0.41. | $2.28 |
+
+The srt worker could not run `git commit` itself (its sandbox makes `.git/hooks` and `.git/config` read-only), and the harness committed for it, as designed. The run stayed under the $3 ceiling, so the ceiling's cut-off path did not trigger. The fake-runner tests in #124 cover that path.
+
 ## H1 and H2, first look (2026-10-27)
 
 **H1 (integrity) is not measurable from the existing record.** Every evolution cycle so far ran under the globally installed `orchestra` command, which links to an older clone at 0.6.1 that has no frozen scorer. The archived eval score of every case equals the candidate's own judge satisfaction to three decimals. No variant was promoted (v3 and v4 were rejected, v2 was never scored), so there is no promoted gain that could disappear under the frozen scorer. Re-scoring is not possible either, because eval-run branches are deleted after scoring, so the diffs are gone. H1 needs new evolution cycles run from this repository's code. The global install and the plugin were pointed at this checkout on 2026-10-27.
@@ -97,8 +109,8 @@ B1 (agreement at least 0.10 higher) was met by one run. B2 (fewer merged-but-wro
 
 - Sequential testing (M3) widens the confidence interval with a Bonferroni-style factor: a normal-quantile ratio applied to a t-based interval. Not checked against a reference.
 - The mutation scanner (M4) is a heuristic, not a TypeScript parser. Ambiguous cases are skipped, and compile failures count as invalid mutants rather than killed.
-- `runBudgetUsd` stops new tasks once spend reaches it. The planner, judge, librarian and any session already in flight still run, so a run can spend well past it ($1.28 against $0.10 on 2026-11-25, and about $2.15 against $1.50 per bench run).
-- The claude backend pre-flight probe runs two short model sessions, capped at $0.50 and 4 turns each. Their cost is not recorded in the run's cost or the ledger.
+- `runBudgetUsd` is a ceiling since #124: each session's `--max-budget-usd` is cut to what is left of the run. Claude Code checks that cap between turns, so a run can end up to one turn past the ceiling. Before #124 it only stopped dispatch ($1.28 spent against $0.10 on 2026-11-25).
+- The claude backend pre-flight probe runs two short model sessions, capped at $0.50 and 4 turns each. Since #124 their cost is counted in the run's cost and in a `sandbox_preflight` ledger row.
 - `orchestra approve --by` (M6) is an advisory four-eyes check against a free-text name. It is not authenticated identity.
 - srt on Linux: `denyRead` globs such as `**/.env` are expanded to the files that exist when the worker starts, so a `.env` created mid-run is readable from a shell. macOS matches the globs as patterns.
 - srt wraps the worker argv into one `bash -c` string. On Linux one argument is capped at 128 KiB, so a very large prompt or system prompt would fail to spawn (E2BIG). The harness prompt files total about 22 KB today, but task text, lessons and repair notes add to that and have not been measured.
@@ -113,12 +125,14 @@ Done on 2026-10-27: real end-to-end runs with the Claude Code sandbox (above), a
 
 Done on 2026-11-25: bench row diagnostics (#120), pre-flight probes through the worker code path (#121), the calibration threshold fix (#122) (all three merged on 2026-11-28), the H2 rerun, the first real `--sandbox claude` run of the new probe, the first budget cap run, and the whitepaper and blog updated for 0.8.0.
 
+Done on 2026-11-28: the `runBudgetUsd` ceiling (#124), hard H2 goals and kept stores for failed bench runs (#125), srt and docker installed with their pre-flight probes passing for real, a real srt run, the H1 archive check, and the H3 to H8 plan (research/h3-h8-plan.md). #124 and #125 merged on 2026-11-28.
+
 Recommendations, in priority order:
 
-1. **Decide what `runBudgetUsd` should mean.** Today it only stops dispatch. Either make it a ceiling (skip the librarian and stop in-flight sessions once it is reached, and count the pre-flight probes), or rename and document it as a dispatch cap. Every cost estimate in this file was low because of it.
-2. **Make H2 measurable before spending on it again.** Both H2 runs had workers pass almost every hidden check, so merged-but-wrong never happened. Add goals where workers fail the hidden check part of the time (adversarial edge cases, under-specified goals, larger refactors), and keep the bench stores of failed tasks so a T2 failure can be read after the run. Budget about $2.20 per run.
-3. **Prove srt and docker.** Install srt and docker (both new tools on the machine, so they need approval), then make one small real run with each. sandbox-exec is used by srt on macOS rather than being a separate backend.
-4. **Gather H1 from new evolution cycles.** Unchanged: check the archive after a few normal goal runs.
-5. **Make the M6 batch-merge interleaving test deterministic** if it flakes in CI. Under bun, `eval replays interleave candidate and incumbent` also showed up as timing-sensitive.
-6. **Plan H3 to H8.** Preregister each with bars and a cost estimate that uses the real per-run cost.
+1. **Run the H2 hard-goals pilot** (research/h2-hard.md): 4 runs, about $10. Go to the full 24-run design (about $60) only if 1 to 3 of the 4 runs fail the hidden check.
+2. **Run H4** (research/h3-h8-plan.md): 48 runs, about $106.
+3. **Run one docker worker.** Export `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`) and run with `--sandbox docker --sandbox-network bridge`. With a non-`none` network the network probe is skipped by design.
+4. **Add the bench row fields that H5 to H8 need** (merge wait, worker tokens, footprint recall), the composite goals for H5 and a larger fixture for H6 to H8. This is code only, with no spend.
+5. **H1 and H3:** check the archives again after the next promotion. Keep the replay diffs of promoted variants so they can be re-scored. Evolution cycles that run unattended need a login that does not expire (4 runs on 2026-11-21 failed with an expired login).
+6. **Make the M6 batch-merge interleaving test deterministic** if it flakes in CI.
 7. **Choose between the W8 and W10 epics** and review #88.

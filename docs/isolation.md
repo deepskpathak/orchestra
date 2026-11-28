@@ -22,6 +22,16 @@
 | `--sandbox-network <net>` | Docker network for workers. Default `none`. Any docker network name or mode (for example a user-defined network whose only route is an egress proxy to the model API). |
 | `--gvisor` | Adds `--runtime=runsc` (gVisor must be installed and registered with docker). |
 
+An image that has run the docker pre-flight (2026-11-28, colima on macOS). Pin the Claude Code version to the one you run on the host:
+
+```dockerfile
+FROM node:22-bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates && rm -rf /var/lib/apt/lists/* \
+ && npm install -g @anthropic-ai/claude-code@2.1.332 && npm cache clean --force
+```
+
+Build it with `docker build -t orchestra-worker:latest .`. Credentials reach the container only as `ANTHROPIC_*` and `CLAUDE_*` environment variables, so a login kept in the macOS keychain is not visible there. Export `ANTHROPIC_API_KEY`, or `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token`, before the run.
+
 ## Limit you must decide on: the model API
 
 The default `--network=none` blocks **all** networking, including the model API (`api.anthropic.com`), which a `claude` worker needs. Orchestra does not guess a route, so with the default a worker cannot call the model and will fail. The pre-flight logs a warning to that effect on every docker run. Two ways out:
@@ -39,7 +49,7 @@ Probes are built through the worker code path in `src/agent.ts`, so a bug in how
 
 For `claude` the probe is a worker-shaped session from `buildCommand` (`stream-json` output, the guard hook, `--max-budget-usd 0.5`, `--max-turns 4`, the run's worker model), so the sandbox block under test is the one inline in the worker's own `--settings`, not a separate settings file. The model is asked to run `node -e <script> orchestra-probe --settings <json> -p <prompt>` with the Bash tool, and the script checks those trailing arguments the same way, which covers argv pass-through in Claude Code's Bash sandbox wrapper. A mismatch fails pre-flight and names that wrapper or the model retyping the command, because the two cannot be told apart.
 
-Limits: the argv checks have been tested against fakes (including one that parses argv the way srt's CLI does and one that runs the claude probe's Bash command through bash), not yet against real srt, docker or Claude Code. The claude probe costs two short model sessions per sandboxed run.
+Limits: the argv checks were first tested against fakes (including one that parses argv the way srt's CLI does and one that runs the claude probe's Bash command through bash). They have since passed against the real Claude Code sandbox (2026-11-25) and against real srt 0.0.83 and docker 29 on macOS (2026-11-28). The claude probe costs two short model sessions per sandboxed run.
 
 ## Boundary model
 
