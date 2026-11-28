@@ -56,3 +56,22 @@ The 2026-11-25 rerun cost $2.15 per run on easier goals. These goals are larger,
 
 - `orchestra bench --verify-oracles` passes for all four goals: each oracle passes its check, and each check fails on the unmodified fixture.
 - `npm test` loads the new goals and arms.
+
+## Pilot 1 (2026-11-28): invalid, budget-bound
+
+Bench `b20261128035158`, `h2h-none`, the four hard goals, 1 repeat, on `main` with #124. Spend was $10.86 against a $10 estimate and the $12 cap.
+
+| Goal | Hidden check | Judge satisfaction | Tasks | Cost |
+|---|---|---|---|---|
+| `args-refactor-preserve` | fail | 0.49 | T1 pass, T2 judge not started | $3.00 |
+| `calc-expr` | pass | 0.98 | T1 pass, T2 pass | $2.92 |
+| `rec-csv-strict` | pass | 0.48 | T1 pass, T2 worker not started | $2.00 |
+| `text-wrap-unicode` | pass | 0.98 | T1 pass, T2 pass | $2.93 |
+
+On its face, 1 of 4 failed the check, which is a go. **The result is not valid**, because the $3 ceiling decided both failures:
+
+- **`args-refactor-preserve`** reached $3.00 before T2's judge could start, so T2 (the `tokenize` export) never merged and the check failed. The worker did not get it wrong.
+- **`rec-csv-strict`** T2 failed with "run budget $3 exhausted" while $2.07 was unspent. A sibling worker had reserved the whole remainder. That was a bug in #124, fixed in #128.
+- The two runs that finished cleanly cost $2.92 and $2.93, so a full two-task run on these goals needs more than $3.
+
+**Deviation:** before a second pilot, `runBudgetUsd` for `h2h-none` and `h2h-agentic` must go up (to $4 is proposed), and the budget table above must be redone at about $3 per run. That needs approval. The kept stores are in `.orchestra/bench/b20261128035158/kept/`.
