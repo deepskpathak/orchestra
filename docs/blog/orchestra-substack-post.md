@@ -44,9 +44,11 @@ A task passes only if the judge says pass, the score meets the pass threshold (0
 
 **Contrastive repair (opt-in).** In a repo without a `testCommand`, the judge is the only signal, so a repair attempt can be a coin flip. With the `contrastive` setting on, two workers try the task in separate worktrees, one following the repair notes and one taking a different approach. One comparison judge call picks a winner, the loser is deleted, and the judge's reasons go to the librarian as evidence. It is off by default.
 
-**Stronger verification (opt-in).** A `verification` block adds a judge panel, an agentic judge mode where the conductor runs the scenario check commands and the tests before judging and hands the results to the judge, frozen acceptance contracts, oracle tests written by a separate session, and a mutation score per run. All are off by default and none has been measured on real runs yet.
+**Stronger verification (opt-in).** A `verification` block adds a judge panel, an agentic judge mode where the conductor runs the scenario check commands and the tests before judging and hands the results to the judge, frozen acceptance contracts, oracle tests written by a separate session, and a mutation score per run. All are off by default. The judge panel ran in our first real runs and the agentic judge had a small pilot (below), but none has been properly measured yet.
 
-**Merge.** By default, passing tasks queue up and merge one at a time onto `orchestra/<run>/integration`, with tests after each merge. A failing merge is reset. An opt-in batch merge (`throughput.batchMerge`) lands tasks with disjoint footprints together with one test run per batch, and bisects a failing batch.
+**Merge.** By default, passing tasks queue up and merge one at a time onto `orchestra/<run>/integration`, with tests after each merge. A failing merge is reset. An opt-in batch merge (`throughput.batchMerge`) lands tasks with disjoint footprints together with one test run per batch, and bisects a failing batch. Shared append-only files such as `CHANGELOG.md` (`throughput.sharedFiles`) do not count as overlap, and they merge with git's `union` driver through a temporary `core.attributesFile`, so parallel appends both land and your `.gitattributes` is untouched.
+
+**Approve and resume (opt-in).** With risk tiers on, a high-risk task waits for `orchestra approve`. If approval leaves blocked tasks behind, `orchestra resume <runId>` finishes them on the same run and integration branch, then runs the deferred mutation pass and learning. Workers inherit the run's recorded sandbox settings, and resume flags may only tighten them. Resumed tasks start with a fresh budget, and resume has only been tested with the simulator.
 
 **Learn.** The librarian turns repairs and failures into lessons. The planner tags each run with a short domain slug such as `cli` or `docs`, and lessons are stored per domain plus a global set. Every lesson must cite evidence (the run or task behind it), or it is dropped. Each domain keeps at most 25 lessons, and prompts get at most 15, domain first and then global.
 
@@ -106,12 +108,30 @@ The dashboard looks roughly like this (illustrative output, not from a measured 
 
 Results land on `orchestra/<run>/integration`. You review with `git log main..orchestra/<run>/integration` and land it with `git merge`. Nothing reaches your branch until you say so.
 
+## What the first real runs found
+
+On 2026-10-27 we ran Orchestra on its own repo with the real `claude` binary and Claude Code's sandbox, plus the atlas, batch merge, the judge panel and budgets. Two runs merged 2 of 2 and 3 of 3 tasks, cost $3.04 and $4.52, and scored 0.94 satisfaction each. Both PRs then went through review. The details are in `docs/status.md`.
+
+They found real problems, all fixed in 0.8.0:
+
+- **Tests that bind 127.0.0.1 failed inside the sandbox.** The conductor's own test gate runs outside the sandbox, so it passed anyway. The new opt-in `sandbox.allowLocalBinding` lets sandboxed workers bind localhost. On macOS it also lets sandboxed commands reach any localhost port, so use it only for repos you trust.
+- **Every task serialized.** Every footprint listed `CHANGELOG.md`, so footprint scheduling ran one task at a time and batch merge only ever saw batches of one. That is why `throughput.sharedFiles` exists.
+- **Turns and durations were undercounted** for workers that start a background task.
+- **The integrity monitor flagged a test fake** as reward hacking. It was a false positive.
+
+Budgets never hit their cap in those runs. Since 0.8.0, with `budgets.workerPrompt` on, every worker attempt logs the exact `## Budget` line its prompt carried, and ledger rows record the session caps, so you can compare caps with what was spent.
+
+We also took a first look at two of our research hypotheses:
+
+- **H1 (no promoted gain disappears once a frozen scorer grades the eval) could not be measured.** Every evolution cycle so far ran under an older install with no frozen scorer, no variant was promoted, and the eval branches were already deleted, so there was nothing to re-score.
+- **H2 (stronger verification raises judge agreement with hidden checks and cuts merged-but-wrong tasks) had no support at n = 3.** A preregistered pilot compared runs with and without the agentic judge on three goals, for $8.35 in total. Both bars were missed, so it stopped there as planned. The agentic arm passed 2 of 3 hidden checks against 3 of 3 without it, which is more likely worker noise than an effect. The clearer lesson: the judge passed all six runs, including the one that failed its hidden check, so its agreement only tracked whether the worker succeeded.
+
 ## What it does not do yet
 
 We would rather be upfront:
 
-- **No published benchmarks.** We have not run a controlled comparison against a single agent, and we are not going to quote numbers we do not have. The whitepaper describes how we would measure it.
-- **Sandboxing is opt-in and untested against real backends.** By default workers share one machine, and the guard hook is a backstop, not a sandbox. `--sandbox` confines workers with srt, Claude Code's sandbox (`bwrap` or `sandbox-exec`) or docker, scrubs credentials from their environment and runs pre-flight probes before the first agent call. Our tests use fakes, so none of these backends has been exercised against the real tool yet.
+- **No published benchmarks.** We have not run a controlled comparison against a single agent, and we are not going to quote numbers we do not have. Two real runs and a three-goal pilot are not a benchmark. The whitepaper describes how we would measure it.
+- **Sandboxing is opt-in and mostly untested against real backends.** By default workers share one machine, and the guard hook is a backstop, not a sandbox. `--sandbox` confines workers with srt, Claude Code's sandbox (`bwrap` or `sandbox-exec`) or docker, scrubs credentials from their environment and runs pre-flight probes before the first agent call. Only Claude Code's sandbox has run real workers so far, in the two runs above. srt and docker are tested with fakes only.
 - **Evolution is expensive.** It reruns past goals, so one cycle costs roughly `sample x 2` runs plus the evolver call. Tune `evolve.sample`, `evolve.every` and `evolve.candidates`, or turn on cascade screening (`evolve.cascade`), early-stopping sequential testing (`evolve.sequential`) and a hard per-cycle cap (`evolve.budgetUsd`).
 - **Early days.** The test suite runs against the simulator, so it exercises the pipeline but says nothing about real-model quality.
 - **Judges can be wrong.** Hidden scenarios and tests raise the bar. They do not make the verdict ground truth.
