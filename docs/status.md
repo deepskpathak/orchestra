@@ -109,8 +109,8 @@ B1 (agreement at least 0.10 higher) was met by one run. B2 (fewer merged-but-wro
 
 - Sequential testing (M3) widens the confidence interval with a Bonferroni-style factor: a normal-quantile ratio applied to a t-based interval. Not checked against a reference.
 - The mutation scanner (M4) is a heuristic, not a TypeScript parser. Ambiguous cases are skipped, and compile failures count as invalid mutants rather than killed.
-- `runBudgetUsd` stops new tasks once spend reaches it. The planner, judge, librarian and any session already in flight still run, so a run can spend well past it ($1.28 against $0.10 on 2026-11-25, and about $2.15 against $1.50 per bench run).
-- The claude backend pre-flight probe runs two short model sessions, capped at $0.50 and 4 turns each. Their cost is not recorded in the run's cost or the ledger.
+- `runBudgetUsd` is a ceiling since #124: each session's `--max-budget-usd` is cut to what is left of the run. Claude Code checks that cap between turns, so a run can end up to one turn past the ceiling. Before #124 it only stopped dispatch ($1.28 spent against $0.10 on 2026-11-25).
+- The claude backend pre-flight probe runs two short model sessions, capped at $0.50 and 4 turns each. Since #124 their cost is counted in the run's cost and in a `sandbox_preflight` ledger row.
 - `orchestra approve --by` (M6) is an advisory four-eyes check against a free-text name. It is not authenticated identity.
 - srt on Linux: `denyRead` globs such as `**/.env` are expanded to the files that exist when the worker starts, so a `.env` created mid-run is readable from a shell. macOS matches the globs as patterns.
 - srt wraps the worker argv into one `bash -c` string. On Linux one argument is capped at 128 KiB, so a very large prompt or system prompt would fail to spawn (E2BIG). The harness prompt files total about 22 KB today, but task text, lessons and repair notes add to that and have not been measured.
@@ -125,15 +125,14 @@ Done on 2026-10-27: real end-to-end runs with the Claude Code sandbox (above), a
 
 Done on 2026-11-25: bench row diagnostics (#120), pre-flight probes through the worker code path (#121), the calibration threshold fix (#122) (all three merged on 2026-11-28), the H2 rerun, the first real `--sandbox claude` run of the new probe, the first budget cap run, and the whitepaper and blog updated for 0.8.0.
 
-Done on 2026-11-28: the `runBudgetUsd` ceiling (#124), hard H2 goals and kept stores for failed bench runs (#125), srt and docker installed with their pre-flight probes passing for real, a real srt run, the H1 archive check, and the H3 to H8 plan (research/h3-h8-plan.md). #124 and #125 are open for review.
+Done on 2026-11-28: the `runBudgetUsd` ceiling (#124), hard H2 goals and kept stores for failed bench runs (#125), srt and docker installed with their pre-flight probes passing for real, a real srt run, the H1 archive check, and the H3 to H8 plan (research/h3-h8-plan.md). #124 and #125 merged on 2026-11-28.
 
 Recommendations, in priority order:
 
-1. **Review and merge #124 and #125.** #125's H2 design assumes the ceiling from #124.
-2. **Run the H2 hard-goals pilot** (research/h2-hard.md): 4 runs, about $10. Go to the full 24-run design (about $60) only if 1 to 3 of the 4 runs fail the hidden check.
-3. **Run H4** (research/h3-h8-plan.md): 48 runs, about $106. It is ready once #124 and #125 merge.
-4. **Run one docker worker.** Export `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`) and run with `--sandbox docker --sandbox-network bridge`. With a non-`none` network the network probe is skipped by design.
-5. **Add the bench row fields that H5 to H8 need** (merge wait, worker tokens, footprint recall), the composite goals for H5 and a larger fixture for H6 to H8. This is code only, with no spend.
-6. **H1 and H3:** check the archives again after the next promotion. Keep the replay diffs of promoted variants so they can be re-scored. Evolution cycles that run unattended need a login that does not expire (4 runs on 2026-11-21 failed with an expired login).
-7. **Make the M6 batch-merge interleaving test deterministic** if it flakes in CI.
-8. **Choose between the W8 and W10 epics** and review #88.
+1. **Run the H2 hard-goals pilot** (research/h2-hard.md): 4 runs, about $10. Go to the full 24-run design (about $60) only if 1 to 3 of the 4 runs fail the hidden check.
+2. **Run H4** (research/h3-h8-plan.md): 48 runs, about $106.
+3. **Run one docker worker.** Export `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`) and run with `--sandbox docker --sandbox-network bridge`. With a non-`none` network the network probe is skipped by design.
+4. **Add the bench row fields that H5 to H8 need** (merge wait, worker tokens, footprint recall), the composite goals for H5 and a larger fixture for H6 to H8. This is code only, with no spend.
+5. **H1 and H3:** check the archives again after the next promotion. Keep the replay diffs of promoted variants so they can be re-scored. Evolution cycles that run unattended need a login that does not expire (4 runs on 2026-11-21 failed with an expired login).
+6. **Make the M6 batch-merge interleaving test deterministic** if it flakes in CI.
+7. **Choose between the W8 and W10 epics** and review #88.
