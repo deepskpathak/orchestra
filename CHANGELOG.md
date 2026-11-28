@@ -11,6 +11,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - The `claude` sandbox pre-flight probe now checks argv pass-through: the Bash command it asks the model to run carries `--settings <json> -p <prompt>` trailing arguments, and the probe script fails pre-flight if they do not arrive byte for byte.
 - Project website in `site/`: a single static page (no build step, no dependencies) with an animated, scrubbable explainer film, feature overview, quick start, docs tabs and how-tos. `.github/workflows/pages.yml` deploys it to GitHub Pages on pushes to `main` that touch `site/`.
 - Bench rows in `results.jsonl` now record `verificationModes` (factory rows; `[]` means none) and, when the hidden check failed, `checkOutput` (the last 8 lines of its output, or why it did not run). `orchestra stats` uses the row's modes for judge agreement by verification mode, so bench runs are no longer all counted as `none` because their run files live in throwaway stores. Older rows fall back to the run lookup as before.
+- Four hard bench goals for measuring verification (H2): `calc-expr`, `args-refactor-preserve`, `text-wrap-unicode` and `rec-csv-strict`, with hidden checks and oracles, and the optional arms `h2h-none` and `h2h-agentic` (`runBudgetUsd` 3, `testCommand` `node --test`). The draft preregistration is `docs/research/h2-hard.md`.
+- Bench rows of factory runs whose hidden check failed, or that left a task unmerged, now carry `kept`: the run's store directory and one diff per run branch are copied to `.orchestra/bench/<benchId>/kept/<arm>-<goal>-r<repeat>/` before the throwaway repo is deleted.
 
 ### Fixed
 

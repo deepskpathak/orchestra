@@ -1,0 +1,18 @@
+import assert from 'node:assert/strict';
+import { pathToFileURL } from 'node:url';
+const m = await import(pathToFileURL(`${process.cwd()}/src/text.js`).href);
+const w = m.wrapText;
+assert.deepEqual(w('the quick brown fox', 10), ['the quick', 'brown fox']);
+assert.deepEqual(w('😀😀 😀', 4), ['😀😀 😀'], 'emoji count as one code point each');
+assert.deepEqual(w('😀😀😀', 2), ['😀😀', '😀'], 'never split a surrogate pair');
+assert.deepEqual(w('abcdefghij', 4), ['abcd', 'efgh', 'ij']);
+assert.deepEqual(w('ab abcdefgh c', 4), ['ab', 'abcd', 'efgh', 'c']);
+assert.deepEqual(w('abcdef gh', 5), ['abcde', 'f gh'], 'the last chunk of a long word is placed like a word');
+assert.deepEqual(w('a b\n\n\n  \nc\td\ne', 10), ['a b', '', 'c d e']);
+assert.deepEqual(w('\n\n a \n\n', 5), ['a']);
+assert.deepEqual(w('one\n\ntwo\n\nthree', 3), ['one', '', 'two', '', 'thr', 'ee']);
+assert.deepEqual(w('', 5), []);
+assert.deepEqual(w('  \n\n\t ', 5), []);
+assert.deepEqual(w('a  b', 1), ['a', 'b']);
+assert.throws(() => w('a', 0), RangeError);
+assert.equal(m.capitalize('ab'), 'Ab');
