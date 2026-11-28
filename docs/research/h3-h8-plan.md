@@ -39,12 +39,12 @@ So H1 has no data yet. **No spend is proposed.** Check the archives again after 
 
 **Claim:** the planner cascade and cache discipline cut cost per accepted merge with no significant drop in success.
 
-- **Arms:** `h4-base` (default config, `testCommand` `node --test`, `runBudgetUsd` 3) and `h4-cost` (the same, plus `planner.cascade.enabled` and `cache.discipline.enabled` with `warmFirst`). Add both to `bench/arms.json` at the start of the run.
+- **Arms:** `h4-base` (default config, `testCommand` `node --test`, `runBudgetUsd` 4) and `h4-cost` (the same, plus `planner.cascade.enabled` and `cache.discipline.enabled` with `warmFirst`). Add both to `bench/arms.json` at the start of the run.
 - **Goals:** 8 goals that usually plan into more than one task, so sibling workers can share a cached prefix: `rec-csv`, `rec-csv-strict`, `rec-pivot`, `args-usage`, `args-string-opt`, `text-wrap`, `text-wrap-unicode`, `calc-expr`.
 - **Repeats:** 3, giving 24 paired cases per arm and 48 runs.
 - **Measures:** cost per accepted run (the sum of `costUsd` over runs whose hidden check passed, divided by their count), and the hidden check pass rate.
 - **Bars:** B1, cost per accepted run is at least 15% lower in `h4-cost`. B2, its check pass rate is at most 1 run in 24 lower than `h4-base`'s. Supported only if both are met.
-- **Budget:** 48 runs at $2.20, so **$106 expected and a $144 hard cap** (48 x $3).
+- **Budget:** revised on 2026-11-28 after the H2 pilot showed two-task runs on these goals cost about $2.92. Both arms use `runBudgetUsd` 4. 48 runs at about $2.90, so **$140 expected, a stop at $154 and a $192 hard cap** (48 x $4). Approved by the user on 2026-11-28.
 - **Prerequisites:** none beyond #124 and the hard goals in #125.
 
 ## H5 (throughput): needs bench fields and multi-task goals
@@ -85,7 +85,7 @@ H6 (worker tokens per accepted merge cut by at least 15%, success non-inferior w
 
 | Experiment | Runs | Expected | Hard cap | Ready |
 |---|---|---|---|---|
-| H4 | 48 | $106 | $144 | after #124 and #125 |
+| H4 | 48 | $140 | $192 | ready (#124, #125, #127, #128) |
 | H5 | 36 | $108 | $144 | needs bench fields and 6 goals |
 | H6 to H8 | 48 | $144 | $192 | needs a fixture, 8 goals and bench fields |
 | H3 | 36 | $90 | $108 | needs a promotion |

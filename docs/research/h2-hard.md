@@ -75,3 +75,7 @@ On its face, 1 of 4 failed the check, which is a go. **The result is not valid**
 - The two runs that finished cleanly cost $2.92 and $2.93, so a full two-task run on these goals needs more than $3.
 
 **Deviation:** before a second pilot, `runBudgetUsd` for `h2h-none` and `h2h-agentic` must go up (to $4 is proposed), and the budget table above must be redone at about $3 per run. That needs approval. The kept stores are in `.orchestra/bench/b20261128035158/kept/`.
+
+## Pilot 2 plan (approved 2026-11-28)
+
+The user approved raising `runBudgetUsd` to $4 for `h2h-none` and `h2h-agentic` (and for the H4 arms). Pilot 2 is the same 4 runs on `main` with #128. The gate is unchanged. At about $3 per run, pilot 2 is expected to cost $12, with a $16 hard cap. If the gate says go, the full 24-run design is expected to cost about $72, with a $96 hard cap. The full run still needs its own approval.

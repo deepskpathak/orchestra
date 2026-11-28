@@ -415,7 +415,7 @@ test('shouldKeep: a failed check or any unmerged task keeps the run', async () =
 
 test('H4 arms differ only in the planner cascade and cache discipline', () => {
   const [base, cost] = ['h4-base', 'h4-cost'].map((n) => armConfig(loadArms(DEFAULT_SUITE, [n]).find((a) => a.name === n)!));
-  assert.equal(base.runBudgetUsd, 3);
+  assert.equal(base.runBudgetUsd, 4);
   assert.equal(base.planner!.cascade.enabled, false);
   assert.equal(cost.planner!.cascade.enabled, true);
   assert.equal(cost.planner!.cascade.draftModel, base.planner!.cascade.draftModel, 'nested defaults survive the merge');
