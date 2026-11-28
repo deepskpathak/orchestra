@@ -92,3 +92,13 @@ Bench `b20261128044844`, `h2h-none`, the four hard goals, 1 repeat, `runBudgetUs
 | `text-wrap-unicode` | pass | 0.97 | $1.74 |
 
 0 of 4 failed the hidden check, so by the gate this is **no go**. With enough budget, workers solved all four hard goals. Under H4 (below, and `h4.md`), the same four goals were run 24 more times across two arms, and only the `h4-cost` arm failed the check on any of them. `args-string-opt` and `args-usage` failed the check 4 times, 3 of them with the judge passing the run (merged but wrong). So a third pilot should be built from those two goals plus the four hard ones, not from the hard ones alone. That needs a new pilot section and approval before any spend.
+
+## Pilot 3 plan (written 2026-11-28, before the run)
+
+Approved by the user on 2026-11-28. Pilot 2 showed the four hard goals alone are solved every time at `runBudgetUsd` 4. Under H4, `args-string-opt` and `args-usage` failed the hidden check 4 times, 3 of them with the judge passing (merged but wrong), so pilot 3 adds them.
+
+- **Arm:** `h2h-none` (`runBudgetUsd` 4, `testCommand` `node --test`).
+- **Goals:** `args-string-opt`, `args-usage`, `calc-expr`, `args-refactor-preserve`, `text-wrap-unicode`, `rec-csv-strict`. 1 repeat, 6 runs.
+- **Code:** `main` with #133 (interleaved arms and token totals per row).
+- **Gate:** go if at least 1 and at most 4 of the 6 runs fail the hidden check. If go, the full design becomes `h2h-none` and `h2h-agentic` on these six goals with 3 repeats (36 runs). That needs its own approval and budget.
+- **Budget:** $0.70 to $2.90 per run depending on cache warmth, so **about $12 expected and a $24 hard cap** (6 x $4). The watchdog stops the bench at $24.
