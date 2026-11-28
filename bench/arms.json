@@ -8,8 +8,8 @@
   { "name": "h2-agentic", "optional": true, "config": { "runBudgetUsd": 1.5, "verification": { "agenticJudge": { "enabled": true } } } },
   { "name": "h2r-none", "optional": true, "config": { "runBudgetUsd": 1.5, "testCommand": "node --test" } },
   { "name": "h2r-agentic", "optional": true, "config": { "runBudgetUsd": 1.5, "testCommand": "node --test", "verification": { "agenticJudge": { "enabled": true } } } },
-  { "name": "h2h-none", "optional": true, "config": { "runBudgetUsd": 3, "testCommand": "node --test" } },
-  { "name": "h2h-agentic", "optional": true, "config": { "runBudgetUsd": 3, "testCommand": "node --test", "verification": { "agenticJudge": { "enabled": true } } } },
-  { "name": "h4-base", "optional": true, "config": { "runBudgetUsd": 3, "testCommand": "node --test" } },
-  { "name": "h4-cost", "optional": true, "config": { "runBudgetUsd": 3, "testCommand": "node --test", "planner": { "cascade": { "enabled": true } }, "cache": { "discipline": { "enabled": true, "warmFirst": true } } } }
+  { "name": "h2h-none", "optional": true, "config": { "runBudgetUsd": 4, "testCommand": "node --test" } },
+  { "name": "h2h-agentic", "optional": true, "config": { "runBudgetUsd": 4, "testCommand": "node --test", "verification": { "agenticJudge": { "enabled": true } } } },
+  { "name": "h4-base", "optional": true, "config": { "runBudgetUsd": 4, "testCommand": "node --test" } },
+  { "name": "h4-cost", "optional": true, "config": { "runBudgetUsd": 4, "testCommand": "node --test", "planner": { "cascade": { "enabled": true } }, "cache": { "discipline": { "enabled": true, "warmFirst": true } } } }
 ]
