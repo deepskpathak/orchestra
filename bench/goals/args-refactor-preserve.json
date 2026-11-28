@@ -1,0 +1,9 @@
+{
+  "id": "args-refactor-preserve",
+  "fixture": "args",
+  "goal": "Refactor src/args.js into two exported functions. tokenize(argv) returns one token per argument, in order: { kind: 'long', name, value } for an argument starting with \"--\" (value only when it has an \"=\"), { kind: 'short', name } for one starting with a single \"-\" and longer than one character, and { kind: 'positional', value } for anything else. parseArgs(argv) must then be built on tokenize. This is a pure refactor: parseArgs must return exactly what it returns today for every input, including unusual ones, so do not fix or change any existing behaviour while you restructure it.",
+  "taskType": "refactor",
+  "humanMinutes": 30,
+  "check": "checks/args-refactor-preserve.mjs",
+  "oracle": "oracles/args-refactor-preserve"
+}

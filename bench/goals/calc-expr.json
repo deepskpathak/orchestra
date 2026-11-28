@@ -1,0 +1,9 @@
+{
+  "id": "calc-expr",
+  "fixture": "calc",
+  "goal": "Add and export evaluate(expr) to src/calc.js: evaluate an arithmetic expression string over numbers (integers and decimals such as 2.5 or .5) with +, -, *, /, ^ and parentheses, ignoring whitespace. Use the usual precedence: ^ binds tightest and is right-associative (2^3^2 is 512), then unary minus (so -2^2 is -4 and 2^-1 is 0.5), then * and / (left-associative), then + and - (left-associative). Unary minus may repeat (1 - -1 is 2, --3 is 3). Throw an Error for anything malformed: an empty or blank string, unbalanced parentheses, a missing operand, two numbers in a row, implicit multiplication such as 2(3), or any other character. Division by zero throws an Error too. Do not use eval or Function.",
+  "taskType": "feature",
+  "humanMinutes": 45,
+  "check": "checks/calc-expr.mjs",
+  "oracle": "oracles/calc-expr"
+}

@@ -378,3 +378,37 @@ test('bench rows leave checkOutput out when the hidden check passes', async () =
     rmSync(suite, { recursive: true, force: true });
   }
 });
+
+test('bench keeps the store and branch diffs of a factory run whose hidden check failed, and nothing for a passing one', async () => {
+  const suite = mkdtempSync(join(tmpdir(), 'orchestra-suite-'));
+  cpSync(DEFAULT_SUITE, suite, { recursive: true });
+  const store = tempRepo();
+  try {
+    writeFileSync(join(suite, 'checks', 'calc-sub.mjs'), 'process.exit(1);\n');
+    const failed = await runBench({ store, runner: fakeRunner(), suite, goals: ['calc-sub'], repeats: 1, arms: [{ name: 'plain' }], benchId: 'bk' });
+    const row = failed.rows[0];
+    assert.equal(row.kept, join('kept', 'plain-calc-sub-r1'));
+    const kept = join(failed.dir, row.kept!);
+    assert.ok(existsSync(join(kept, 'run', 'run.json')), 'run file kept');
+    const diffs = readdirSync(join(kept, 'branches'));
+    assert.ok(diffs.includes('integration.diff'), diffs.join(','));
+    assert.ok(diffs.some((d) => d !== 'integration.diff'), 'task branch diffs kept too');
+    assert.match(readFileSync(join(kept, 'branches', 'integration.diff'), 'utf8'), /^diff --git/m);
+    assert.equal(JSON.parse(readFileSync(join(failed.dir, 'results.jsonl'), 'utf8').trim()).kept, row.kept);
+
+    writeFileSync(join(suite, 'checks', 'calc-sub.mjs'), "console.log('ok');\n");
+    const passed = await runBench({ store, runner: fakeRunner(), suite, goals: ['calc-sub'], repeats: 1, arms: [{ name: 'plain' }], benchId: 'bk2' });
+    assert.equal(passed.rows[0].checkPass, true);
+    assert.equal(passed.rows[0].kept, undefined);
+    assert.equal(existsSync(join(passed.dir, 'kept')), false);
+  } finally {
+    rmSync(suite, { recursive: true, force: true });
+  }
+});
+
+test('shouldKeep: a failed check or any unmerged task keeps the run', async () => {
+  const { shouldKeep } = await import('../src/bench.ts');
+  assert.equal(shouldKeep({ checkPass: true, taskVerdicts: {} }, ['merged', 'merged']), false);
+  assert.equal(shouldKeep({ checkPass: false, taskVerdicts: {} }, ['merged']), true);
+  assert.equal(shouldKeep({ checkPass: true, taskVerdicts: {} }, ['merged', 'failed']), true, 'the H2 disagreement shape: T2 failed, check passed');
+});

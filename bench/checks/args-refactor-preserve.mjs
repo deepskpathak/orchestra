@@ -1,0 +1,25 @@
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
+const m = await import(pathToFileURL(`${process.cwd()}/src/args.js`).href);
+const p = m.parseArgs;
+const kinds = (argv) => m.tokenize(argv).map((t) => [t.kind, t.name ?? t.value, t.kind === 'long' ? t.value : undefined]);
+assert.deepEqual(kinds(['--a', '--b=1', '-c', 'x', '-']), [['long', 'a', undefined], ['long', 'b', '1'], ['short', 'c', undefined], ['positional', 'x', undefined], ['positional', '-', undefined]]);
+// Behaviour of the original parseArgs, quirks included. A refactor must keep every one of them.
+assert.deepEqual(p(['--a', 'x', '-b', 'y']), { flags: { a: true, b: true }, positional: ['x', 'y'] });
+assert.deepEqual(p(['--name=v']), { flags: { name: 'v' }, positional: [] });
+assert.deepEqual(p(['-abc']), { flags: { abc: true }, positional: [] }, 'grouped short flags are one flag today');
+assert.deepEqual(p(['-']), { flags: {}, positional: ['-'] });
+assert.deepEqual(p(['--a=b=c']), { flags: { a: 'b=c' }, positional: [] });
+assert.deepEqual(p(['--=x']), { flags: { '': 'x' }, positional: [] });
+assert.deepEqual(p(['--', '--x']), { flags: { '': true, x: true }, positional: [] }, '"--" is not an end-of-options marker today');
+assert.deepEqual(p(['--t=1', '--t=2']), { flags: { t: '2' }, positional: [] }, 'last value wins today');
+assert.deepEqual(p(['--t=1', '--t']), { flags: { t: true }, positional: [] });
+assert.deepEqual(p(['-5']), { flags: { 5: true }, positional: [] }, 'negative numbers are flags today');
+assert.deepEqual(p(['-x=3']), { flags: { 'x=3': true }, positional: [] });
+assert.deepEqual(p(['--no-color']), { flags: { 'no-color': true }, positional: [] });
+assert.deepEqual(p(['']), { flags: {}, positional: [''] });
+assert.deepEqual(p([]), { flags: {}, positional: [] });
+const src = readFileSync(`${process.cwd()}/src/args.js`, 'utf8');
+const body = src.slice(src.search(/function\s+parseArgs\b/));
+assert.match(body, /tokenize\s*\(/, 'parseArgs must be built on tokenize');

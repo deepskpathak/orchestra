@@ -67,7 +67,7 @@ The conductor (`src/conductor.ts`) sequences plan, build, verify, merge and lear
 
 ### 3.3 Task lifecycle
 
-Task states are `pending`, `running`, `judging`, `repair`, `merging`, `merged`, `failed` and `blocked` (`docs/architecture.md`, `src/types.ts`). Tasks start in dependency order, up to `concurrency` at a time (default 3), until `runBudgetUsd` (default 20) is spent (`docs/configuration.md`). The cap stops new tasks from starting. It does not stop the planner, judge or librarian sessions, so a run can spend more than the cap. A task passes only if the judge says pass, the score is at least `passThreshold` (default 0.75), and any `testCommand` did not fail. After `maxAttempts` (default 3) a task is `failed`, and its dependents become `blocked`.
+Task states are `pending`, `running`, `judging`, `repair`, `merging`, `merged`, `failed` and `blocked` (`docs/architecture.md`, `src/types.ts`). Tasks start in dependency order, up to `concurrency` at a time (default 3), until `runBudgetUsd` (default 20) is spent (`docs/configuration.md`). After 0.8.0 (unreleased) the cap became a ceiling on the whole run: each session's cap, the planner, judge and librarian included, is cut to what is left after spend so far and the caps of sessions in flight, and the claude pre-flight probes count against it. In 0.8.0 it only stopped new tasks, so runs spent past it. A task passes only if the judge says pass, the score is at least `passThreshold` (default 0.75), and any `testCommand` did not fail. After `maxAttempts` (default 3) a task is `failed`, and its dependents become `blocked`.
 
 ### 3.4 Merge queue
 
