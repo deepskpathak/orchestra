@@ -84,6 +84,7 @@ The srt worker could not run `git commit` itself (its sandbox makes `.git/hooks`
 - **H2 pilot 1** (`b20261128035158`, $10.86): invalid. The $3 ceiling decided both failures, and one of them was a bug in #124, fixed in #128.
 - **H2 pilot 2** (`b20261128044844`, $7.12, `runBudgetUsd` 4): 4 of 4 passed the hidden check, so the gate says no go. See research/h2-hard.md.
 - **H4** (`b20261128045815`, $32.60): not supported. Cost per accepted run was 7.2% lower with the cascade and cache discipline (bar: 15%), and check pass was 21 of 24 against 23 of 24 (bar: at most 1 fewer). See research/h4.md.
+- **H2 pilot 3** (`b20261128123940`, $8.21): 0 of 6 failed, so no go. Under the default config 1 run of 34 failed a hidden check. The failures cluster in the cascade arm (3 of 24 in H4). See research/h2-hard.md for the proposed cascade-based H2 design.
 - **Prompt caching confounds every cost number in the bench.** Back-to-back runs read a warm 1-hour cache and cost about a quarter of a cold run. Cost comparisons need interleaved arms and cache tokens per row.
 - **An accidental bench** (`b20261128043521`, $3.71) ran when `orchestra bench --help` was ignored. Fixed in #131.
 
@@ -137,8 +138,8 @@ Done on 2026-11-28: the `runBudgetUsd` ceiling (#124), hard H2 goals and kept st
 
 Recommendations, in priority order:
 
-1. **Record cache tokens in bench rows and interleave arms** (arm order per goal and repeat) before any further cost measurement. This is code only, with no spend.
-2. **H2 pilot 3** from `args-string-opt`, `args-usage` and the four hard goals: they produced 3 merged-but-wrong runs under H4. It needs a new pilot section and approval.
+1. **Rerun H4 with interleaved arms** (#133) if the cost question still matters. The cache confound limits what the 2026-11-28 result says.
+2. **Decide on H2:** run it on top of the planner cascade (36 runs, about $45; see research/h2-hard.md), or report it as unmeasurable on this suite.
 3. **Run one docker worker.** Export `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`), `colima start`, then run with `--sandbox docker --sandbox-network bridge`.
 4. **Add the bench row fields that H5 to H8 need** (merge wait, worker tokens, footprint recall), the composite goals for H5 and a larger fixture for H6 to H8.
 5. **H1 and H3:** check the archives again after the next promotion.

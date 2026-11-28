@@ -102,3 +102,26 @@ Approved by the user on 2026-11-28. Pilot 2 showed the four hard goals alone are
 - **Code:** `main` with #133 (interleaved arms and token totals per row).
 - **Gate:** go if at least 1 and at most 4 of the 6 runs fail the hidden check. If go, the full design becomes `h2h-none` and `h2h-agentic` on these six goals with 3 repeats (36 runs). That needs its own approval and budget.
 - **Budget:** $0.70 to $2.90 per run depending on cache warmth, so **about $12 expected and a $24 hard cap** (6 x $4). The watchdog stops the bench at $24.
+
+## Pilot 3 (2026-11-28): no go
+
+Bench `b20261128123940`, on `main` with #133. Spend was $8.21, under the $24 cap.
+
+| Goal | Hidden check | Judge satisfaction | Cost | Cache read | Cache write |
+|---|---|---|---|---|---|
+| `args-refactor-preserve` | pass | 0.98 | $2.25 | 537,010 | 270,610 |
+| `args-string-opt` | pass | 1.00 | $1.12 | 376,410 | 129,209 |
+| `args-usage` | pass | 1.00 | $0.30 | 366,895 | 29,881 |
+| `calc-expr` | pass | 0.97 | $0.97 | 1,382,478 | 91,005 |
+| `rec-csv-strict` | pass | 0.96 | $1.59 | 754,780 | 175,407 |
+| `text-wrap-unicode` | pass | 1.00 | $1.97 | 167,683 | 237,087 |
+
+0 of 6 failed the hidden check, so by the gate this is **no go**.
+
+What the three pilots and H4 show together:
+
+- **With the default config, workers almost never fail these checks.** Across pilots 2 and 3 and the `h4-base` arm, 1 run of 34 failed the check, and that one was a merged-but-wrong run (`args-usage`, H4).
+- **The failures cluster in `h4-cost`.** There, 3 of 24 runs failed, all with the judge passing. That arm adds the planner cascade, so a cheaper model drafts the plan. A weaker plan seems to be what lets wrong work through, which is the situation H2 is about.
+- **Cost follows cache writes.** The token fields from #133 show it directly: runs that wrote little to the cache cost $0.30 to $1.00, and runs that wrote 230,000 or more cost about $2.
+
+**Proposed next design (not approved):** run H2 on top of the cascade config, `h2c-none` against `h2c-agentic`, both with `planner.cascade.enabled`, on `args-string-opt`, `args-usage` and the four hard goals, with 3 repeats (36 runs, about $45, $144 hard cap). It needs a new preregistration and approval. The alternative is to accept that on this suite the default config leaves almost nothing for verification to catch, and report H2 as unmeasurable here.
