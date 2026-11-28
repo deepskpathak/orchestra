@@ -1,0 +1,9 @@
+{
+  "id": "text-wrap-unicode",
+  "fixture": "text",
+  "goal": "Add and export wrapText(s, width) to src/text.js, returning an array of lines. Lengths are counted in Unicode code points, so an emoji such as 😀 counts as 1 and must never be split in half. Paragraphs are separated by one or more blank lines (lines that are empty or only whitespace); wrap each paragraph on its own and put exactly one empty string between consecutive paragraphs in the output, with no empty strings at the start or end. Inside a paragraph any run of whitespace (spaces, tabs, single newlines) separates words. Fill lines greedily, joining words with one space, so no line is longer than width. A word longer than width is cut into chunks of exactly width code points (the last chunk may be shorter), and each chunk is then placed like an ordinary word. A string with no words gives []. A width below 1 throws a RangeError.",
+  "taskType": "feature",
+  "humanMinutes": 40,
+  "check": "checks/text-wrap-unicode.mjs",
+  "oracle": "oracles/text-wrap-unicode"
+}

@@ -1,0 +1,9 @@
+{
+  "id": "rec-csv-strict",
+  "fixture": "records",
+  "goal": "Add src/csv.js exporting parseCsv(text, opts). It reads CSV with a header row into an array of objects of strings. opts.delimiter is a single character, default \",\". Fields may be quoted with double quotes; a quoted field may contain the delimiter, doubled quotes (\"\" for one quote) and line breaks. Accept LF and CRLF line ends, a missing final newline and a UTF-8 byte order mark at the very start (strip it). Lines that are completely empty outside quotes are skipped. Empty input, or input that is only a byte order mark, gives []. Be strict, and throw an Error whose message contains \"line N\", where N is the 1-based line number in the input (counting every line break, including ones inside quoted fields) on which the offending row starts, for: a quoted field that is never closed; a quote inside an unquoted field (a\"b); any character other than the delimiter or a line end right after a closing quote; a row whose field count differs from the header's. Also throw an Error for a duplicated header name.",
+  "taskType": "feature",
+  "humanMinutes": 60,
+  "check": "checks/rec-csv-strict.mjs",
+  "oracle": "oracles/rec-csv-strict"
+}

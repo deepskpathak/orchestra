@@ -65,6 +65,7 @@ export interface BenchRow {
   singleSession?: boolean; // written only when true: the row has no judge, so calibration skips it
   verificationModes?: string[]; // factory rows: M4 modes the run was graded under ([] = none). The run file lives in a throwaway store, so stats reads them here
   checkOutput?: string; // written only when the hidden check failed: the last lines of its output, or why it could not run
+  kept?: string; // factory rows that failed the check or left a task unmerged: where the run's store and branch diffs were kept, relative to the bench dir
   costUsd: number;
   wallMs: number;
 }
@@ -133,6 +134,35 @@ export function runCheck(suite: string, goal: BenchGoal, cwd: string): { pass: b
 
 // Row field for a failed check only, so passing rows stay small.
 const checkOutput = (c: { pass: boolean; tail: string }): { checkOutput?: string } => (c.pass ? {} : { checkOutput: c.tail });
+
+// A run worth reading afterwards: the hidden check failed, or some task did not merge (H2's judge-vs-check
+// disagreements were all runs where T2 failed while the check passed).
+export const shouldKeep = (row: Pick<BenchRow, 'checkPass' | 'taskVerdicts'>, taskStatuses: string[]): boolean => !row.checkPass || taskStatuses.some((st) => st !== 'merged');
+
+// The bench repo is deleted after each row, so copy what explains a failure first: the run's store directory
+// (run.json, events, agent logs) and one diff per orchestra branch of the run against the base. Returns the
+// kept directory relative to the bench dir. Failures to keep are reported in the directory, never thrown.
+export function keepRun(repo: string, runId: string, base: string, benchDir: string, name: string): string {
+  const rel = join('kept', name);
+  const dest = join(benchDir, rel);
+  mkdirSync(join(dest, 'branches'), { recursive: true });
+  const notes: string[] = [];
+  const runDir = join(repo, '.orchestra', 'runs', runId);
+  try {
+    if (existsSync(runDir)) cpSync(runDir, join(dest, 'run'), { recursive: true });
+    else notes.push(`no run directory at .orchestra/runs/${runId}`);
+  } catch (e) {
+    notes.push(`run directory not copied: ${(e as Error).message.split('\n')[0]}`);
+  }
+  try {
+    const refs = git(repo, 'for-each-ref', '--format=%(refname:short)', `refs/heads/orchestra/${runId}/`).split('\n').filter(Boolean);
+    for (const ref of refs) writeFileSync(join(dest, 'branches', `${ref.split('/').slice(2).join('-')}.diff`), git(repo, 'diff', `${base}...${ref}`) + '\n');
+  } catch (e) {
+    notes.push(`branch diffs unavailable: ${(e as Error).message.split('\n')[0]}`);
+  }
+  if (notes.length) writeFileSync(join(dest, 'NOTES.txt'), notes.join('\n') + '\n');
+  return rel;
+}
 
 export function applyOracle(suite: string, goal: BenchGoal, cwd: string): void {
   const oracle = scriptPath(suite, goal.oracle);
@@ -324,6 +354,7 @@ export async function runBench(o: BenchOptions): Promise<{ benchId: string; dir:
                 costUsd: run.costUsd,
                 wallMs: Date.now() - t0,
               };
+              if (shouldKeep(row, run.tasks.map((t) => t.status))) row.kept = keepRun(repo, run.id, base, dir, `${arm.name}-${goal.id}-r${repeat}`);
             }
             rows.push(row);
             appendFileSync(file, JSON.stringify(row) + '\n');

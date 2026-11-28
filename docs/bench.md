@@ -17,16 +17,18 @@ bench/
 
 ## The shipped suite
 
-32 goals over four dependency-free fixtures, each a few plain ES module files with no `package.json` dependencies.
+36 goals over four dependency-free fixtures, each a few plain ES module files with no `package.json` dependencies.
 
 | Fixture | What it is | Goals |
 | --- | --- | --- |
-| `calc` | arithmetic helpers | 7 |
-| `text` | string and word helpers | 8 |
-| `args` | a CLI argument parser | 8 |
-| `records` | array and data-transform helpers, CSV | 9 |
+| `calc` | arithmetic helpers | 8 |
+| `text` | string and word helpers | 9 |
+| `args` | a CLI argument parser | 9 |
+| `records` | array and data-transform helpers, CSV | 10 |
 
 Task types: bugfix, feature, test, docs and refactor, with at least four goals in each of the first four. `humanMinutes` runs from 5 to 60, so short fixes and long features are both represented. Every check is a node script that uses only `node:` modules and makes no network calls.
+
+Four goals are hard on purpose, for measuring verification (H2): `calc-expr` (an expression evaluator with precedence, right-associative `^`, unary minus and strict errors), `args-refactor-preserve` (a refactor that must keep every quirk of the old parser), `text-wrap-unicode` (wrapping counted in code points, with paragraphs and cut long words) and `rec-csv-strict` (a strict CSV reader whose errors name the line). Each goal states every rule its check tests, but there are many rules and they interact, so workers should fail the check some of the time. On the earlier goals they almost never did, so a judge could not be caught merging wrong work.
 
 Two kinds of check need more than an import and an assert:
 
@@ -66,7 +68,7 @@ orchestra bench --verify-oracles         # every oracle must pass its own check;
 
 ## Output
 
-`.orchestra/bench/<benchId>/results.jsonl` has one row per repeat: `arm, goal, taskType, humanMinutes, repeat, runId, harness, checkPass, judgeSatisfaction, taskVerdicts, costUsd, wallMs`. Factory rows also carry `verificationModes`, the M4 modes the run was graded under (`[]` means none). The run file lives in the throwaway bench repo, so `orchestra stats` reads the modes from the row. A row whose hidden check failed carries `checkOutput`: the last 8 lines of the check's output, or the reason the check did not run (no integration branch). `summary.json` has per arm `passAt1`, `passHat3` (null until each goal has 3 repeats), `meanCostUsd` and `meanWallMs`, computed with `src/stats.ts`. The same table is printed to the terminal.
+`.orchestra/bench/<benchId>/results.jsonl` has one row per repeat: `arm, goal, taskType, humanMinutes, repeat, runId, harness, checkPass, judgeSatisfaction, taskVerdicts, costUsd, wallMs`. Factory rows also carry `verificationModes`, the M4 modes the run was graded under (`[]` means none). The run file lives in the throwaway bench repo, so `orchestra stats` reads the modes from the row. A row whose hidden check failed carries `checkOutput`: the last 8 lines of the check's output, or the reason the check did not run (no integration branch). A factory row whose hidden check failed, or whose run left any task unmerged, carries `kept`: a directory under the bench dir (`kept/<arm>-<goal>-r<repeat>/`) holding the run's store directory (`run/`: run file, events, agent logs) and one diff per run branch against the base (`branches/integration.diff`, `branches/<task>.diff`). The bench repo itself is still deleted, so this is what is left to read after the run. `summary.json` has per arm `passAt1`, `passHat3` (null until each goal has 3 repeats), `meanCostUsd` and `meanWallMs`, computed with `src/stats.ts`. The same table is printed to the terminal.
 
 Use `ORCHESTRA_RUNNER=fake` to exercise the engine without spending tokens; the fake runner will mostly fail the hidden checks, which is expected.
 
