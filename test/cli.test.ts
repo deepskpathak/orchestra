@@ -144,3 +144,23 @@ test('evals ablation prints the with vs without lessons delta on the holdout, an
   assert.match(r.stdout, /e3  with [\d.]+  without [\d.]+  delta/);
   assert.match(r.stdout, /mean delta .* 95% CI \[/);
 });
+
+test('bench --help prints usage and unknown bench flags stop before any bench starts', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const { mkdtempSync, existsSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { benchRunArgError } = await import('../src/cli.ts');
+  const cli = join(PACKAGE_ROOT, 'bin', 'orchestra.ts');
+  const dir = mkdtempSync(join(tmpdir(), 'orch-bench-cli-'));
+  // A cwd with no store: if the flag check came after storeOrDie, the error would be about the store instead.
+  const help = spawnSync(process.execPath, [cli, 'bench', '--help'], { cwd: dir, encoding: 'utf8', timeout: 15000 });
+  assert.equal(help.status, 0, help.stderr);
+  assert.match(help.stdout, /spends money/);
+  const typo = spawnSync(process.execPath, [cli, 'bench', '--bench-id', 'x', '--goals', 'calc-sub'], { cwd: dir, encoding: 'utf8', timeout: 15000 });
+  assert.equal(typo.status, 1);
+  assert.match(typo.stderr, /unsupported argument "--bench-id".*no bench was started/);
+  assert.equal(existsSync(join(dir, '.orchestra')), false);
+  assert.equal(benchRunArgError(['--arms', 'a,b', '--goals', 'g', '--repeats', '3', '--suite', 's', '--reference', 'a', '--ablations']), undefined);
+  assert.match(benchRunArgError(['--repeat', '3']) ?? '', /"--repeat"/);
+  assert.match(benchRunArgError(['calc-sub']) ?? '', /"calc-sub"/);
+});

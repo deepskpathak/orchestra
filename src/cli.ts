@@ -874,7 +874,29 @@ function intFlag(args: string[], name: string, fallback: number): number {
   return Number(v);
 }
 
+const BENCH_USAGE = `orchestra bench [--arms a,b] [--goals g1,g2] [--repeats N] [--suite <dir>] [--ablations] [--reference <arm>]
+orchestra bench --verify-oracles [--goals g1,g2] [--suite <dir>]
+orchestra bench --report [--reference <arm>]
+orchestra bench calibrate --sample N [--seed S] | --import <file>
+A plain bench run makes real model calls and spends money.`;
+
+// Flags a paid bench run accepts. Anything else (a typo, --help, a flag from another command) must stop the run
+// before it starts: the bench ignored unknown flags, so \`orchestra bench --help\` started the full suite.
+const BENCH_VALUE_FLAGS = new Set(['--suite', '--goals', '--repeats', '--arms', '--reference']);
+const BENCH_BOOL_FLAGS = new Set(['--ablations']);
+export function benchRunArgError(args: string[]): string | undefined {
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    // A missing value is left for flag() to report with its own message.
+    if (BENCH_VALUE_FLAGS.has(a)) {
+      if (args[i + 1] !== undefined && !args[i + 1].startsWith('--')) i++;
+    } else if (!BENCH_BOOL_FLAGS.has(a)) return `unsupported argument "${a}" for orchestra bench (no bench was started)\n${BENCH_USAGE}`;
+  }
+  return undefined;
+}
+
 async function cmdBench(args: string[]): Promise<void> {
+  if (args.includes('--help') || args.includes('-h')) return void console.log(BENCH_USAGE);
   const suite = flag(args, '--suite');
   const goals = flag(args, '--goals')?.split(',').filter(Boolean);
   if (args.includes('--verify-oracles')) {
@@ -923,6 +945,8 @@ async function cmdBench(args: string[]): Promise<void> {
     console.log(renderCalibration(storeCalibration(store)));
     return;
   }
+  const argErr = benchRunArgError(args);
+  if (argErr) die(argErr);
   const store = storeOrDie();
   const repeats = intFlag(args, '--repeats', 1);
   if (!Number.isInteger(repeats) || repeats < 1) die('--repeats must be a positive integer');
