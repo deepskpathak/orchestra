@@ -476,6 +476,16 @@ const TIMEOUT_MS: Record<Role, number> = {
 
 type AgentVariant = NonNullable<NonNullable<AgentRequest['meta']>['variant']>;
 
+// The smallest per-session cap worth starting a session with. Below it the session could not finish a turn.
+export const MIN_SESSION_USD = 0.05;
+const BUDGET_PREFIX = 'run budget $';
+export const runBudgetReason = (usd: number): string => `${BUDGET_PREFIX}${usd} exhausted`;
+// A session the run budget refused to start: no tokens were spent and nothing ran.
+export const isBudgetRefusal = (res: AgentResult): boolean => !res.ok && res.costUsd === 0 && res.turns === 0 && (res.error ?? '').startsWith(BUDGET_PREFIX);
+// A judge that never ran for lack of budget is not a judge-budget problem, so the usual advice would mislead.
+const judgeFailReason = (error: string): string =>
+  error.startsWith(BUDGET_PREFIX) ? error : `judge failed twice: ${error}. Raise budgetUsd.judge in the harness config or re-run`;
+
 export class Conductor {
   readonly run: Run;
   private readonly store: Store;
@@ -502,6 +512,9 @@ export class Conductor {
   private batchQueue: { task: Task; resolve: () => void }[] = []; // W6.2: judged-pass tasks waiting for a batch
   private readonly mergeReadyAt = new Map<string, number>();
   private readonly workerUse = new Map<string, { turns: number; usd: number }>(); // W6.5: worker turns and dollars per task, all attempts
+  // Run budget ceiling: the dollar caps handed to sessions still in flight. A new session may only take what is
+  // left after spend so far and these reservations, so concurrent sessions cannot jointly overrun runBudgetUsd.
+  private reservedUsd = 0;
   private cacheWarmed = false; // W6.4: the first worker has started acting, so its prompt prefix is cached
   private wakeScheduler: () => void = () => {};
   private readonly warmSignal = new Promise<void>((r) => { this.wakeScheduler = r; });
@@ -891,9 +904,10 @@ export class Conductor {
     const cfg = this.store.config();
 
     for (;;) {
-      if (run.costUsd >= cfg.runBudgetUsd) {
+      // Spend alone below the session minimum: nothing in flight can hand money back, so the queue is done.
+      if (cfg.runBudgetUsd - run.costUsd < MIN_SESSION_USD) {
         for (const t of run.tasks) {
-          if (t.status === 'pending' || t.status === 'repair') this.fail(t, `run budget $${cfg.runBudgetUsd} exhausted`);
+          if (t.status === 'pending' || t.status === 'repair') this.fail(t, runBudgetReason(cfg.runBudgetUsd));
         }
       }
       const ready = run.tasks.filter(
@@ -902,6 +916,9 @@ export class Conductor {
       // W6.1 single writer: a task with an overlapping footprint waits for the in-flight one to finish.
       const running = run.tasks.filter((t) => inflight.has(t.id));
       let slots = Math.max(0, cfg.concurrency - inflight.size);
+      // Only the in-flight reservations are in the way: wait for them to settle rather than start a session
+      // with no budget (it would be refused) or fail tasks the unspent reservations may still pay for.
+      if (inflight.size > 0 && this.budgetLeft() < MIN_SESSION_USD) slots = 0;
       // W6.4: start one worker and let it begin acting (cache warm) before the siblings fan out.
       const warming = cfg.cache?.discipline.enabled && cfg.cache.discipline.warmFirst && !this.cacheWarmed;
       if (warming && inflight.size > 0) slots = 0;
@@ -987,6 +1004,8 @@ export class Conductor {
     const work = n > 1
       ? await this.sampleBest(task, wt, base, n, prompt, common)
       : await this.call('worker', task, task.attempts, { prompt, cwd: wt.path, ...common });
+    // Refused before it started: no work to judge, and a repair attempt would be refused the same way.
+    if (isBudgetRefusal(work)) return this.fail(task, work.error!);
     g.commitAll(wt.path, `${task.id}: ${task.title} (orchestra attempt ${task.attempts})`);
 
     // A flagged contradiction stops the loop: no judge, no repair, not counted as a failure.
@@ -1017,7 +1036,7 @@ export class Conductor {
     // The worker is not at fault, so do not spend a repair attempt (which would redo it).
     if (verdict.judgeError) {
       this.ledgerOutcome(task, 'judge_error');
-      return this.fail(task, `judge failed twice: ${verdict.judgeError}. Raise budgetUsd.judge in the harness config or re-run`);
+      return this.fail(task, judgeFailReason(verdict.judgeError));
     }
 
     // ---- self-correction ----
@@ -1286,7 +1305,7 @@ export class Conductor {
     g.removeWorktree(this.store.root, wtB.path);
     g.deleteBranch(this.store.root, wtB.branch);
     this.ledgerOutcome(task, 'judge_error');
-    this.fail(task, `judge failed twice: ${error}. Raise budgetUsd.judge in the harness config or re-run`);
+    this.fail(task, judgeFailReason(error));
   }
 
   // Cheap deterministic checks that run before any judge call.
@@ -1872,6 +1891,12 @@ export class Conductor {
       docker: { image: opt.image, gvisor: opt.gvisor, network: opt.network },
       model: this.harness.config.models.worker, // the claude probe is a worker-shaped session
     });
+    // The claude probes are model sessions: their spend is run spend, so it counts against runBudgetUsd too.
+    if (res.costUsd > 0) {
+      this.run.costUsd = round(this.run.costUsd + res.costUsd, 4);
+      this.store.ledger({ t: Date.now(), run: this.run.id, kind: this.run.kind, harness: this.harness.version, role: 'worker', attempt: 0, model: this.harness.config.models.worker, ok: res.ok, costUsd: res.costUsd, durationMs: 0, turns: 0, outcome: 'sandbox_preflight' });
+      this.emit('log', `Sandbox pre-flight probes cost $${res.costUsd.toFixed(2)}`, { costUsd: res.costUsd });
+    }
     for (const w of res.warnings) this.emit('log', `Sandbox pre-flight warning: ${w}`);
     if (!res.ok) throw new Error(`Sandbox pre-flight failed, refusing to dispatch workers: ${res.failures.join('; ')}`);
     this.emit('log', 'Sandbox pre-flight passed: blocked host and denied path both failed as expected');
@@ -1893,6 +1918,16 @@ export class Conductor {
     const cap = role === 'worker' && task ? this.workerCap(task, capShares) : undefined;
     const sfx = variant ? `-${variant}` : '';
     const model = modelOverride ?? harness.config.models[role];
+    // runBudgetUsd is a ceiling on the whole run: each session's own cap is cut to what is left of it, and a
+    // session that would get less than MIN_SESSION_USD is not started at all.
+    const left = this.budgetLeft();
+    if (left < MIN_SESSION_USD) {
+      const error = runBudgetReason(this.cfg.runBudgetUsd);
+      this.emit('log', `${role}${task ? ` ${task.id}` : ''} not started: ${error}`, { budget: { runBudgetUsd: this.cfg.runBudgetUsd, spentUsd: run.costUsd, reservedUsd: round(this.reservedUsd, 4) } }, task?.id, role);
+      return { ok: false, text: '', costUsd: 0, turns: 0, durationMs: 0, error };
+    }
+    const sessionUsd = round(Math.min(cap ? cap.usd : harness.config.budgetUsd[role], left), 4);
+    this.reservedUsd += sessionUsd;
     const agent: ActiveAgent = {
       key: `${role}:${task?.id ?? '-'}:${attempt}${sfx}`,
       role,
@@ -1915,7 +1950,7 @@ export class Conductor {
         role,
         model,
         system: harness.prompts[role],
-        budgetUsd: cap ? cap.usd : harness.config.budgetUsd[role],
+        budgetUsd: sessionUsd,
         ...(cap ? { maxTurns: cap.turns } : {}),
         timeoutMs: TIMEOUT_MS[role],
         logFile: this.store.path('runs', run.id, 'logs', `${task?.id ?? 'run'}-${role}-${attempt}${sfx}.jsonl`),
@@ -1935,6 +1970,8 @@ export class Conductor {
       // A runner that throws must not leave a phantom active agent behind.
       run.active = run.active.filter((a) => a !== agent);
       throw e;
+    } finally {
+      this.reservedUsd = Math.max(0, this.reservedUsd - sessionUsd);
     }
     run.active = run.active.filter((a) => a !== agent);
     if (role === 'worker' && task) {
@@ -1961,11 +1998,16 @@ export class Conductor {
       cacheReadTokens: res.usage?.cacheReadTokens,
       cacheWriteTokens: res.usage?.cacheWriteTokens,
       toolCounts: res.toolCounts,
-      ...(cap ? { cap: { turns: cap.turns, usd: cap.usd } } : {}),
+      ...(cap ? { cap: { turns: cap.turns, usd: sessionUsd } } : {}),
     });
     this.emit('agent.end', `${role}${task ? ` ${task.id}` : ''} ${res.ok ? 'finished' : `error: ${res.error}`} ($${res.costUsd.toFixed(2)}, ${Math.round(res.durationMs / 1000)}s)`, undefined, task?.id, role);
     this.save();
     return res;
+  }
+
+  // Dollars a new session may still take: the run ceiling less spend so far and the caps of sessions in flight.
+  private budgetLeft(): number {
+    return this.cfg.runBudgetUsd - this.run.costUsd - this.reservedUsd;
   }
 
   private ledgerOutcome(task: Task, outcome: string, footprint?: { planned: string[]; changed: string[]; declared?: string[] }): void {

@@ -217,6 +217,23 @@ export interface PreflightResult {
   ok: boolean;
   failures: string[]; // each names the probe: "network probe ..." or "read probe ..."
   warnings: string[]; // probes that could not be run meaningfully; the run continues but should say so
+  costUsd: number; // model spend of the probes (claude backend only: its probes are real sessions), 0 otherwise
+}
+
+// Spend of one claude -p stream-json session from its stdout. total_cost_usd is cumulative across result
+// messages (see the runner in src/agent.ts), so the largest one is the session total. Non-JSON lines are skipped.
+export function probeSessionCost(stdout: string): number {
+  let cost = 0;
+  for (const line of stdout.split('\n')) {
+    if (!line.includes('"result"')) continue;
+    try {
+      const msg = JSON.parse(line);
+      if (msg?.type === 'result' && Number.isFinite(Number(msg.total_cost_usd))) cost = Math.max(cost, Number(msg.total_cost_usd));
+    } catch {
+      // not a JSON line (stderr noise, partial write): nothing to count
+    }
+  }
+  return cost;
 }
 
 const OPEN = 'ORCHESTRA_PROBE_OPEN';
@@ -309,6 +326,7 @@ export function preflightSandbox(policy: SandboxPolicy, backend: 'srt' | 'claude
   const dir = mkdtempSync(join(tmpdir(), 'orchestra-preflight-'));
   const failures: string[] = [];
   const warnings: string[] = [];
+  let costUsd = 0;
   let canaryDir: string | null = null;
   try {
     // srt and claude can deny reads, so the canary sits in tmp and its dir is added to the deny list.
@@ -346,6 +364,7 @@ export function preflightSandbox(policy: SandboxPolicy, backend: 'srt' | 'claude
         failures.push(`${name} probe: sandbox wrapper could not start (${(e as Error).message})`);
         return;
       }
+      if (backend === 'claude') costUsd += probeSessionCost(r.stdout);
       if (r.error) return void failures.push(`${name} probe: sandbox wrapper could not start (${r.error})`);
       const out = `${r.stdout}\n${r.stderr}`;
       // For docker the image's ENTRYPOINT sits between the wrapper and node and can rewrite argv too,
@@ -399,7 +418,7 @@ export function preflightSandbox(policy: SandboxPolicy, backend: 'srt' | 'claude
     rmSync(dir, { recursive: true, force: true });
     if (canaryDir) rmSync(canaryDir, { recursive: true, force: true });
   }
-  return { ok: failures.length === 0, failures, warnings };
+  return { ok: failures.length === 0, failures, warnings, costUsd: Math.round(costUsd * 10_000) / 10_000 };
 }
 
 function shellQuote(s: string): string {
