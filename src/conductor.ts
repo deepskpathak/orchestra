@@ -515,6 +515,7 @@ export class Conductor {
   // Run budget ceiling: the dollar caps handed to sessions still in flight. A new session may only take what is
   // left after spend so far and these reservations, so concurrent sessions cannot jointly overrun runBudgetUsd.
   private reservedUsd = 0;
+  private reservationWaiters: (() => void)[] = []; // sessions waiting for an in-flight reservation to be released
   private cacheWarmed = false; // W6.4: the first worker has started acting, so its prompt prefix is cached
   private wakeScheduler: () => void = () => {};
   private readonly warmSignal = new Promise<void>((r) => { this.wakeScheduler = r; });
@@ -1920,6 +1921,11 @@ export class Conductor {
     const model = modelOverride ?? harness.config.models[role];
     // runBudgetUsd is a ceiling on the whole run: each session's own cap is cut to what is left of it, and a
     // session that would get less than MIN_SESSION_USD is not started at all.
+    // Only other sessions' reservations are in the way: wait for them to settle rather than refuse. Their unspent
+    // caps come back, and refusing would fail a task (a sibling worker can hold the whole remainder for a while).
+    while (this.budgetLeft() < MIN_SESSION_USD && this.reservedUsd > 0 && this.cfg.runBudgetUsd - run.costUsd >= MIN_SESSION_USD) {
+      await new Promise<void>((r) => this.reservationWaiters.push(r));
+    }
     const left = this.budgetLeft();
     if (left < MIN_SESSION_USD) {
       const error = runBudgetReason(this.cfg.runBudgetUsd);
@@ -1972,6 +1978,9 @@ export class Conductor {
       throw e;
     } finally {
       this.reservedUsd = Math.max(0, this.reservedUsd - sessionUsd);
+      // Wake every waiter only once spend is recorded (below, synchronously) so each sees the real remainder.
+      const waiters = this.reservationWaiters.splice(0);
+      if (waiters.length) queueMicrotask(() => waiters.forEach((w) => w()));
     }
     run.active = run.active.filter((a) => a !== agent);
     if (role === 'worker' && task) {
