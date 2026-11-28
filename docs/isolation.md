@@ -30,7 +30,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends git ca-certific
  && npm install -g @anthropic-ai/claude-code@2.1.332 && npm cache clean --force
 ```
 
-Build it with `docker build -t orchestra-worker:latest .`. Credentials reach the container only as `ANTHROPIC_*` and `CLAUDE_*` environment variables, so a login kept in the macOS keychain is not visible there. Export `ANTHROPIC_API_KEY`, or `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token`, before the run.
+Build it with `docker build -t orchestra-worker:latest .`. On macOS the docker daemon runs in a VM (colima or Docker Desktop), and only the host paths that VM shares can be mounted. colima shares only `$HOME` by default. A repo outside the shared paths (for example under `/tmp`) mounts as an empty directory, and the worker finds nothing to edit. Pre-flight checks for this: it writes a marker into the worktree and fails if the container cannot read it back. Keep the repo under `$HOME`, or add its path to `mounts` in `~/.colima/default/colima.yaml`. Credentials reach the container only as `ANTHROPIC_*` and `CLAUDE_*` environment variables, so a login kept in the macOS keychain is not visible there. Export `ANTHROPIC_API_KEY`, or `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token`, before the run.
 
 ## Limit you must decide on: the model API
 
