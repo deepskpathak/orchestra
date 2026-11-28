@@ -8,7 +8,7 @@ import type { AgentRequest, Runner } from '../src/agent.ts';
 import { runGoal } from '../src/conductor.ts';
 import { fakeRunner } from '../src/fake.ts';
 import { DEFAULT_IMAGE } from '../src/container.ts';
-import { buildSandboxPolicy, preflightSandbox, PROBE_ARGV_POSITIONAL, PROBE_TRAILING_ARGS, type ProbeExec } from '../src/sandbox.ts';
+import { buildSandboxPolicy, preflightSandbox, PROBE_ARGV_POSITIONAL, PROBE_PROMPT, PROBE_TRAILING_ARGS, probeWorkerArgs, type ProbeExec } from '../src/sandbox.ts';
 import { tempRepo } from './helpers.ts';
 
 const policy = buildSandboxPolicy({ worktree: '/wt', tmpDir: '/tmp', home: '/home/u', hiddenScenarioDir: '/r/.orchestra/hidden', gitCommonDir: '/r/.git' });
@@ -127,21 +127,23 @@ test('wrapper missing or silent: not ok (fail closed)', () => {
   assert.equal(preflightSandbox(policy, 'srt', withControl(() => { throw new Error('boom'); }), opts).ok, false);
 });
 
-test('srt probes get a srt-shaped settings file and claude probes the Claude shape', () => {
+test('srt probes get a srt-shaped settings file and claude probes carry the Claude shape inline, like workers', () => {
   const read = (backend: 'srt' | 'claude') => {
     let shape: any;
-    const exec: ProbeExec = (_c, args) => {
-      const f = args[args.indexOf('--settings') + 1];
-      if (f && !shape) shape = JSON.parse(readFileSync(f, 'utf8'));
+    const exec: ProbeExec = (c, args) => {
+      const v = args[args.indexOf('--settings') + 1];
+      // srt reads a settings file; a claude worker gets its sandbox block inline in --settings JSON.
+      if (c !== 'node' && v && !shape) shape = backend === 'srt' ? JSON.parse(readFileSync(v, 'utf8')) : JSON.parse(v);
       return result(BLOCKED);
     };
     preflightSandbox(policy, backend, exec, opts);
     return shape;
   };
   assert.ok(read('srt').filesystem.denyRead);
-  assert.equal(read('claude').sandbox.enabled, true);
+  const claude = read('claude');
+  assert.equal(claude.sandbox.enabled, true);
+  assert.ok(claude.hooks.PreToolUse, 'the worker guard hook rides along, as in a worker session');
 });
-
 test('docker network none warns that the model API is unreachable; a chosen network skips the probe', () => {
   const d = dockerEnv();
   try {
@@ -238,40 +240,69 @@ const realInner = (backend: 'srt' | 'docker', tweak: (inner: string[]) => string
 };
 const argvFailures = (r: { failures: string[] }) => r.failures.filter((f) => /argv was not passed through/.test(f));
 
-test('probe args end with node -e script, a positional and worker-like trailing args with no -- (srt and docker)', () => {
-  assert.ok(Object.isFrozen(PROBE_TRAILING_ARGS));
-  assert.ok(PROBE_TRAILING_ARGS.includes('--settings') && PROBE_TRAILING_ARGS.includes('-p'));
-  const json = PROBE_TRAILING_ARGS[PROBE_TRAILING_ARGS.indexOf('--settings') + 1];
-  assert.ok(json.includes('"') && json.includes(' ') && json.includes('$'));
+test('probe args end with node -e script, a positional and the real worker args with no -- (srt and docker)', () => {
   for (const backend of ['srt', 'docker'] as const) {
     const seen: string[][] = [];
-    preflightSandbox(policy, backend, (c, args) => (c !== 'node' && seen.push(args), result(c === 'node' ? OPEN : BLOCKED)), opts);
+    preflightSandbox(policy, backend, (c, args) => (c !== 'node' && seen.push(args), result(c === 'node' ? OPEN : BLOCKED)), { ...opts, model: 'haiku' });
     assert.ok(seen.length >= 1);
     for (const args of seen) {
-      const n = args.length - PROBE_TRAILING_ARGS.length;
-      assert.deepEqual(args.slice(n), PROBE_TRAILING_ARGS);
-      assert.deepEqual([args[n - 4], args[n - 3], args[n - 1]], ['node', '-e', PROBE_ARGV_POSITIONAL]);
+      const inner = args.slice(args.indexOf('node'));
+      assert.deepEqual([inner[0], inner[1], inner[3]], ['node', '-e', PROBE_ARGV_POSITIONAL]);
+      const trailing = inner.slice(4);
+      // Built by buildArgs, so the same flags a worker gets, in the same order.
+      assert.deepEqual(trailing, probeWorkerArgs(opts.cwd, { policy, backend }, 'haiku'), backend);
+      assert.deepEqual(trailing.slice(0, 2), ['-p', PROBE_PROMPT]);
+      assert.equal(trailing[trailing.indexOf('--model') + 1], 'haiku');
+      const json = trailing[trailing.indexOf('--settings') + 1];
+      assert.ok(json.includes('"') && json.includes(' ') && PROBE_PROMPT.includes('$'));
       // The only `--` is srt's own, before node: nothing ends srt's option parsing ahead of the trailing
       // --settings, so a srtArgs that lost its `--` would see it, like with a real worker (#74).
-      const inner = args.slice(args.indexOf('node'));
       assert.ok(!inner.includes('--'), inner.join(' '));
     }
   }
 });
-
-test('claude probe args carry no trailing probe args', () => {
-  const seen: string[][] = [];
-  preflightSandbox(policy, 'claude', (c, args) => (c !== 'node' && seen.push(args), result(c === 'node' ? OPEN : BLOCKED)), opts);
-  assert.ok(seen.length >= 1);
-  for (const args of seen) {
+test('claude probe is a worker-shaped claude session whose Bash command carries the trailing probe args', () => {
+  assert.ok(Object.isFrozen(PROBE_TRAILING_ARGS));
+  const seen: { c: string; args: string[] }[] = [];
+  preflightSandbox(policy, 'claude', (c, args) => (c !== 'node' && seen.push({ c, args }), result(c === 'node' ? OPEN : BLOCKED)), { ...opts, model: 'haiku' });
+  assert.equal(seen.length, 2);
+  for (const { c, args } of seen) {
+    assert.equal(c, 'claude');
     assert.equal(args[0], '-p');
-    assert.ok(!args.includes('--'));
     assert.equal(args.filter((a) => a === '--settings').length, 1);
-    assert.ok(!args.some((a) => PROBE_TRAILING_ARGS.slice(1).includes(a) && a !== '--settings' && a !== '-p'));
-    assert.deepEqual(args.slice(-2), ['--output-format', 'text']);
+    assert.equal(args[args.indexOf('--model') + 1], 'haiku');
+    assert.equal(args[args.indexOf('--output-format') + 1], 'stream-json');
+    assert.ok(args.includes('--max-budget-usd') && args.includes('--max-turns'));
+    assert.equal(args[args.indexOf('--allowedTools') + 1], 'Bash');
+    assert.ok(args[1].includes(` ${PROBE_ARGV_POSITIONAL} '--settings' `), args[1]);
   }
 });
 
+// Stands in for Claude Code: takes the command from the probe prompt, lets `mangle` play the part of a
+// wrapper or a model that rewrites it, and runs it for real through bash like the Bash tool. The network
+// probe and the control are never executed.
+const claudeBash = (mangle: (cmd: string) => string = (x) => x): ProbeExec => (c, args) => {
+  if (c === 'node') return result(BLOCKED);
+  const cmd = args[1].split('\n').slice(1).join('\n');
+  assert.ok(!cmd.includes('fetch('), 'the network probe must never be executed for real');
+  const r = spawnSync('bash', ['-c', mangle(cmd)], { encoding: 'utf8', timeout: 15_000 });
+  return { status: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '', error: r.error?.message };
+};
+
+test('claude probe: intact Bash argv passes; a dropped or re-quoted arg fails with the argv reason', () => {
+  assert.deepEqual(argvFailures(preflightSandbox(policy, 'claude', claudeBash(), opts)), []);
+  const dropP = (cmd: string) => cmd.replace(" '-p' ", ' ');
+  const unquoted = (cmd: string) => {
+    const quoted = `'${PROBE_TRAILING_ARGS[3]}'`; // the prompt-like value: spaces, double quotes and $USER
+    assert.ok(cmd.includes(quoted), cmd);
+    return cmd.replace(quoted, PROBE_TRAILING_ARGS[3]); // unquoted, bash splits it and expands $USER
+  };
+  for (const mangle of [dropP, unquoted]) {
+    const r = preflightSandbox(policy, 'claude', claudeBash(mangle), opts);
+    assert.equal(r.ok, false);
+    assert.ok(argvFailures(r)[0]?.includes("Claude Code's Bash sandbox wrapper, or the model retyping the command"), r.failures.join('; '));
+  }
+});
 test('intact argv really executed via spawnSync: no argv failure', () => {
   for (const backend of ['srt', 'docker'] as const) {
     const r = preflightSandbox(policy, backend, realInner(backend), opts);

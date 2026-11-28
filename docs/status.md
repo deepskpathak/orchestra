@@ -1,6 +1,6 @@
 # Project status
 
-Last updated 2026-11-25.
+Last updated 2026-11-28.
 
 ## Where things stand
 
@@ -20,11 +20,11 @@ Each milestone went through its own branch, a code review with one fix commit pe
 
 ## Since 0.8.0 (2026-11-25)
 
-- **Merged:** the GitHub Pages site in `site/` (#87).
-- **Open PRs:**
+- **Merged:** the GitHub Pages site in `site/` (#87), and on 2026-11-28:
+  - #122 fixes judge calibration, which read `passThreshold` from the wrong config, so `orchestra stats` and the `evolve.minJudgeAgreement` gate counted every judge verdict as a fail.
   - #120 makes bench rows record `verificationModes` and, when a check fails, `checkOutput`.
   - #121 builds the sandbox pre-flight probes through the worker code path and adds an argv check for the claude backend.
-  - #122 fixes judge calibration, which read `passThreshold` from the wrong config, so `orchestra stats` and the `evolve.minJudgeAgreement` gate counted every judge verdict as a fail.
+- **Open PRs:**
   - #88 holds the W8 plan.
 - **Open epics:** W8 (#89 to #105) makes Orchestra runtime and model agnostic. W10 (#106 to #119) is the OneAM integration R&D.
 - **H2 rerun:** 18 runs, $38.69. H2 is not supported; see below and [the preregistration and results](research/h2-rerun.md).
@@ -102,7 +102,7 @@ B1 (agreement at least 0.10 higher) was met by one run. B2 (fewer merged-but-wro
 - `orchestra approve --by` (M6) is an advisory four-eyes check against a free-text name. It is not authenticated identity.
 - srt on Linux: `denyRead` globs such as `**/.env` are expanded to the files that exist when the worker starts, so a `.env` created mid-run is readable from a shell. macOS matches the globs as patterns.
 - srt wraps the worker argv into one `bash -c` string. On Linux one argument is capped at 128 KiB, so a very large prompt or system prompt would fail to spawn (E2BIG). The harness prompt files total about 22 KB today, but task text, lessons and repair notes add to that and have not been measured.
-- The sandbox pre-flight probes are built through the worker code path (`wrapCommand` and `buildCommand` in `src/agent.ts`) and check argv pass-through for every backend once #121 merges. The claude probe passed against the real Claude Code sandbox on 2026-11-25. The srt and docker probes are checked against fakes only.
+- The sandbox pre-flight probes are built through the worker code path (`wrapCommand` and `buildCommand` in `src/agent.ts`) and check argv pass-through for every backend, including Claude Code's Bash sandbox wrapper (#121). The claude probe passed against the real Claude Code sandbox on 2026-11-25. The srt and docker probes are checked against fakes only.
 - `orchestra resume` reloads the hidden scenarios, contract and atlas from planning but not per-task in-memory state such as worker budget use from the first pass; resumed tasks start fresh. It runs no automatic evolution check, unlike `orchestra run`. Its isolation check compares free-form settings: a different docker image or network counts as weaker because Orchestra cannot rank them. The resume lock trusts a pid, so a reused pid can make a stale lock look live (delete the lock file). Checked with the fake runner only.
 
 ## Recommended next steps
@@ -111,15 +111,14 @@ Done on 2026-10-26: `claude -p --max-turns` confirmed on Claude Code 2.1.310 (hi
 
 Done on 2026-10-27: real end-to-end runs with the Claude Code sandbox (above), and their fixes merged (#77, #78). H2 pilot (#80). `orchestra resume` for runs that end `awaiting_approval` (#81). Integrity false positive on test fakes (#82). Shared append-only files out of footprint overlap (#83). Budget lines logged (#84). Released as 0.8.0.
 
-Done on 2026-11-25: bench row diagnostics (#120), pre-flight probes through the worker code path (#121), the calibration threshold fix (#122), the H2 rerun, the first real `--sandbox claude` run of the new probe, the first budget cap run, and the whitepaper and blog updated for 0.8.0.
+Done on 2026-11-25: bench row diagnostics (#120), pre-flight probes through the worker code path (#121), the calibration threshold fix (#122) (all three merged on 2026-11-28), the H2 rerun, the first real `--sandbox claude` run of the new probe, the first budget cap run, and the whitepaper and blog updated for 0.8.0.
 
 Recommendations, in priority order:
 
-1. **Merge #120, #121 and #122.** They are independent. Whichever merges second needs a trivial `CHANGELOG.md` rebase.
-2. **Decide what `runBudgetUsd` should mean.** Today it only stops dispatch. Either make it a ceiling (skip the librarian and stop in-flight sessions once it is reached, and count the pre-flight probes), or rename and document it as a dispatch cap. Every cost estimate in this file was low because of it.
-3. **Make H2 measurable before spending on it again.** Both H2 runs had workers pass almost every hidden check, so merged-but-wrong never happened. Add goals where workers fail the hidden check part of the time (adversarial edge cases, under-specified goals, larger refactors), and keep the bench stores of failed tasks so a T2 failure can be read after the run. Budget about $2.20 per run.
-4. **Prove srt and docker.** Install srt and docker (both new tools on the machine, so they need approval), then make one small real run with each. sandbox-exec is used by srt on macOS rather than being a separate backend.
-5. **Gather H1 from new evolution cycles.** Unchanged: check the archive after a few normal goal runs.
-6. **Make the M6 batch-merge interleaving test deterministic** if it flakes in CI. Under bun, `eval replays interleave candidate and incumbent` also showed up as timing-sensitive.
-7. **Plan H3 to H8.** Preregister each with bars and a cost estimate that uses the real per-run cost.
-8. **Choose between the W8 and W10 epics** and review #88.
+1. **Decide what `runBudgetUsd` should mean.** Today it only stops dispatch. Either make it a ceiling (skip the librarian and stop in-flight sessions once it is reached, and count the pre-flight probes), or rename and document it as a dispatch cap. Every cost estimate in this file was low because of it.
+2. **Make H2 measurable before spending on it again.** Both H2 runs had workers pass almost every hidden check, so merged-but-wrong never happened. Add goals where workers fail the hidden check part of the time (adversarial edge cases, under-specified goals, larger refactors), and keep the bench stores of failed tasks so a T2 failure can be read after the run. Budget about $2.20 per run.
+3. **Prove srt and docker.** Install srt and docker (both new tools on the machine, so they need approval), then make one small real run with each. sandbox-exec is used by srt on macOS rather than being a separate backend.
+4. **Gather H1 from new evolution cycles.** Unchanged: check the archive after a few normal goal runs.
+5. **Make the M6 batch-merge interleaving test deterministic** if it flakes in CI. Under bun, `eval replays interleave candidate and incumbent` also showed up as timing-sensitive.
+6. **Plan H3 to H8.** Preregister each with bars and a cost estimate that uses the real per-run cost.
+7. **Choose between the W8 and W10 epics** and review #88.
