@@ -10,6 +10,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - The `claude` sandbox pre-flight probe now checks argv pass-through: the Bash command it asks the model to run carries `--settings <json> -p <prompt>` trailing arguments, and the probe script fails pre-flight if they do not arrive byte for byte.
 - Project website in `site/`: a single static page (no build step, no dependencies) with an animated, scrubbable explainer film, feature overview, quick start, docs tabs and how-tos. `.github/workflows/pages.yml` deploys it to GitHub Pages on pushes to `main` that touch `site/`.
+- Bench rows in `results.jsonl` now record `verificationModes` (factory rows; `[]` means none) and, when the hidden check failed, `checkOutput` (the last 8 lines of its output, or why it did not run). `orchestra stats` uses the row's modes for judge agreement by verification mode, so bench runs are no longer all counted as `none` because their run files live in throwaway stores. Older rows fall back to the run lookup as before.
+
+### Fixed
+
+- Judge calibration (`orchestra stats`, `orchestra bench calibrate --sample` and the `evolve.minJudgeAgreement` gate) read `passThreshold` from the project config, which has no such key. Every judge verdict counted as a fail, so agreement equalled the hidden-check failure rate. It now uses the incumbent harness's `passThreshold`.
 
 ### Changed
 
