@@ -16,7 +16,7 @@ Defaults come from `DEFAULT_PROJECT_CONFIG` in `src/store.ts`. Missing keys fall
 | `allowedTools` | string[] | `["Read", "Edit", "Write", "Glob", "Grep", "Bash"]` | Tools workers may use. |
 | `disallowedTools` | string[] | `["WebFetch", "WebSearch", "Bash(git push:*)", "Bash(curl:*)", "Bash(wget:*)"]` | Tools workers may not use. Keeps workers off the network and from publishing at the tool-permission level. A guard hook adds a deny-list backstop. Neither is OS isolation; see the `sandbox` section below. |
 | `permissionMode` | string | `"acceptEdits"` | Permission mode passed to worker sessions. |
-| `runBudgetUsd` | number | `20` | Spend cap per run. Once reached, tasks that are pending or in repair fail with "run budget exhausted". |
+| `runBudgetUsd` | number | `20` | Spend ceiling per run, covering every session (planner, workers, judges, librarian) and the claude sandbox pre-flight probes. Each session's own cap (`budgetUsd` in the harness config) is cut to what is left of the run after spend so far and the caps of sessions still in flight. A session that would get under $0.05 is not started, and pending or repair tasks then fail with "run budget $N exhausted". Claude Code checks `--max-budget-usd` between turns, so a run can end up to one turn past the ceiling. |
 | `judgeTiers` | object | see below | Tiered judging settings. |
 | `preJudge` | object | see below | Deterministic checks before any judge call. |
 | `fastPath` | object | see below | Single-task planning for small goals. |
