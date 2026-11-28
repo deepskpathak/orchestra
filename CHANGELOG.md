@@ -14,13 +14,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Four hard bench goals for measuring verification (H2): `calc-expr`, `args-refactor-preserve`, `text-wrap-unicode` and `rec-csv-strict`, with hidden checks and oracles, and the optional arms `h2h-none` and `h2h-agentic` (`runBudgetUsd` 3, `testCommand` `node --test`). The draft preregistration is `docs/research/h2-hard.md`.
 - Bench rows of factory runs whose hidden check failed, or that left a task unmerged, now carry `kept`: the run's store directory and one diff per run branch are copied to `.orchestra/bench/<benchId>/kept/<arm>-<goal>-r<repeat>/` before the throwaway repo is deleted.
 
+### Changed
+
+- `runBudgetUsd` is now a ceiling on a run's spend, not only a stop on dispatch. Every session's cap (`--max-budget-usd`) is cut to what is left of the run after spend so far and the caps of sessions still in flight, so concurrent sessions cannot jointly pass it. A session that would get under $0.05 is not started (a `log` event says so, and no ledger row is written): the librarian is skipped, a judge that cannot start fails its task with "run budget $N exhausted" rather than the `budgetUsd.judge` advice, and pending tasks wait while in-flight reservations settle. The claude sandbox pre-flight probes' spend now counts as run spend and gets a ledger row with outcome `sandbox_preflight`. Before, a run with `runBudgetUsd` 0.1 spent $1.28, and the H2 bench arms capped at $1.50 spent about $2.15 per run; under the ceiling those arms now cut sessions short instead. Claude Code checks `--max-budget-usd` between turns, so a run can still end up to one turn past the ceiling.
+- Sandbox pre-flight probes are built through the worker code path. `buildCommand` in `src/agent.ts` now delegates to a new `wrapCommand`, which the `srt` and `docker` probes share, and their trailing arguments are the real `buildArgs` output for a worker instead of a hand-written argv. The `claude` probe is a worker-shaped session from `buildCommand` (`stream-json`, the guard hook, the inline sandbox `--settings`, `--max-budget-usd 0.5`, `--max-turns 4`, the run's worker model) instead of a separate `--settings` file and `--output-format text`.
+
 ### Fixed
 
 - Judge calibration (`orchestra stats`, `orchestra bench calibrate --sample` and the `evolve.minJudgeAgreement` gate) read `passThreshold` from the project config, which has no such key. Every judge verdict counted as a fail, so agreement equalled the hidden-check failure rate. It now uses the incumbent harness's `passThreshold`.
-
-### Changed
-
-- Sandbox pre-flight probes are built through the worker code path. `buildCommand` in `src/agent.ts` now delegates to a new `wrapCommand`, which the `srt` and `docker` probes share, and their trailing arguments are the real `buildArgs` output for a worker instead of a hand-written argv. The `claude` probe is a worker-shaped session from `buildCommand` (`stream-json`, the guard hook, the inline sandbox `--settings`, `--max-budget-usd 0.5`, `--max-turns 4`, the run's worker model) instead of a separate `--settings` file and `--output-format text`.
 
 ## [0.8.0] - 2026-10-27
 

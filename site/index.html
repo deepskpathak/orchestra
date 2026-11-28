@@ -211,7 +211,7 @@
         <article class="tile tile-wide">
           <div class="tile-art art-budget" aria-hidden="true">$</div>
           <h3>Budgets in code</h3>
-          <p>Each run has a spend cap (<code>runBudgetUsd</code>, default $20). Tasks stop when it is reached.</p>
+          <p>Each run has a spend cap (<code>runBudgetUsd</code>, default $20). Every session, the planner, judge and librarian included, is capped to what is left of it.</p>
         </article>
       </div>
     </section>
@@ -403,7 +403,7 @@ orchestra run "&lt;goal&gt;" --unattended</code></pre></div>
           <div class="cfg">
             <div class="cfg-row"><code>concurrency</code><span>3</span><p>Maximum tasks running in parallel.</p></div>
             <div class="cfg-row"><code>testCommand</code><span>auto</span><p>Run in each worktree and on the integration branch. Verification is much stronger with one.</p></div>
-            <div class="cfg-row"><code>runBudgetUsd</code><span>20</span><p>Spend cap per run.</p></div>
+            <div class="cfg-row"><code>runBudgetUsd</code><span>20</span><p>Spend ceiling per run, across every session.</p></div>
             <div class="cfg-row"><code>judgeTiers</code><span>off</span><p>A cheap judge first, escalating to the strong judge near the threshold.</p></div>
             <div class="cfg-row"><code>verification.*</code><span>off</span><p>Judge panel, agentic judge, acceptance contracts, oracles, mutation score.</p></div>
             <div class="cfg-row"><code>sandbox.allowedHosts</code><span>[]</span><p>Extra hosts sandboxed workers may reach (the model API is always allowed).</p></div>
